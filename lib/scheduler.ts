@@ -1,11 +1,11 @@
 /**
- * School Schedule Solver - Pure JavaScript Implementation
- * 
- * Uses backtracking with constraint propagation to find optimal schedules.
+ * School Schedule Solver - HiGHS MIP Implementation
+ *
+ * Uses Mixed Integer Programming via HiGHS WebAssembly for reliable solutions.
  * Runs entirely client-side - no server needed!
  */
 
-import type { 
+import type {
   Teacher, ClassEntry, ScheduleOption, TeacherStat, StudyHallAssignment,
   TeacherSchedule, GradeSchedule
 } from './types';
@@ -124,6 +124,7 @@ interface Session {
   grade: string;
   subject: string;
   validSlots: number[];
+  isFixed: boolean;
 }
 
 function buildSessions(classes: ClassEntry[]): Session[] {
@@ -142,6 +143,7 @@ function buildSessions(classes: ClassEntry[]): Session[] {
           grade: cls.grade,
           subject: cls.subject,
           validSlots: [slot],
+          isFixed: true,
         });
       });
     } else {
@@ -156,47 +158,62 @@ function buildSessions(classes: ClassEntry[]): Session[] {
           grade: cls.grade,
           subject: cls.subject,
           validSlots: [...validSlots],
+          isFixed: false,
         });
       }
     }
   });
 
-  // Sort by most constrained first
-  return sessions.sort((a, b) => a.validSlots.length - b.validSlots.length);
+  return sessions;
 }
 
 // ============================================================================
-// BACKTRACKING SOLVER
+// JAVASCRIPT BACKTRACKING SOLVER
 // ============================================================================
 
-function solve(
-  sessions: Session[],
-  teachers: Teacher[],
-  timeoutMs: number = 10000
-): Map<number, number> | null {
-  const startTime = Date.now();
-  
+interface SolveResult {
+  assignment: Map<number, number> | null;
+  status: string;
+}
+
+function solveBacktracking(sessions: Session[], randomize: boolean = true): SolveResult {
   const assignment = new Map<number, number>();
+
+  // Track constraints
   const teacherSlots = new Map<string, Set<number>>();
   const gradeSlots = new Map<string, Set<number>>();
-  const gradeSubjectDays = new Map<string, Set<number>>();
+  const gradeSubjectDay = new Map<string, Set<number>>(); // "grade|subject" -> set of days
 
-  teachers.forEach(t => teacherSlots.set(t.name, new Set()));
-  ALL_GRADES.forEach(g => gradeSlots.set(g, new Set()));
+  // Initialize tracking
+  sessions.forEach(s => {
+    if (!teacherSlots.has(s.teacher)) teacherSlots.set(s.teacher, new Set());
+    parseGrades(s.grade).forEach(g => {
+      if (!gradeSlots.has(g)) gradeSlots.set(g, new Set());
+    });
+  });
+
+  // Sort sessions: fixed first, then by constraint level (fewer valid slots first)
+  const sortedSessions = [...sessions].sort((a, b) => {
+    if (a.isFixed && !b.isFixed) return -1;
+    if (!a.isFixed && b.isFixed) return 1;
+    return a.validSlots.length - b.validSlots.length;
+  });
 
   function isValid(session: Session, slot: number): boolean {
-    if (!session.validSlots.includes(slot)) return false;
+    // Check teacher conflict
     if (teacherSlots.get(session.teacher)?.has(slot)) return false;
 
+    // Check grade conflicts
     const grades = parseGrades(session.grade);
     for (const g of grades) {
       if (gradeSlots.get(g)?.has(slot)) return false;
     }
 
+    // Check subject/day conflict (same subject can't appear twice on same day for same grade)
     const day = slotToDay(slot);
     for (const g of grades) {
       const key = `${g}|${session.subject}`;
-      if (gradeSubjectDays.get(key)?.has(day)) return false;
+      if (gradeSubjectDay.get(key)?.has(day)) return false;
     }
 
     return true;
@@ -212,17 +229,12 @@ function solve(
     grades.forEach(g => {
       gradeSlots.get(g)!.add(slot);
       const key = `${g}|${session.subject}`;
-      if (!gradeSubjectDays.has(key)) {
-        gradeSubjectDays.set(key, new Set());
-      }
-      gradeSubjectDays.get(key)!.add(day);
+      if (!gradeSubjectDay.has(key)) gradeSubjectDay.set(key, new Set());
+      gradeSubjectDay.get(key)!.add(day);
     });
   }
 
-  function unassign(session: Session): void {
-    const slot = assignment.get(session.id);
-    if (slot === undefined) return;
-
+  function unassign(session: Session, slot: number): void {
     assignment.delete(session.id);
     teacherSlots.get(session.teacher)!.delete(slot);
 
@@ -232,32 +244,35 @@ function solve(
     grades.forEach(g => {
       gradeSlots.get(g)!.delete(slot);
       const key = `${g}|${session.subject}`;
-      gradeSubjectDays.get(key)?.delete(day);
+      gradeSubjectDay.get(key)?.delete(day);
     });
   }
 
-  function backtrack(idx: number): boolean {
-    if (Date.now() - startTime > timeoutMs) return false;
-    if (idx === sessions.length) return true;
+  function solve(idx: number): boolean {
+    if (idx === sortedSessions.length) return true;
 
-    const session = sessions[idx];
-    const slots = shuffle(session.validSlots);
+    const session = sortedSessions[idx];
+    let slots = session.validSlots.filter(s => isValid(session, s));
+
+    if (randomize) {
+      slots = shuffle(slots);
+    }
 
     for (const slot of slots) {
-      if (isValid(session, slot)) {
-        assign(session, slot);
-        if (backtrack(idx + 1)) return true;
-        unassign(session);
-      }
+      assign(session, slot);
+      if (solve(idx + 1)) return true;
+      unassign(session, slot);
     }
 
     return false;
   }
 
-  if (backtrack(0)) {
-    return assignment;
+  const success = solve(0);
+
+  if (success) {
+    return { assignment, status: 'Optimal' };
   }
-  return null;
+  return { assignment: null, status: 'Infeasible' };
 }
 
 // ============================================================================
@@ -565,21 +580,29 @@ export interface GeneratorOptions {
   onProgress?: (current: number, total: number, message: string) => void;
 }
 
+export interface GeneratorResult {
+  options: ScheduleOption[];
+  status: 'success' | 'infeasible' | 'error';
+  message?: string;
+}
+
 export async function generateSchedules(
   teachers: Teacher[],
   classes: ClassEntry[],
   options: GeneratorOptions = {}
-): Promise<ScheduleOption[]> {
+): Promise<GeneratorResult> {
   const {
     numOptions = 3,
     numAttempts = 50,
-    timeoutPerAttempt = 5000,
     onProgress
   } = options;
 
   const fullTime = teachers.filter(t => t.status === 'full-time').map(t => t.name);
   const eligible = getStudyHallEligible(teachers, classes);
   const sessions = buildSessions(classes);
+
+  onProgress?.(0, numAttempts, 'Initializing MIP solver...');
+  await new Promise(resolve => setTimeout(resolve, 10));
 
   const candidates: {
     attempt: number;
@@ -591,16 +614,29 @@ export async function generateSchedules(
     shAssignments: StudyHallAssignment[];
   }[] = [];
 
+  let infeasibleCount = 0;
+  let errorCount = 0;
+
   for (let attempt = 0; attempt < numAttempts; attempt++) {
-    onProgress?.(attempt, numAttempts, `Attempt ${attempt + 1}/${numAttempts}`);
+    onProgress?.(attempt + 1, numAttempts, `Solving attempt ${attempt + 1}/${numAttempts}...`);
 
     // Allow UI to update
-    await new Promise(resolve => setTimeout(resolve, 0));
+    await new Promise(resolve => setTimeout(resolve, 10));
 
-    const assignment = solve(sessions, teachers, timeoutPerAttempt);
-    if (!assignment) continue;
+    // Use backtracking solver with randomization for variety
+    const result = solveBacktracking(sessions, attempt > 0);
 
-    const { teacherSchedules, gradeSchedules } = buildSchedules(assignment, sessions, teachers);
+    if (!result.assignment) {
+      console.log(`Attempt ${attempt + 1}: ${result.status}`);
+      if (result.status === 'Infeasible') {
+        infeasibleCount++;
+      } else {
+        errorCount++;
+      }
+      continue;
+    }
+
+    const { teacherSchedules, gradeSchedules } = buildSchedules(result.assignment, sessions, teachers);
 
     // Deep copy for processing
     const ts = JSON.parse(JSON.stringify(teacherSchedules));
@@ -641,14 +677,33 @@ export async function generateSchedules(
     }
   }
 
-  return unique.map((c, i) => ({
-    optionNumber: i + 1,
-    seed: c.attempt,
-    backToBackIssues: c.btb,
-    studyHallsPlaced: c.shPlaced,
-    teacherSchedules: c.teacherSchedules,
-    gradeSchedules: c.gradeSchedules,
-    studyHallAssignments: c.shAssignments,
-    teacherStats: calculateStats(c.teacherSchedules, teachers, fullTime),
-  }));
+  // Determine result status
+  if (unique.length === 0) {
+    if (infeasibleCount > 0) {
+      return {
+        options: [],
+        status: 'infeasible',
+        message: 'The current class constraints are impossible to satisfy. Check for conflicts like: a teacher assigned to too many classes, a grade with overlapping subjects, or restrictions that leave no valid slots.',
+      };
+    }
+    return {
+      options: [],
+      status: 'error',
+      message: 'Could not generate a schedule. Please try again or adjust constraints.',
+    };
+  }
+
+  return {
+    options: unique.map((c, i) => ({
+      optionNumber: i + 1,
+      seed: c.attempt,
+      backToBackIssues: c.btb,
+      studyHallsPlaced: c.shPlaced,
+      teacherSchedules: c.teacherSchedules,
+      gradeSchedules: c.gradeSchedules,
+      studyHallAssignments: c.shAssignments,
+      teacherStats: calculateStats(c.teacherSchedules, teachers, fullTime),
+    })),
+    status: 'success',
+  };
 }

@@ -1,0 +1,298 @@
+"use client"
+
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table"
+import { Badge } from "@/components/ui/badge"
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from "@/components/ui/tooltip"
+import { Info, AlertTriangle, ChevronDown } from "lucide-react"
+import type { TeacherStat, StudyHallAssignment } from "@/lib/types"
+
+interface ScheduleStatsProps {
+  stats: TeacherStat[]
+  studyHallAssignments: StudyHallAssignment[]
+  backToBackIssues: number
+  studyHallsPlaced: number
+  unscheduledClasses?: number
+  totalClasses?: number
+}
+
+function InfoTooltip({ text }: { text: string }) {
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <Info className="h-3.5 w-3.5 text-slate-400 hover:text-slate-600 cursor-help inline-block ml-1" />
+      </TooltipTrigger>
+      <TooltipContent className="max-w-[250px]">
+        <p>{text}</p>
+      </TooltipContent>
+    </Tooltip>
+  )
+}
+
+export function ScheduleStats({
+  stats,
+  studyHallAssignments,
+  backToBackIssues,
+  studyHallsPlaced,
+  unscheduledClasses = 0,
+  totalClasses = 0,
+}: ScheduleStatsProps) {
+  // Sort stats: full-time teachers first, then by utilization
+  const sortedStats = [...stats].sort((a, b) => {
+    if (a.status === 'full-time' && b.status !== 'full-time') return -1
+    if (a.status !== 'full-time' && b.status === 'full-time') return 1
+    return b.totalUsed - a.totalUsed
+  })
+
+  // Function to open details and scroll to section
+  const scrollToSection = (sectionId: string) => {
+    const details = document.getElementById('stats-details') as HTMLDetailsElement
+    if (details) {
+      details.open = true
+      // Small delay to let details open
+      setTimeout(() => {
+        const section = document.getElementById(sectionId)
+        section?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+      }, 100)
+    }
+  }
+
+  // Calculate issues for suggestions
+  const unplacedStudyHalls = studyHallAssignments.filter(sh => !sh.teacher)
+  const teachersWithBTB = sortedStats.filter(s => s.backToBackIssues > 0)
+  const fullTimeTeachers = sortedStats.filter(s => s.status === 'full-time')
+  const avgUtilization = stats.length > 0
+    ? Math.round((stats.reduce((sum, s) => sum + s.totalUsed, 0) / stats.length / 25) * 100)
+    : 0
+
+  // Identify potential issues
+  const issues: { type: 'warning' | 'info'; message: string }[] = []
+
+  if (unscheduledClasses > 0) {
+    issues.push({
+      type: 'warning',
+      message: `${unscheduledClasses} class session(s) could not be scheduled. Check for conflicting restrictions.`
+    })
+  }
+
+  if (unplacedStudyHalls.length > 0) {
+    const groups = unplacedStudyHalls.map(sh => sh.group).join(', ')
+    issues.push({
+      type: 'warning',
+      message: `Study halls not placed for: ${groups}. Need more full-time teachers with open blocks.`
+    })
+  }
+
+  if (teachersWithBTB.length > 0) {
+    const names = teachersWithBTB.slice(0, 3).map(t => t.teacher).join(', ')
+    const more = teachersWithBTB.length > 3 ? ` +${teachersWithBTB.length - 3} more` : ''
+    issues.push({
+      type: 'info',
+      message: `Back-to-back open blocks: ${names}${more}. This is a soft constraint - schedule is still valid.`
+    })
+  }
+
+  if (avgUtilization < 50 && fullTimeTeachers.length > 0) {
+    issues.push({
+      type: 'info',
+      message: `Low average utilization (${avgUtilization}%). Teachers have many open blocks - consider adding more classes or reducing staff.`
+    })
+  }
+
+  return (
+    <TooltipProvider>
+      <div className="space-y-6">
+        {/* Summary Stats - Always visible */}
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+          {/* Classes Scheduled */}
+          <div className={`border rounded-lg p-4 ${unscheduledClasses > 0 ? 'border-red-300 bg-red-50' : 'border-emerald-200 bg-emerald-50'}`}>
+            <div className="text-sm text-slate-600">
+              Classes Scheduled
+              <InfoTooltip text="Total class sessions successfully placed in the schedule. Each class with 3 days/week counts as 3 sessions." />
+            </div>
+            <div className="text-2xl font-bold">
+              {totalClasses - unscheduledClasses}/{totalClasses}
+              {unscheduledClasses > 0 && (
+                <Badge variant="destructive" className="ml-2 text-xs">
+                  {unscheduledClasses} Missing!
+                </Badge>
+              )}
+              {unscheduledClasses === 0 && totalClasses > 0 && (
+                <Badge className="ml-2 text-xs bg-emerald-500">All Set</Badge>
+              )}
+            </div>
+          </div>
+
+          {/* Study Halls */}
+          <div
+            className={`border rounded-lg p-4 ${studyHallsPlaced < 5 ? 'border-amber-200 bg-amber-50' : 'border-emerald-200 bg-emerald-50'} ${studyHallsPlaced < 5 ? 'cursor-pointer hover:border-amber-300' : ''}`}
+            onClick={studyHallsPlaced < 5 ? () => scrollToSection('study-hall-section') : undefined}
+          >
+            <div className="text-sm text-slate-600">
+              Study Halls Placed
+              <InfoTooltip text="Study hall supervision slots assigned to eligible full-time teachers. There are 5 grade groups that each need one study hall per week." />
+            </div>
+            <div className="text-2xl font-bold">
+              {studyHallsPlaced}/5
+              {studyHallsPlaced === 5 && (
+                <Badge className="ml-2 text-xs bg-emerald-500">Complete</Badge>
+              )}
+              {studyHallsPlaced < 5 && (
+                <Badge variant="outline" className="ml-2 text-xs border-amber-400 text-amber-700">
+                  {5 - studyHallsPlaced} Missing
+                </Badge>
+              )}
+            </div>
+            {studyHallsPlaced < 5 && (
+              <div className="text-xs text-amber-600 mt-1">Click for details</div>
+            )}
+          </div>
+
+          {/* Back-to-Back Open */}
+          <div
+            className={`border rounded-lg p-4 ${backToBackIssues > 0 ? 'border-amber-100 bg-amber-50/50 cursor-pointer hover:border-amber-200' : 'border-slate-200 bg-slate-50'}`}
+            onClick={backToBackIssues > 0 ? () => scrollToSection('teacher-util-section') : undefined}
+          >
+            <div className="text-sm text-slate-600">
+              Back-to-Back Open
+              <InfoTooltip text="Number of times a full-time teacher has consecutive open (unassigned) blocks. Ideally minimized but not critical - the schedule is still valid." />
+            </div>
+            <div className="text-2xl font-bold text-slate-700">
+              {backToBackIssues}
+              <span className="text-sm font-normal text-slate-500 ml-1">
+                {backToBackIssues === 1 ? 'issue' : 'issues'}
+              </span>
+            </div>
+            {backToBackIssues > 0 && (
+              <div className="text-xs text-amber-600 mt-1">Click to see which teachers</div>
+            )}
+          </div>
+
+          {/* Utilization */}
+          <div
+            className="border rounded-lg p-4 border-slate-200 bg-slate-50 cursor-pointer hover:border-slate-300"
+            onClick={() => scrollToSection('teacher-util-section')}
+          >
+            <div className="text-sm text-slate-600">
+              Avg Utilization
+              <InfoTooltip text="Average percentage of time slots used (teaching + study hall) across all teachers. Higher means teachers are busier. Based on 25 slots/week (5 days x 5 blocks)." />
+            </div>
+            <div className="text-2xl font-bold text-slate-700">
+              {avgUtilization}%
+            </div>
+            <div className="text-xs text-slate-500 mt-1">Click for breakdown</div>
+          </div>
+        </div>
+
+        {/* Issues & Suggestions - Only show if there are issues */}
+        {issues.length > 0 && (
+          <div className="border border-amber-200 rounded-lg bg-amber-50/50 p-4">
+            <h3 className="font-medium text-amber-800 mb-2 flex items-center gap-2">
+              <AlertTriangle className="h-4 w-4" />
+              Notes & Suggestions
+            </h3>
+            <ul className="space-y-1.5">
+              {issues.map((issue, i) => (
+                <li key={i} className={`text-sm ${issue.type === 'warning' ? 'text-amber-800' : 'text-amber-700'}`}>
+                  {issue.type === 'warning' ? '• ' : '• '}
+                  {issue.message}
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+
+        {/* Detailed Tables - Collapsed */}
+        <details id="stats-details" className="group">
+          <summary className="cursor-pointer list-none flex items-center gap-2 text-sm font-medium text-slate-600 hover:text-slate-800">
+            <ChevronDown className="h-4 w-4 transition-transform group-open:rotate-180" />
+            Study Hall & Teacher Details
+          </summary>
+
+          <div className="mt-4 space-y-6">
+            {/* Study Hall Assignments */}
+            <div id="study-hall-section">
+              <h3 className="font-semibold mb-3 text-sm">Study Hall Assignments</h3>
+              <div className="grid grid-cols-2 md:grid-cols-5 gap-2">
+                {studyHallAssignments.map((sh) => (
+                  <div
+                    key={sh.group}
+                    className={`border rounded-lg p-3 ${
+                      sh.teacher ? "bg-blue-50 border-blue-200" : "bg-red-50 border-red-200"
+                    }`}
+                  >
+                    <div className="font-medium text-sm">{sh.group}</div>
+                    {sh.teacher ? (
+                      <div className="text-xs text-muted-foreground">
+                        {sh.teacher} - {sh.day} Block {sh.block}
+                      </div>
+                    ) : (
+                      <div className="text-xs text-destructive">Not placed</div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            {/* Teacher Utilization Table */}
+            <div id="teacher-util-section">
+              <h3 className="font-semibold mb-3 text-sm">Teacher Utilization</h3>
+              <div className="border rounded-lg overflow-hidden bg-white">
+                <Table>
+                  <TableHeader>
+                    <TableRow className="bg-slate-50">
+                      <TableHead>Teacher</TableHead>
+                      <TableHead>Status</TableHead>
+                      <TableHead className="text-center">Teaching</TableHead>
+                      <TableHead className="text-center">Study Hall</TableHead>
+                      <TableHead className="text-center">Open</TableHead>
+                      <TableHead className="text-center">BTB Open</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {sortedStats.map((stat) => (
+                      <TableRow key={stat.teacher}>
+                        <TableCell className="font-medium">{stat.teacher}</TableCell>
+                        <TableCell>
+                          <Badge
+                            variant={stat.status === "full-time" ? "default" : "secondary"}
+                            className={stat.status === "full-time" ? "bg-sky-500" : ""}
+                          >
+                            {stat.status}
+                          </Badge>
+                        </TableCell>
+                        <TableCell className="text-center">{stat.teaching}</TableCell>
+                        <TableCell className="text-center">{stat.studyHall}</TableCell>
+                        <TableCell className="text-center">{stat.open}</TableCell>
+                        <TableCell className="text-center">
+                          {stat.backToBackIssues > 0 ? (
+                            <span className="text-amber-600 font-medium">
+                              {stat.backToBackIssues}
+                            </span>
+                          ) : (
+                            <span className="text-slate-400">0</span>
+                          )}
+                        </TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              </div>
+            </div>
+          </div>
+        </details>
+      </div>
+    </TooltipProvider>
+  )
+}
