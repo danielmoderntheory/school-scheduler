@@ -19,6 +19,7 @@ import { GradeSelector, formatGradeDisplay } from "@/components/GradeSelector"
 import toast from "react-hot-toast"
 
 interface LastRun {
+  historyId: string
   timestamp: string
   quarterId: string
   quarterName: string
@@ -111,21 +112,6 @@ export default function ClassesPage() {
 
   useEffect(() => {
     loadData()
-    // Load last run from localStorage
-    const stored = localStorage.getItem('lastScheduleRun')
-    if (stored) {
-      try {
-        const run = JSON.parse(stored) as LastRun
-        // Check if within 48 hours
-        const diffMs = Date.now() - new Date(run.timestamp).getTime()
-        const hoursAgo = diffMs / (1000 * 60 * 60)
-        if (hoursAgo <= 48) {
-          setLastRun(run)
-        }
-      } catch (e) {
-        // ignore
-      }
-    }
     // Cleanup pending deletes on unmount
     return () => {
       pendingDeletes.current.forEach((timeout) => clearTimeout(timeout))
@@ -163,6 +149,34 @@ export default function ClassesPage() {
           a.teacher.name.localeCompare(b.teacher.name)
         )
         setClasses(sorted)
+
+        // Fetch last saved generation for this quarter from the database
+        try {
+          const historyRes = await fetch(`/api/history?quarter_id=${active.id}&limit=1`)
+          if (historyRes.ok) {
+            const historyData = await historyRes.json()
+            if (historyData.length > 0) {
+              const lastGen = historyData[0]
+              const diffMs = Date.now() - new Date(lastGen.generated_at).getTime()
+              const hoursAgo = diffMs / (1000 * 60 * 60)
+              // Only show if within 48 hours
+              if (hoursAgo <= 48) {
+                const bestOption = lastGen.options?.[0]
+                setLastRun({
+                  historyId: lastGen.id,
+                  timestamp: lastGen.generated_at,
+                  quarterId: active.id,
+                  quarterName: active.name,
+                  studyHallsPlaced: bestOption?.studyHallsPlaced ?? 0,
+                  backToBackIssues: bestOption?.backToBackIssues ?? 0,
+                  saved: lastGen.is_saved ?? false,
+                })
+              }
+            }
+          }
+        } catch (e) {
+          // Ignore history fetch errors
+        }
       }
     } catch (error) {
       toast.error("Failed to load data")
@@ -1230,7 +1244,7 @@ Phil\t6th-11th Elective\tSpanish 101\t1\tMon Block 5`}
             You generated a schedule for these classes{" "}
             <span className="font-medium">{formatTimeAgo(lastRun.timestamp)}</span>.
           </span>
-          <Link href="/generate" className="ml-auto text-sky-600 hover:text-sky-800 font-medium">
+          <Link href={`/history/${lastRun.historyId}`} className="ml-auto text-sky-600 hover:text-sky-800 font-medium">
             View results →
           </Link>
         </div>

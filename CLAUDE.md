@@ -179,10 +179,10 @@ CREATE TABLE study_hall_groups (
 3. **Study Hall Distribution**: Spread study halls across eligible teachers evenly
 
 ### Study Hall Rules
-- Only **full-time teachers who teach 6th-11th** can supervise
-- Eligible teachers: Configurable per teacher
+- Only **full-time teachers** can supervise (unless explicitly excluded via `can_supervise_study_hall = false`)
 - Teachers with **fewer teaching blocks** get assigned study halls first
-- Each grade group gets exactly 1 study hall per week
+- Each grade (6th-11th) gets exactly 1 study hall per week
+- Combinable fallback: If individual grades can't be placed, tries 6th+7th or 10th+11th combined
 
 ## API Routes (Next.js)
 

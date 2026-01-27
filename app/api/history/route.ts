@@ -5,6 +5,7 @@ export async function GET(request: NextRequest) {
   const searchParams = request.nextUrl.searchParams
   const quarterId = searchParams.get("quarter_id")
   const includeUnsaved = searchParams.get("include_unsaved") === "true"
+  const limit = searchParams.get("limit")
 
   let query = supabase
     .from("schedule_generations")
@@ -15,6 +16,7 @@ export async function GET(request: NextRequest) {
       selected_option,
       notes,
       is_saved,
+      options,
       quarter:quarters(id, name)
     `)
     .order("generated_at", { ascending: false })
@@ -26,6 +28,10 @@ export async function GET(request: NextRequest) {
   // By default, only return saved schedules
   if (!includeUnsaved) {
     query = query.eq("is_saved", true)
+  }
+
+  if (limit) {
+    query = query.limit(parseInt(limit))
   }
 
   const { data, error } = await query
