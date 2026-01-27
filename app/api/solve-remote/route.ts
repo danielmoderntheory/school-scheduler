@@ -1,5 +1,8 @@
 import { NextRequest, NextResponse } from "next/server"
 
+// Extend Vercel function timeout (Pro plan: up to 300s, Hobby: 10s max)
+export const maxDuration = 300
+
 /**
  * Proxy to the OR-Tools solver (local or Cloud Run).
  *

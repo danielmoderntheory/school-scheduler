@@ -147,6 +147,7 @@ export default function GeneratePage() {
   const [recentHistory, setRecentHistory] = useState<HistoryItem[]>([])
   const [scheduleError, setScheduleError] = useState<{ type: 'infeasible' | 'error'; message: string; diagnostics?: ScheduleDiagnostics } | null>(null)
   const [solverStatus, setSolverStatus] = useState<{ isLocal: boolean; url: string } | null>(null)
+  const [lastRequestPayload, setLastRequestPayload] = useState<{ teachers: unknown[]; classes: unknown[] } | null>(null)
   const generationIdRef = useRef<string | null>(null)
 
   useEffect(() => {
@@ -284,10 +285,13 @@ export default function GeneratePage() {
     try {
       const { teachers: teacherList, classes: classList } = convertToSchedulerFormat()
 
+      // Store request payload for debugging
+      setLastRequestPayload({ teachers: teacherList, classes: classList })
+
       const result = await generateSchedulesRemote(teacherList, classList, {
         numOptions: 1,
         numAttempts: 150,
-        maxTimeSeconds: 120,
+        maxTimeSeconds: 280,
         onProgress: (current, total, message) => {
           setProgress({ current, total, message })
         },
@@ -589,6 +593,9 @@ export default function GeneratePage() {
                       {scheduleError.diagnostics.solverStatus && (
                         <span>Status: <strong className="text-red-600">{scheduleError.diagnostics.solverStatus}</strong></span>
                       )}
+                      {solverStatus?.url && (
+                        <span className="text-slate-400">Solver: {solverStatus.url}</span>
+                      )}
                     </div>
                   )}
 
@@ -690,6 +697,24 @@ export default function GeneratePage() {
                 >
                   Dismiss
                 </Button>
+                {lastRequestPayload && (
+                  <Button
+                    variant="ghost"
+                    className="text-slate-500 hover:bg-slate-100 ml-auto"
+                    onClick={() => {
+                      const debugInfo = {
+                        timestamp: new Date().toISOString(),
+                        error: scheduleError,
+                        request: lastRequestPayload,
+                        solverUrl: solverStatus?.url || 'unknown',
+                      }
+                      navigator.clipboard.writeText(JSON.stringify(debugInfo, null, 2))
+                      toast.success("Debug info copied to clipboard")
+                    }}
+                  >
+                    Copy Debug Info
+                  </Button>
+                )}
               </div>
             </div>
           </CardContent>

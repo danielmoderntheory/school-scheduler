@@ -21,7 +21,11 @@ pip install -q -r requirements.txt
 # Run the server
 echo ""
 echo "Starting solver on http://localhost:8080"
+if [ "$DEBUG_SOLVER" = "1" ] || [ "$DEBUG_SOLVER" = "true" ]; then
+    echo "DEBUG_SOLVER is enabled - verbose logging active"
+fi
 echo "Press Ctrl+C to stop"
 echo ""
 
-python main.py
+# Pass through DEBUG_SOLVER if set
+DEBUG_SOLVER=${DEBUG_SOLVER:-} python main.py

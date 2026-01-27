@@ -96,6 +96,18 @@ export async function generateSchedulesRemote(
 
   // Allow UI to render before starting
   await new Promise(resolve => setTimeout(resolve, 0));
+  onProgress?.(0, numAttempts, 'Warming up solver...');
+
+  // Warmup: ping health endpoint to wake up Cloud Run container before heavy request
+  try {
+    const warmupResponse = await fetch('/api/solve-remote/health', { method: 'GET' });
+    if (!warmupResponse.ok) {
+      console.warn('Solver warmup failed, proceeding anyway:', warmupResponse.status);
+    }
+  } catch (warmupError) {
+    console.warn('Solver warmup failed, proceeding anyway:', warmupError);
+  }
+
   onProgress?.(0, numAttempts, 'Connecting to OR-Tools solver...');
   await new Promise(resolve => setTimeout(resolve, 100));
 

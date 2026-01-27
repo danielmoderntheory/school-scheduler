@@ -20,9 +20,9 @@ echo "Setting Google Cloud project to: $PROJECT_ID"
 gcloud config set project $PROJECT_ID
 
 # Free tier optimized settings
-MEMORY="512Mi"          # Start small; use 1Gi only if solver fails
+MEMORY="1Gi"            # 1Gi needed for OR-Tools with large schedules (200+ sessions)
 CPU="1"                 # Single CPU
-TIMEOUT="300"           # 5 min max
+TIMEOUT="600"           # 10 min max (free tier charges by runtime, not timeout)
 MIN_INSTANCES="0"       # CRITICAL: scales to zero when idle
 MAX_INSTANCES="1"       # Prevents parallel runaway costs
 CONCURRENCY="1"         # One request at a time (solver is CPU-bound)
