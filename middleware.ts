@@ -19,8 +19,13 @@ export function middleware(request: NextRequest) {
   // Check for auth cookie
   const authCookie = request.cookies.get("auth")
   if (!authCookie || authCookie.value !== "authenticated") {
-    // Redirect to login
-    return NextResponse.redirect(new URL("/login", request.url))
+    // Redirect to login with return URL
+    const loginUrl = new URL("/login", request.url)
+    const returnTo = request.nextUrl.pathname + request.nextUrl.search
+    if (returnTo && returnTo !== "/") {
+      loginUrl.searchParams.set("returnTo", returnTo)
+    }
+    return NextResponse.redirect(loginUrl)
   }
 
   return NextResponse.next()
