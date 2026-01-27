@@ -106,6 +106,7 @@ interface HistoryItem {
   selected_option: number | null
   studyHallsPlaced?: number
   is_saved: boolean
+  notes: string | null
   quarter: { id: string; name: string }
 }
 
@@ -865,30 +866,37 @@ export default function GeneratePage() {
               {recentHistory.length > 0 ? (
                 <div className="space-y-2">
                   {recentHistory.map((item) => (
-                    <div key={item.id} className="flex items-center justify-between py-1.5 border-b border-slate-100 last:border-0">
-                      <div className="flex items-center gap-3 text-sm">
-                        <span className="text-slate-600">{item.quarter?.name}</span>
-                        <span className="text-slate-400 text-xs">
-                          {new Date(item.generated_at).toLocaleString(undefined, {
-                            month: 'short',
-                            day: 'numeric',
-                            hour: 'numeric',
-                            minute: '2-digit',
-                          })}
-                        </span>
+                    <div key={item.id} className="py-2 border-b border-slate-100 last:border-0">
+                      <div className="flex items-center justify-between">
+                        <div className="flex items-center gap-3 text-sm">
+                          <span className="text-slate-600">{item.quarter?.name}</span>
+                          <span className="text-slate-400 text-xs">
+                            {new Date(item.generated_at).toLocaleString(undefined, {
+                              month: 'short',
+                              day: 'numeric',
+                              hour: 'numeric',
+                              minute: '2-digit',
+                            })}
+                          </span>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          {item.selected_option && (
+                            <Badge variant="outline" className="text-xs border-slate-300 text-slate-500">
+                              Option {item.selected_option}
+                            </Badge>
+                          )}
+                          <Link href={`/history/${item.id}`}>
+                            <Button variant="ghost" size="sm" className="h-6 w-6 p-0">
+                              <Eye className="h-3.5 w-3.5 text-slate-400" />
+                            </Button>
+                          </Link>
+                        </div>
                       </div>
-                      <div className="flex items-center gap-2">
-                        {item.selected_option && (
-                          <Badge variant="outline" className="text-xs border-slate-300 text-slate-500">
-                            Option {item.selected_option}
-                          </Badge>
-                        )}
-                        <Link href={`/history/${item.id}`}>
-                          <Button variant="ghost" size="sm" className="h-6 w-6 p-0">
-                            <Eye className="h-3.5 w-3.5 text-slate-400" />
-                          </Button>
-                        </Link>
-                      </div>
+                      {item.notes && (
+                        <p className="text-xs text-slate-500 mt-1 italic truncate" title={item.notes}>
+                          &ldquo;{item.notes}&rdquo;
+                        </p>
+                      )}
                     </div>
                   ))}
                 </div>

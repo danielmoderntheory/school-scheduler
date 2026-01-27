@@ -1,5 +1,6 @@
 "use client"
 
+import { useState } from "react"
 import {
   Table,
   TableBody,
@@ -15,7 +16,7 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from "@/components/ui/tooltip"
-import { Info, AlertTriangle, ChevronDown } from "lucide-react"
+import { Info, AlertTriangle, ChevronDown, ChevronRight } from "lucide-react"
 import type { TeacherStat, StudyHallAssignment } from "@/lib/types"
 
 interface ScheduleStatsProps {
@@ -25,6 +26,7 @@ interface ScheduleStatsProps {
   studyHallsPlaced: number
   unscheduledClasses?: number
   totalClasses?: number
+  defaultExpanded?: boolean
 }
 
 function InfoTooltip({ text }: { text: string }) {
@@ -47,7 +49,9 @@ export function ScheduleStats({
   studyHallsPlaced,
   unscheduledClasses = 0,
   totalClasses = 0,
+  defaultExpanded = true,
 }: ScheduleStatsProps) {
+  const [expanded, setExpanded] = useState(defaultExpanded)
   // Sort stats: full-time teachers first, then by utilization
   const sortedStats = [...stats].sort((a, b) => {
     if (a.status === 'full-time' && b.status !== 'full-time') return -1
@@ -140,11 +144,48 @@ export function ScheduleStats({
     })
   }
 
+  // Compact stat item for collapsed view
+  const hasIssues = unscheduledClasses > 0 || studyHallsPlaced < 6
+  const classesStatus = unscheduledClasses > 0 ? 'error' : 'ok'
+  const studyHallStatus = studyHallsPlaced < 6 ? 'warning' : 'ok'
+
   return (
     <TooltipProvider>
-      <div className="space-y-6">
-        {/* Summary Stats - Always visible */}
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-4 print-stats">
+      <div className="space-y-4">
+        {/* Collapsible header - matches Study Hall & Teacher Details styling */}
+        <div
+          className="border border-slate-200 rounded-lg p-3 bg-slate-50/50 cursor-pointer no-print"
+          onClick={() => setExpanded(!expanded)}
+        >
+          <summary className="list-none flex items-center gap-2 text-sm font-medium text-slate-600 hover:text-slate-800">
+            <ChevronDown className={`h-4 w-4 transition-transform ${!expanded ? '-rotate-90' : ''}`} />
+            Schedule Summary
+            {!expanded && (
+              <>
+                <span className="text-slate-300 ml-2">—</span>
+                <span className={`font-normal text-slate-500 ${classesStatus === 'error' ? 'text-red-600 font-medium' : ''}`}>
+                  Classes: {totalClasses - unscheduledClasses}/{totalClasses}
+                </span>
+                <span className="text-slate-300">|</span>
+                <span className={`font-normal text-slate-500 ${studyHallStatus === 'warning' ? 'text-amber-600 font-medium' : ''}`}>
+                  Study Halls: {studyHallsPlaced}/6
+                </span>
+                <span className="text-slate-300">|</span>
+                <span className="font-normal text-slate-500">BTB: {backToBackIssues}</span>
+                <span className="text-slate-300">|</span>
+                <span className="font-normal text-slate-500">Avg Open: {fullTimeTeachers.length > 0 ? (fullTimeTeachers.reduce((sum, t) => sum + t.open, 0) / fullTimeTeachers.length).toFixed(1) : 0}</span>
+                {issues.length > 0 && (
+                  <span className="text-xs font-normal text-amber-600 ml-1">
+                    ({issues.length} note{issues.length !== 1 ? 's' : ''})
+                  </span>
+                )}
+              </>
+            )}
+          </summary>
+        </div>
+
+        {/* Summary Stats - Shown when expanded */}
+        <div className={`grid grid-cols-2 md:grid-cols-4 gap-4 print-stats ${!expanded ? 'hidden' : ''}`}>
           {/* Classes Scheduled */}
           <div className={`border rounded-lg p-4 ${unscheduledClasses > 0 ? 'border-red-300 bg-red-50' : 'border-emerald-200 bg-emerald-50'}`}>
             <div className="text-sm text-slate-600">
@@ -230,8 +271,8 @@ export function ScheduleStats({
           </div>
         </div>
 
-        {/* Issues & Suggestions - Only show if there are issues */}
-        {issues.length > 0 && (
+        {/* Issues & Suggestions - Only show if there are issues and expanded */}
+        {issues.length > 0 && expanded && (
           <div className="border border-amber-200 rounded-lg bg-amber-50/50 p-4 print-notes">
             <h3 className="font-medium text-amber-800 mb-2 flex items-center gap-2">
               <AlertTriangle className="h-4 w-4" />
