@@ -30,7 +30,7 @@ export function Navigation() {
   const pathname = usePathname()
 
   return (
-    <header className="border-b">
+    <header className="border-b no-print">
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
         <div className="flex h-14 items-center justify-between">
           <div className="flex items-center gap-6">

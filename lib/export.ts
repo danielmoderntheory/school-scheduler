@@ -423,11 +423,31 @@ export function generateXLSX(option: ScheduleOption, metadata?: ExportMetadata):
   })
 }
 
-export function generateCSV(option: ScheduleOption): string {
+export function generateCSV(option: ScheduleOption, metadata?: ExportMetadata): string {
   const lines: string[] = []
 
+  // Format the date if provided
+  const formattedDate = metadata?.generatedAt
+    ? new Date(metadata.generatedAt).toLocaleDateString("en-US", {
+        weekday: "long",
+        year: "numeric",
+        month: "long",
+        day: "numeric",
+        hour: "numeric",
+        minute: "2-digit",
+      })
+    : null
+
   // Header
-  lines.push(`Schedule Option ${option.optionNumber}`)
+  lines.push("Schedule Generation")
+  if (metadata?.scheduleId) {
+    lines.push(`Schedule ID: ${metadata.scheduleId}`)
+  }
+  if (formattedDate) {
+    lines.push(`Generated: ${formattedDate}`)
+  }
+  lines.push("")
+  lines.push(`Option: ${option.optionNumber}`)
   lines.push(`Back-to-Back Issues: ${option.backToBackIssues}`)
   lines.push(`Study Halls Placed: ${option.studyHallsPlaced}/${option.studyHallAssignments?.length || 0}`)
   lines.push("")

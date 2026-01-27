@@ -44,7 +44,7 @@ export function ScheduleGrid({
   return (
     <div
       className={cn(
-        "border rounded-lg overflow-hidden bg-white shadow-sm transition-all",
+        "border rounded-lg overflow-hidden bg-white shadow-sm transition-all schedule-card",
         isSelected && "ring-2 ring-sky-500 border-sky-500"
       )}
     >
@@ -71,7 +71,7 @@ export function ScheduleGrid({
           )}
         </div>
         {showCheckbox && type === "teacher" && (
-          <label className="flex items-center gap-1.5 cursor-pointer">
+          <label className="flex items-center gap-1.5 cursor-pointer no-print">
             <RefreshCw className={cn("h-3 w-3", isSelected ? "text-sky-600" : "text-muted-foreground")} />
             <span className={cn("text-xs", isSelected ? "text-sky-600" : "text-muted-foreground")}>Regen</span>
             <Checkbox
@@ -85,7 +85,7 @@ export function ScheduleGrid({
       <table className="w-full text-sm table-fixed">
         <thead>
           <tr className="border-b bg-muted/50">
-            <th className="p-1.5 text-left w-14 text-xs"></th>
+            <th className="p-1.5 text-left w-8 text-xs"></th>
             {DAYS.map((day) => (
               <th key={day} className="p-1.5 text-center font-medium text-xs">
                 {day}

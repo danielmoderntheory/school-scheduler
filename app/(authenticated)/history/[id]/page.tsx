@@ -6,7 +6,7 @@ import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
 import { ScheduleGrid } from "@/components/ScheduleGrid"
 import { ScheduleStats } from "@/components/ScheduleStats"
-import { Loader2, Download, ArrowLeft, Save, Check, RefreshCw, Shuffle, Trash2, Star, MoreVertical, Users, GraduationCap } from "lucide-react"
+import { Loader2, Download, ArrowLeft, Save, Check, RefreshCw, Shuffle, Trash2, Star, MoreVertical, Users, GraduationCap, Printer } from "lucide-react"
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -491,7 +491,7 @@ export default function HistoryDetailPage() {
       <div className="mb-6">
         <Link
           href="/history"
-          className="inline-flex items-center text-sm text-muted-foreground hover:text-foreground mb-4"
+          className="inline-flex items-center text-sm text-muted-foreground hover:text-foreground mb-4 no-print"
         >
           <ArrowLeft className="h-4 w-4 mr-1" />
           Back to History
@@ -501,7 +501,7 @@ export default function HistoryDetailPage() {
             <h1 className="text-3xl font-bold mb-2">
               {generation.quarter?.name} Schedule
               {generation.is_saved && (
-                <Badge className="ml-3 bg-emerald-500">Saved</Badge>
+                <Badge className="ml-3 bg-emerald-500 no-print">Saved</Badge>
               )}
             </h1>
             <p className="text-muted-foreground">
@@ -514,7 +514,7 @@ export default function HistoryDetailPage() {
               onClick={handleSave}
               disabled={saving}
               size="sm"
-              className="gap-1 bg-emerald-500 hover:bg-emerald-600 text-white"
+              className="gap-1 bg-emerald-500 hover:bg-emerald-600 text-white no-print"
             >
               {saving ? (
                 <>
@@ -534,7 +534,7 @@ export default function HistoryDetailPage() {
               disabled={saving}
               variant="outline"
               size="sm"
-              className="gap-1"
+              className="gap-1 no-print"
             >
               {saving ? (
                 <Loader2 className="h-4 w-4 animate-spin" />
@@ -549,7 +549,7 @@ export default function HistoryDetailPage() {
 
       {generation.options && generation.options.length > 0 && (
         <div className="space-y-6">
-          <div className="flex items-center justify-between">
+          <div className="flex items-center justify-between no-print">
             <div className="flex flex-col gap-1">
               <div className="inline-flex rounded-lg bg-gray-100 p-1">
                 {generation.options.map((opt, i) => {
@@ -589,7 +589,7 @@ export default function HistoryDetailPage() {
               </div>
             </div>
 
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-2 no-print">
               {/* Export buttons */}
               <a
                 href={`/api/export?generation_id=${id}&option=${selectedOption}&format=xlsx`}
@@ -609,6 +609,15 @@ export default function HistoryDetailPage() {
                   CSV
                 </Button>
               </a>
+              <Button
+                variant="outline"
+                size="sm"
+                className="gap-1"
+                onClick={() => window.print()}
+              >
+                <Printer className="h-4 w-4" />
+                Print
+              </Button>
 
               <DropdownMenu>
                 <DropdownMenuTrigger asChild>
@@ -704,22 +713,24 @@ export default function HistoryDetailPage() {
             <div className="space-y-6">
               {/* Stats Summary */}
               {!isGenerating && (
-                <ScheduleStats
-                  stats={selectedResult.teacherStats}
-                  studyHallAssignments={selectedResult.studyHallAssignments}
-                  backToBackIssues={selectedResult.backToBackIssues}
-                  studyHallsPlaced={selectedResult.studyHallsPlaced}
-                  totalClasses={
-                    generation.stats?.classes_snapshot
-                      ? generation.stats.classes_snapshot.reduce((sum, c) => sum + (c.days_per_week || 0), 0)
-                      : 0
-                  }
-                  unscheduledClasses={0}
-                />
+                <div>
+                  <ScheduleStats
+                    stats={selectedResult.teacherStats}
+                    studyHallAssignments={selectedResult.studyHallAssignments}
+                    backToBackIssues={selectedResult.backToBackIssues}
+                    studyHallsPlaced={selectedResult.studyHallsPlaced}
+                    totalClasses={
+                      generation.stats?.classes_snapshot
+                        ? generation.stats.classes_snapshot.reduce((sum, c) => sum + (c.days_per_week || 0), 0)
+                        : 0
+                    }
+                    unscheduledClasses={0}
+                  />
+                </div>
               )}
 
               {/* Schedule Grids */}
-              <div>
+              <div className="print-page-break-before">
                 <div className="flex items-center justify-between mb-4">
                   <h3 className="font-semibold">
                     {viewMode === "teacher" ? "Teacher Schedules" : "Grade Schedules"}
@@ -731,7 +742,7 @@ export default function HistoryDetailPage() {
                       setViewMode(viewMode === "teacher" ? "grade" : "teacher")
                     }
                     disabled={isGenerating}
-                    className="gap-1.5"
+                    className="gap-1.5 no-print"
                   >
                     {viewMode === "teacher" ? (
                       <GraduationCap className="h-4 w-4" />
@@ -741,7 +752,7 @@ export default function HistoryDetailPage() {
                     View by {viewMode === "teacher" ? "Grade" : "Teacher"}
                   </Button>
                 </div>
-                <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+                <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 print-grid">
                   {viewMode === "teacher"
                     ? Object.entries(selectedResult.teacherSchedules)
                         .sort(([teacherA, scheduleA], [teacherB, scheduleB]) => {

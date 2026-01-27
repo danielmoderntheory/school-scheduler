@@ -35,3 +35,124 @@
     @apply bg-background text-foreground;
   }
 }
+
+/* Schedule card grid - equal height cards */
+.print-grid {
+  align-items: stretch;
+}
+
+.print-grid > .schedule-card {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+}
+
+/* Make header stay at top, table body fills remaining space */
+.schedule-card > div:first-child {
+  flex-shrink: 0;
+}
+
+.schedule-card > table {
+  flex: 1;
+}
+
+/* Set minimum height on table cells so rows are consistent */
+.schedule-card td {
+  height: 2.5rem;
+  min-height: 2.5rem;
+}
+
+/* Print styles */
+@media print {
+  /* Hide non-essential UI elements */
+  .no-print {
+    display: none !important;
+    visibility: hidden !important;
+  }
+
+  /* Reset background for print */
+  body {
+    background: white !important;
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+  }
+
+  /* Prevent schedule cards from breaking across pages */
+  .schedule-card {
+    break-inside: avoid;
+    page-break-inside: avoid;
+    margin-bottom: 0.75rem;
+  }
+
+
+  /* Force page break before teacher schedules */
+  .print-page-break-before {
+    break-before: page;
+    page-break-before: always;
+  }
+
+  /* Print grid layout - 2 columns on print */
+  .print-grid {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 0.75rem;
+  }
+
+  /* Ensure colors print correctly */
+  .schedule-card * {
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+  }
+
+  /* Slightly smaller fonts for stats summary cards */
+  .print-stats {
+    gap: 0.75rem !important;
+  }
+
+  .print-stats > div {
+    padding: 0.875rem !important;
+  }
+
+  .print-stats .text-sm {
+    font-size: 0.8rem !important;
+  }
+
+  .print-stats .text-2xl {
+    font-size: 1.4rem !important;
+    line-height: 1.4 !important;
+  }
+
+  .print-stats .text-xs {
+    font-size: 0.7rem !important;
+  }
+
+  /* Smaller fonts for notes & suggestions */
+  .print-notes {
+    padding: 0.5rem !important;
+  }
+
+  .print-notes h3 {
+    font-size: 0.75rem !important;
+    margin-bottom: 0.25rem !important;
+  }
+
+  .print-notes h3 svg {
+    width: 0.75rem !important;
+    height: 0.75rem !important;
+  }
+
+  .print-notes li {
+    font-size: 0.7rem !important;
+    line-height: 1.3 !important;
+  }
+
+  .print-notes ul {
+    gap: 0.25rem !important;
+  }
+}
+
+/* Page margins for print */
+@page {
+  margin: 0.75in 0.65in;
+  size: letter;
+}

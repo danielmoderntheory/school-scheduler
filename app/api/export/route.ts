@@ -31,7 +31,10 @@ export async function GET(request: NextRequest) {
   const option = options[optionNum - 1] as Parameters<typeof generateXLSX>[0]
 
   if (format === "csv") {
-    const csv = generateCSV(option)
+    const csv = generateCSV(option, {
+      scheduleId: generationId,
+      generatedAt: generation.generated_at,
+    })
     return new NextResponse(csv, {
       headers: {
         "Content-Type": "text/csv",

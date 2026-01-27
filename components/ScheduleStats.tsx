@@ -144,7 +144,7 @@ export function ScheduleStats({
     <TooltipProvider>
       <div className="space-y-6">
         {/* Summary Stats - Always visible */}
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-4 print-stats">
           {/* Classes Scheduled */}
           <div className={`border rounded-lg p-4 ${unscheduledClasses > 0 ? 'border-red-300 bg-red-50' : 'border-emerald-200 bg-emerald-50'}`}>
             <div className="text-sm text-slate-600">
@@ -185,7 +185,7 @@ export function ScheduleStats({
               )}
             </div>
             {studyHallsPlaced < 6 && (
-              <div className="text-xs text-amber-600 mt-1">Click for details</div>
+              <div className="text-xs text-amber-600 mt-1 no-print">Click for details</div>
             )}
           </div>
 
@@ -205,7 +205,7 @@ export function ScheduleStats({
               </span>
             </div>
             {backToBackIssues > 0 && (
-              <div className="text-xs text-amber-600 mt-1">Click to see which teachers</div>
+              <div className="text-xs text-amber-600 mt-1 no-print">Click to see which teachers</div>
             )}
           </div>
 
@@ -232,7 +232,7 @@ export function ScheduleStats({
 
         {/* Issues & Suggestions - Only show if there are issues */}
         {issues.length > 0 && (
-          <div className="border border-amber-200 rounded-lg bg-amber-50/50 p-4">
+          <div className="border border-amber-200 rounded-lg bg-amber-50/50 p-4 print-notes">
             <h3 className="font-medium text-amber-800 mb-2 flex items-center gap-2">
               <AlertTriangle className="h-4 w-4" />
               Notes & Suggestions
