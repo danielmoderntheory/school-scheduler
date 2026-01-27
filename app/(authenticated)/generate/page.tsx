@@ -17,7 +17,7 @@ import {
 } from "@/components/ui/dialog"
 import { ScheduleGrid } from "@/components/ScheduleGrid"
 import { ScheduleStats } from "@/components/ScheduleStats"
-import { Loader2, Play, Download, Coffee, Eye, History, AlertTriangle, X, Server, Cloud } from "lucide-react"
+import { Loader2, Play, Download, Coffee, Eye, History, AlertTriangle, X, Server } from "lucide-react"
 import { generateSchedulesRemote, type ScheduleDiagnostics } from "@/lib/scheduler-remote"
 import type { Teacher, ClassEntry, ScheduleOption } from "@/lib/types"
 import toast from "react-hot-toast"
@@ -417,34 +417,19 @@ export default function GeneratePage() {
 
   return (
     <div className="max-w-7xl mx-auto p-8">
-      {/* Solver Status Banner */}
-      {solverStatus && (
-        <div className={`mb-4 px-4 py-2 rounded-lg flex items-center justify-between ${
-          solverStatus.isLocal
-            ? "bg-amber-50 border border-amber-300"
-            : "bg-emerald-50 border border-emerald-300"
-        }`}>
+      {/* Solver Status Banner - only show when using local solver */}
+      {solverStatus?.isLocal && (
+        <div className="mb-4 px-4 py-2 rounded-lg flex items-center justify-between bg-amber-50 border border-amber-300">
           <div className="flex items-center gap-2">
-            {solverStatus.isLocal ? (
-              <>
-                <Server className="h-4 w-4 text-amber-600" />
-                <span className="text-sm font-medium text-amber-800">LOCAL SOLVER</span>
-                <span className="text-xs text-amber-600">({solverStatus.url})</span>
-              </>
-            ) : (
-              <>
-                <Cloud className="h-4 w-4 text-emerald-600" />
-                <span className="text-sm font-medium text-emerald-800">CLOUD RUN</span>
-              </>
-            )}
+            <Server className="h-4 w-4 text-amber-600" />
+            <span className="text-sm font-medium text-amber-800">LOCAL SOLVER</span>
+            <span className="text-xs text-amber-600">({solverStatus.url})</span>
           </div>
-          {solverStatus.isLocal && (
-            <div className="flex items-center gap-3">
-              <span className="text-xs text-amber-600">
-                Remember: <code className="bg-amber-100 px-1 rounded">cd backend && ./deploy.sh</code> before production
-              </span>
-            </div>
-          )}
+          <div className="flex items-center gap-3">
+            <span className="text-xs text-amber-600">
+              Remember: <code className="bg-amber-100 px-1 rounded">cd backend && ./deploy.sh</code> before production
+            </span>
+          </div>
         </div>
       )}
 
