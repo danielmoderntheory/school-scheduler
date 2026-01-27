@@ -159,7 +159,7 @@ export function ScheduleStats({
           className="border border-slate-200 rounded-lg p-3 bg-slate-50/50 cursor-pointer print:cursor-default"
           onClick={() => setExpanded(!expanded)}
         >
-          <summary className="list-none flex items-center gap-2 text-sm font-medium text-slate-600 hover:text-slate-800 print:hover:text-slate-600">
+          <div className="flex items-center gap-2 text-sm font-medium text-slate-600 hover:text-slate-800 print:hover:text-slate-600">
             <ChevronDown className={`h-4 w-4 transition-transform no-print ${!expanded ? '-rotate-90' : ''}`} />
             Schedule Summary
             {/* Show inline stats when collapsed OR when printing */}
@@ -182,7 +182,7 @@ export function ScheduleStats({
                 </span>
               )}
             </span>
-          </summary>
+          </div>
         </div>
 
         {/* Summary Stats - Shown when expanded on screen, hidden on print */}
@@ -293,7 +293,7 @@ export function ScheduleStats({
         {/* Detailed Tables - Collapsed */}
         <details id="stats-details" className="group border border-slate-200 rounded-lg p-3 bg-slate-50/50">
           <summary className="cursor-pointer list-none flex items-center gap-2 text-sm font-medium text-slate-600 hover:text-slate-800">
-            <ChevronDown className="h-4 w-4 transition-transform -rotate-90 group-open:rotate-0" />
+            <ChevronDown className="h-4 w-4 transition-transform -rotate-90 group-open:rotate-0 no-print" />
             Study Hall & Teacher Details
             <span className="font-normal text-slate-500 group-open:hidden">
               — {sortedStats.filter(s => s.status === 'full-time').length} full-time, {sortedStats.filter(s => s.status !== 'full-time').length} part-time teachers

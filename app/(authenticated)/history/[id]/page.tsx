@@ -1096,7 +1096,7 @@ export default function HistoryDetailPage() {
               )}
 
               {/* Schedule Grids */}
-              <div className="print-page-break-before">
+              <div>
                 <div className="flex items-center justify-between mb-4">
                   <h3 className="font-semibold">
                     {viewMode === "teacher" ? "Teacher Schedules" : "Grade Schedules"}
