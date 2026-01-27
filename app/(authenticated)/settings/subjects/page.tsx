@@ -3,14 +3,6 @@
 import { useState, useEffect, useRef } from "react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
-import { Checkbox } from "@/components/ui/checkbox"
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select"
 import {
   Table,
   TableBody,
@@ -30,54 +22,52 @@ import {
   AlertDialogTitle,
   AlertDialogTrigger,
 } from "@/components/ui/alert-dialog"
-import { Trash2, Loader2 } from "lucide-react"
+import { Trash2, Loader2, ArrowLeft } from "lucide-react"
+import Link from "next/link"
 import toast from "react-hot-toast"
 
-interface Teacher {
+interface Subject {
   id: string
   name: string
-  status: "full-time" | "part-time"
-  can_supervise_study_hall: boolean
-  notes: string | null
 }
 
-export default function TeachersPage() {
-  const [teachers, setTeachers] = useState<Teacher[]>([])
+export default function SubjectsSettingsPage() {
+  const [subjects, setSubjects] = useState<Subject[]>([])
   const [loading, setLoading] = useState(true)
   const [savingId, setSavingId] = useState<string | null>(null)
-  const [newTeacherName, setNewTeacherName] = useState("")
-  const newTeacherRef = useRef<HTMLInputElement>(null)
+  const [newSubjectName, setNewSubjectName] = useState("")
+  const newSubjectRef = useRef<HTMLInputElement>(null)
 
   useEffect(() => {
-    loadTeachers()
+    loadSubjects()
   }, [])
 
-  async function loadTeachers() {
+  async function loadSubjects() {
     try {
-      const res = await fetch("/api/teachers")
+      const res = await fetch("/api/subjects")
       if (res.ok) {
         const data = await res.json()
-        setTeachers(data)
+        setSubjects(data)
       }
     } catch (error) {
-      toast.error("Failed to load teachers")
+      toast.error("Failed to load subjects")
     } finally {
       setLoading(false)
     }
   }
 
-  async function updateTeacher(id: string, field: string, value: unknown) {
+  async function updateSubject(id: string, field: string, value: unknown) {
     setSavingId(id)
     try {
-      const res = await fetch(`/api/teachers/${id}`, {
+      const res = await fetch(`/api/subjects/${id}`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ [field]: value }),
       })
       if (res.ok) {
         const updated = await res.json()
-        setTeachers((prev) =>
-          prev.map((t) => (t.id === id ? updated : t))
+        setSubjects((prev) =>
+          prev.map((s) => (s.id === id ? updated : s)).sort((a, b) => a.name.localeCompare(b.name))
         )
         toast.success("Saved")
       } else {
@@ -91,40 +81,41 @@ export default function TeachersPage() {
     }
   }
 
-  async function createTeacher() {
-    if (!newTeacherName.trim()) return
+  async function createSubject() {
+    if (!newSubjectName.trim()) return
 
     try {
-      const res = await fetch("/api/teachers", {
+      const res = await fetch("/api/subjects", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name: newTeacherName.trim() }),
+        body: JSON.stringify({ name: newSubjectName.trim() }),
       })
       if (res.ok) {
-        const newTeacher = await res.json()
-        setTeachers((prev) => [...prev, newTeacher].sort((a, b) => a.name.localeCompare(b.name)))
-        setNewTeacherName("")
-        toast.success("Teacher added")
+        const newSubject = await res.json()
+        setSubjects((prev) => [...prev, newSubject].sort((a, b) => a.name.localeCompare(b.name)))
+        setNewSubjectName("")
+        toast.success("Subject added")
       } else {
         const error = await res.json()
-        toast.error(error.error || "Failed to add teacher")
+        toast.error(error.error || "Failed to add subject")
       }
     } catch (error) {
-      toast.error("Failed to add teacher")
+      toast.error("Failed to add subject")
     }
   }
 
-  async function deleteTeacher(id: string) {
+  async function deleteSubject(id: string) {
     try {
-      const res = await fetch(`/api/teachers/${id}`, { method: "DELETE" })
+      const res = await fetch(`/api/subjects/${id}`, { method: "DELETE" })
       if (res.ok) {
-        setTeachers((prev) => prev.filter((t) => t.id !== id))
-        toast.success("Teacher deleted")
+        setSubjects((prev) => prev.filter((s) => s.id !== id))
+        toast.success("Subject deleted")
       } else {
-        toast.error("Failed to delete teacher")
+        const error = await res.json()
+        toast.error(error.error || "Failed to delete subject")
       }
     } catch (error) {
-      toast.error("Failed to delete teacher")
+      toast.error("Failed to delete subject")
     }
   }
 
@@ -137,11 +128,19 @@ export default function TeachersPage() {
   }
 
   return (
-    <div className="max-w-6xl mx-auto p-8">
+    <div className="max-w-4xl mx-auto p-8">
       <div className="mb-6">
-        <h1 className="text-3xl font-bold mb-2">Teachers</h1>
+        <Link
+          href="/classes"
+          className="inline-flex items-center text-sm text-muted-foreground hover:text-foreground mb-4"
+        >
+          <ArrowLeft className="h-4 w-4 mr-1" />
+          Back to Classes
+        </Link>
+        <h1 className="text-3xl font-bold mb-2">Subjects</h1>
         <p className="text-muted-foreground">
-          Click any cell to edit. Changes save automatically on blur.
+          Manage subjects that can be assigned to classes. You can also create subjects
+          directly from the Classes page.
         </p>
       </div>
 
@@ -149,59 +148,18 @@ export default function TeachersPage() {
         <Table>
           <TableHeader>
             <TableRow>
-              <TableHead className="w-[250px]">Name</TableHead>
-              <TableHead className="w-[150px]">Status</TableHead>
-              <TableHead className="w-[140px]">Exclude from Study Hall</TableHead>
-              <TableHead>Notes</TableHead>
+              <TableHead>Subject Name</TableHead>
               <TableHead className="w-[60px]"></TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
-            {teachers.map((teacher) => (
-              <TableRow key={teacher.id}>
+            {subjects.map((subject) => (
+              <TableRow key={subject.id}>
                 <TableCell>
                   <EditableText
-                    value={teacher.name}
-                    onSave={(value) => updateTeacher(teacher.id, "name", value)}
-                    saving={savingId === teacher.id}
-                  />
-                </TableCell>
-                <TableCell>
-                  <Select
-                    value={teacher.status}
-                    onValueChange={(value) =>
-                      updateTeacher(teacher.id, "status", value)
-                    }
-                  >
-                    <SelectTrigger className="h-8 w-[130px]">
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="full-time">Full-time</SelectItem>
-                      <SelectItem value="part-time">Part-time</SelectItem>
-                    </SelectContent>
-                  </Select>
-                </TableCell>
-                <TableCell>
-                  <Checkbox
-                    checked={teacher.can_supervise_study_hall === true}
-                    onCheckedChange={(checked) =>
-                      updateTeacher(
-                        teacher.id,
-                        "can_supervise_study_hall",
-                        checked  // checked = excluded = true
-                      )
-                    }
-                  />
-                </TableCell>
-                <TableCell>
-                  <EditableText
-                    value={teacher.notes || ""}
-                    onSave={(value) =>
-                      updateTeacher(teacher.id, "notes", value || null)
-                    }
-                    saving={savingId === teacher.id}
-                    placeholder="Add notes..."
+                    value={subject.name}
+                    onSave={(value) => updateSubject(subject.id, "name", value)}
+                    saving={savingId === subject.id}
                   />
                 </TableCell>
                 <TableCell>
@@ -213,16 +171,16 @@ export default function TeachersPage() {
                     </AlertDialogTrigger>
                     <AlertDialogContent>
                       <AlertDialogHeader>
-                        <AlertDialogTitle>Delete teacher?</AlertDialogTitle>
+                        <AlertDialogTitle>Delete subject?</AlertDialogTitle>
                         <AlertDialogDescription>
-                          This will permanently delete {teacher.name} and all
-                          their associated classes.
+                          This will permanently delete "{subject.name}".
+                          Subjects used in classes cannot be deleted.
                         </AlertDialogDescription>
                       </AlertDialogHeader>
                       <AlertDialogFooter>
                         <AlertDialogCancel>Cancel</AlertDialogCancel>
                         <AlertDialogAction
-                          onClick={() => deleteTeacher(teacher.id)}
+                          onClick={() => deleteSubject(subject.id)}
                           className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
                         >
                           Delete
@@ -233,24 +191,24 @@ export default function TeachersPage() {
                 </TableCell>
               </TableRow>
             ))}
-            {/* Add new teacher row */}
+            {/* Add new subject row */}
             <TableRow>
-              <TableCell colSpan={5}>
+              <TableCell colSpan={2}>
                 <form
                   onSubmit={(e) => {
                     e.preventDefault()
-                    createTeacher()
+                    createSubject()
                   }}
                   className="flex items-center gap-2"
                 >
                   <Input
-                    ref={newTeacherRef}
-                    value={newTeacherName}
-                    onChange={(e) => setNewTeacherName(e.target.value)}
-                    placeholder="Add new teacher..."
-                    className="max-w-[250px] h-8"
+                    ref={newSubjectRef}
+                    value={newSubjectName}
+                    onChange={(e) => setNewSubjectName(e.target.value)}
+                    placeholder="Add new subject..."
+                    className="max-w-[300px] h-8"
                   />
-                  {newTeacherName.trim() && (
+                  {newSubjectName.trim() && (
                     <Button type="submit" size="sm" variant="secondary">
                       Add
                     </Button>
@@ -260,6 +218,10 @@ export default function TeachersPage() {
             </TableRow>
           </TableBody>
         </Table>
+      </div>
+
+      <div className="mt-4 text-sm text-muted-foreground">
+        {subjects.length} subject{subjects.length !== 1 ? "s" : ""} total
       </div>
     </div>
   )

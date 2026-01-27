@@ -4,6 +4,7 @@ import { supabase } from "@/lib/supabase"
 export async function GET(request: NextRequest) {
   const searchParams = request.nextUrl.searchParams
   const quarterId = searchParams.get("quarter_id")
+  const includeUnsaved = searchParams.get("include_unsaved") === "true"
 
   let query = supabase
     .from("schedule_generations")
@@ -13,12 +14,18 @@ export async function GET(request: NextRequest) {
       generated_at,
       selected_option,
       notes,
+      is_saved,
       quarter:quarters(id, name)
     `)
     .order("generated_at", { ascending: false })
 
   if (quarterId) {
     query = query.eq("quarter_id", quarterId)
+  }
+
+  // By default, only return saved schedules
+  if (!includeUnsaved) {
+    query = query.eq("is_saved", true)
   }
 
   const { data, error } = await query
@@ -44,6 +51,7 @@ export async function POST(request: NextRequest) {
         backToBackIssues: body.options[0]?.backToBackIssues || 0,
         studyHallsPlaced: body.options[0]?.studyHallsPlaced || 0,
         classes_snapshot: body.classes_snapshot || [],
+        allSolutions: body.allSolutions || [], // Store all solutions for alternative browsing
       },
     })
     .select()

@@ -166,25 +166,25 @@ export function ScheduleStats({
 
           {/* Study Halls */}
           <div
-            className={`border rounded-lg p-4 ${studyHallsPlaced < 5 ? 'border-amber-200 bg-amber-50' : 'border-emerald-200 bg-emerald-50'} ${studyHallsPlaced < 5 ? 'cursor-pointer hover:border-amber-300' : ''}`}
-            onClick={studyHallsPlaced < 5 ? () => scrollToSection('study-hall-section') : undefined}
+            className={`border rounded-lg p-4 ${studyHallsPlaced < 6 ? 'border-amber-200 bg-amber-50' : 'border-emerald-200 bg-emerald-50'} ${studyHallsPlaced < 6 ? 'cursor-pointer hover:border-amber-300' : ''}`}
+            onClick={studyHallsPlaced < 6 ? () => scrollToSection('study-hall-section') : undefined}
           >
             <div className="text-sm text-slate-600">
               Study Halls Placed
-              <InfoTooltip text="Study hall supervision slots assigned to eligible full-time teachers. There are 5 grade groups that each need one study hall per week." />
+              <InfoTooltip text="Study hall supervision slots assigned to eligible full-time teachers. Grades 6-11 each need one study hall per week (6 total)." />
             </div>
             <div className="text-2xl font-bold">
-              {studyHallsPlaced}/5
-              {studyHallsPlaced === 5 && (
+              {studyHallsPlaced}/6
+              {studyHallsPlaced >= 6 && (
                 <Badge className="ml-2 text-xs bg-emerald-500">Complete</Badge>
               )}
-              {studyHallsPlaced < 5 && (
+              {studyHallsPlaced < 6 && (
                 <Badge variant="outline" className="ml-2 text-xs border-amber-400 text-amber-700">
-                  {5 - studyHallsPlaced} Missing
+                  {6 - studyHallsPlaced} Missing
                 </Badge>
               )}
             </div>
-            {studyHallsPlaced < 5 && (
+            {studyHallsPlaced < 6 && (
               <div className="text-xs text-amber-600 mt-1">Click for details</div>
             )}
           </div>
@@ -249,74 +249,73 @@ export function ScheduleStats({
         )}
 
         {/* Detailed Tables - Collapsed */}
-        <details id="stats-details" className="group">
+        <details id="stats-details" className="group border border-slate-200 rounded-lg p-3 bg-slate-50/50">
           <summary className="cursor-pointer list-none flex items-center gap-2 text-sm font-medium text-slate-600 hover:text-slate-800">
             <ChevronDown className="h-4 w-4 transition-transform group-open:rotate-180" />
             Study Hall & Teacher Details
           </summary>
 
-          <div className="mt-4 space-y-6">
-            {/* Study Hall Assignments */}
+          <div className="mt-3 space-y-4">
+            {/* Study Hall Assignments - Compact inline list */}
             <div id="study-hall-section">
-              <h3 className="font-semibold mb-3 text-sm">Study Hall Assignments</h3>
-              <div className="grid grid-cols-2 md:grid-cols-5 gap-2">
+              <h3 className="font-semibold mb-2 text-xs text-slate-500 uppercase tracking-wide">Study Hall Assignments</h3>
+              <div className="grid grid-cols-3 md:grid-cols-6 gap-1.5">
                 {studyHallAssignments.map((sh) => (
                   <div
                     key={sh.group}
-                    className={`border rounded-lg p-3 ${
+                    className={`border rounded px-2 py-1.5 ${
                       sh.teacher ? "bg-blue-50 border-blue-200" : "bg-red-50 border-red-200"
                     }`}
                   >
-                    <div className="font-medium text-sm">{sh.group}</div>
+                    <div className="font-medium text-xs">{sh.group.replace(' Grade', '')}</div>
                     {sh.teacher ? (
-                      <div className="text-xs text-muted-foreground">
-                        {sh.teacher} - {sh.day} Block {sh.block}
+                      <div className="text-[10px] text-muted-foreground truncate" title={`${sh.teacher} - ${sh.day} B${sh.block}`}>
+                        {sh.teacher.split(' ')[0]} • {sh.day?.slice(0,3)} B{sh.block}
                       </div>
                     ) : (
-                      <div className="text-xs text-destructive">Not placed</div>
+                      <div className="text-[10px] text-destructive">Not placed</div>
                     )}
                   </div>
                 ))}
               </div>
             </div>
 
-            {/* Teacher Utilization Table */}
+            {/* Teacher Utilization Table - Compact */}
             <div id="teacher-util-section">
-              <h3 className="font-semibold mb-3 text-sm">Teacher Utilization</h3>
+              <h3 className="font-semibold mb-2 text-xs text-slate-500 uppercase tracking-wide">Teacher Utilization</h3>
               <div className="border rounded-lg overflow-hidden bg-white">
-                <Table>
+                <Table className="text-xs">
                   <TableHeader>
                     <TableRow className="bg-slate-50">
-                      <TableHead>Teacher</TableHead>
-                      <TableHead>Status</TableHead>
-                      <TableHead className="text-center">Teaching</TableHead>
-                      <TableHead className="text-center">Study Hall</TableHead>
-                      <TableHead className="text-center">Open</TableHead>
-                      <TableHead className="text-center">BTB Open</TableHead>
+                      <TableHead className="py-2 px-2">Teacher</TableHead>
+                      <TableHead className="py-2 px-2">Status</TableHead>
+                      <TableHead className="text-center py-2 px-2">Teaching</TableHead>
+                      <TableHead className="text-center py-2 px-2">Study Hall</TableHead>
+                      <TableHead className="text-center py-2 px-2">Open</TableHead>
+                      <TableHead className="text-center py-2 px-2">BTB Open</TableHead>
                     </TableRow>
                   </TableHeader>
                   <TableBody>
                     {sortedStats.map((stat) => (
-                      <TableRow key={stat.teacher}>
-                        <TableCell className="font-medium">{stat.teacher}</TableCell>
-                        <TableCell>
-                          <Badge
-                            variant={stat.status === "full-time" ? "default" : "secondary"}
-                            className={stat.status === "full-time" ? "bg-sky-500" : ""}
-                          >
+                      <TableRow key={stat.teacher} className="hover:bg-slate-50">
+                        <TableCell className="font-medium py-1.5 px-2">{stat.teacher}</TableCell>
+                        <TableCell className="py-1.5 px-2">
+                          <span className={`text-[10px] px-1.5 py-0.5 rounded ${
+                            stat.status === "full-time"
+                              ? "bg-sky-100 text-sky-700"
+                              : "bg-slate-100 text-slate-600"
+                          }`}>
                             {stat.status}
-                          </Badge>
+                          </span>
                         </TableCell>
-                        <TableCell className="text-center">{stat.teaching}</TableCell>
-                        <TableCell className="text-center">{stat.studyHall}</TableCell>
-                        <TableCell className="text-center">{stat.open}</TableCell>
-                        <TableCell className="text-center">
+                        <TableCell className="text-center py-1.5 px-2">{stat.teaching}</TableCell>
+                        <TableCell className="text-center py-1.5 px-2">{stat.studyHall}</TableCell>
+                        <TableCell className="text-center py-1.5 px-2">{stat.open}</TableCell>
+                        <TableCell className="text-center py-1.5 px-2">
                           {stat.backToBackIssues > 0 ? (
-                            <span className="text-amber-600 font-medium">
-                              {stat.backToBackIssues}
-                            </span>
+                            <span className="text-amber-600 font-medium">{stat.backToBackIssues}</span>
                           ) : (
-                            <span className="text-slate-400">0</span>
+                            <span className="text-slate-300">0</span>
                           )}
                         </TableCell>
                       </TableRow>

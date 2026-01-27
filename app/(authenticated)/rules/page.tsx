@@ -284,7 +284,6 @@ function ConfigurableRuleCard({ rule, onToggle, onConfigChange, saving }: Config
 
   if (rule.rule_key === "study_hall_teacher_eligibility") {
     const requireFullTime = config.require_full_time !== false
-    const requireTeachesGrades = (config.require_teaches_grades as string[]) || []
 
     return (
       <div className={cn(
@@ -307,7 +306,7 @@ function ConfigurableRuleCard({ rule, onToggle, onConfigChange, saving }: Config
           </div>
         </div>
         {rule.enabled && (
-          <div className="mt-3 pt-3 border-t space-y-3">
+          <div className="mt-3 pt-3 border-t">
             <label className="flex items-center gap-2 text-sm">
               <Checkbox
                 checked={requireFullTime}
@@ -318,35 +317,9 @@ function ConfigurableRuleCard({ rule, onToggle, onConfigChange, saving }: Config
               />
               <span>Must be full-time teacher</span>
             </label>
-            <div>
-              <div className="text-xs text-muted-foreground mb-2">Must teach at least one of these grades:</div>
-              <div className="flex flex-wrap gap-2">
-                {ALL_GRADES.map((grade) => (
-                  <label
-                    key={grade}
-                    className={cn(
-                      "flex items-center gap-1.5 px-2 py-1 rounded border text-xs cursor-pointer transition-colors",
-                      requireTeachesGrades.includes(grade)
-                        ? "bg-sky-50 border-sky-300 text-sky-700"
-                        : "bg-slate-50 border-slate-200 text-slate-500 hover:border-slate-300"
-                    )}
-                  >
-                    <Checkbox
-                      checked={requireTeachesGrades.includes(grade)}
-                      onCheckedChange={(checked) => {
-                        const newGrades = checked
-                          ? [...requireTeachesGrades, grade]
-                          : requireTeachesGrades.filter((g) => g !== grade)
-                        onConfigChange({ ...config, require_teaches_grades: newGrades })
-                      }}
-                      disabled={saving}
-                      className="h-3 w-3"
-                    />
-                    {grade.replace(" Grade", "")}
-                  </label>
-                ))}
-              </div>
-            </div>
+            <p className="text-xs text-muted-foreground mt-2">
+              Individual teachers can be excluded via the &quot;Exclude from Study Hall&quot; checkbox on their teacher record.
+            </p>
           </div>
         )}
       </div>

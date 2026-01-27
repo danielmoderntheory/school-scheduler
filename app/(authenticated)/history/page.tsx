@@ -23,7 +23,8 @@ import {
   AlertDialogTitle,
   AlertDialogTrigger,
 } from "@/components/ui/alert-dialog"
-import { Loader2, Trash2, Eye, Download } from "lucide-react"
+import { Loader2, Trash2, Eye, Download, Check } from "lucide-react"
+import { Checkbox } from "@/components/ui/checkbox"
 import toast from "react-hot-toast"
 
 interface Generation {
@@ -32,20 +33,23 @@ interface Generation {
   generated_at: string
   selected_option: number | null
   notes: string | null
+  is_saved: boolean
   quarter: { id: string; name: string }
 }
 
 export default function HistoryPage() {
   const [generations, setGenerations] = useState<Generation[]>([])
   const [loading, setLoading] = useState(true)
+  const [showUnsaved, setShowUnsaved] = useState(false)
 
   useEffect(() => {
     loadGenerations()
-  }, [])
+  }, [showUnsaved])
 
   async function loadGenerations() {
     try {
-      const res = await fetch("/api/history")
+      const url = showUnsaved ? "/api/history?include_unsaved=true" : "/api/history"
+      const res = await fetch(url)
       if (res.ok) {
         const data = await res.json()
         setGenerations(data)
@@ -85,11 +89,26 @@ export default function HistoryPage() {
 
   return (
     <div className="max-w-6xl mx-auto p-8">
-      <div className="mb-6">
-        <h1 className="text-3xl font-bold mb-2">Schedule History</h1>
-        <p className="text-muted-foreground">
-          View and export previously generated schedules.
-        </p>
+      <div className="mb-6 flex items-start justify-between">
+        <div>
+          <h1 className="text-3xl font-bold mb-2">Schedule History</h1>
+          <p className="text-muted-foreground">
+            View and export previously generated schedules.
+          </p>
+        </div>
+        <div className="flex items-center gap-2">
+          <Checkbox
+            id="show-unsaved"
+            checked={showUnsaved}
+            onCheckedChange={(checked) => setShowUnsaved(checked === true)}
+          />
+          <label
+            htmlFor="show-unsaved"
+            className="text-sm text-muted-foreground cursor-pointer"
+          >
+            Show all (including unsaved)
+          </label>
+        </div>
       </div>
 
       {generations.length === 0 ? (
@@ -104,6 +123,7 @@ export default function HistoryPage() {
           <Table>
             <TableHeader>
               <TableRow>
+                <TableHead className="w-[80px]">Status</TableHead>
                 <TableHead>Quarter</TableHead>
                 <TableHead>Generated</TableHead>
                 <TableHead>Selected Option</TableHead>
@@ -114,6 +134,16 @@ export default function HistoryPage() {
             <TableBody>
               {generations.map((gen) => (
                 <TableRow key={gen.id}>
+                  <TableCell>
+                    {gen.is_saved ? (
+                      <Badge className="bg-emerald-500 gap-1">
+                        <Check className="h-3 w-3" />
+                        Saved
+                      </Badge>
+                    ) : (
+                      <span className="text-xs text-muted-foreground">Unsaved</span>
+                    )}
+                  </TableCell>
                   <TableCell>
                     <Badge variant="outline">{gen.quarter?.name}</Badge>
                   </TableCell>

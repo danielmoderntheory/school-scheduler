@@ -1,6 +1,7 @@
 "use client"
 
 import { useState, useEffect, useRef } from "react"
+import { useRouter } from "next/navigation"
 import Link from "next/link"
 import { Button } from "@/components/ui/button"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
@@ -16,10 +17,82 @@ import {
 } from "@/components/ui/dialog"
 import { ScheduleGrid } from "@/components/ScheduleGrid"
 import { ScheduleStats } from "@/components/ScheduleStats"
-import { Loader2, Play, Save, Download, Coffee, Clock, Eye, History, AlertTriangle, X } from "lucide-react"
-import { generateSchedules } from "@/lib/scheduler"
+import { Loader2, Play, Download, Coffee, Eye, History, AlertTriangle, X, Server, Cloud } from "lucide-react"
+import { generateSchedulesRemote, type ScheduleDiagnostics } from "@/lib/scheduler-remote"
 import type { Teacher, ClassEntry, ScheduleOption } from "@/lib/types"
 import toast from "react-hot-toast"
+
+// Sort grades: Kindergarten first, then by grade number
+function gradeSort(a: string, b: string): number {
+  if (a.includes("Kindergarten")) return -1
+  if (b.includes("Kindergarten")) return 1
+  const aNum = parseInt(a.match(/(\d+)/)?.[1] || "99")
+  const bNum = parseInt(b.match(/(\d+)/)?.[1] || "99")
+  return aNum - bNum
+}
+
+// Convert grade string to number for sorting (K=0, 1st=1, etc.)
+function gradeToNum(grade: string): number {
+  if (grade.toLowerCase().includes("kindergarten") || grade === "K") return 0
+  const match = grade.match(/(\d+)/)
+  return match ? parseInt(match[1]) : 99
+}
+
+// Analyze a teacher's schedule to find their primary teaching grade(s)
+// Primary = grades they teach more than 30% of the time
+function analyzeTeacherGrades(schedule: Record<string, Record<number, [string, string] | null>>): { primaryGrade: number; hasPrimary: boolean; gradeSpread: number } {
+  const gradeCounts = new Map<number, number>()
+  let totalTeaching = 0
+
+  for (const day of Object.values(schedule)) {
+    for (const entry of Object.values(day)) {
+      if (entry && entry[0] && entry[1] !== "OPEN" && entry[1] !== "Study Hall") {
+        totalTeaching++
+        const gradeStr = entry[0]
+
+        // Parse grades from the entry
+        const grades: number[] = []
+        const rangeMatch = gradeStr.match(/(\d+)(?:st|nd|rd|th)?[-–](\d+)/)
+        if (rangeMatch) {
+          const start = parseInt(rangeMatch[1])
+          const end = parseInt(rangeMatch[2])
+          for (let i = start; i <= end; i++) grades.push(i)
+        } else {
+          grades.push(gradeToNum(gradeStr))
+        }
+
+        // Count each grade (split credit for combined grades)
+        const creditPerGrade = 1 / grades.length
+        for (const g of grades) {
+          if (g < 99) {
+            gradeCounts.set(g, (gradeCounts.get(g) || 0) + creditPerGrade)
+          }
+        }
+      }
+    }
+  }
+
+  if (totalTeaching === 0) {
+    return { primaryGrade: 99, hasPrimary: false, gradeSpread: 0 }
+  }
+
+  // Find grades that make up >30% of teaching
+  const primaryGrades: number[] = []
+  for (const [grade, count] of gradeCounts) {
+    if (count / totalTeaching >= 0.30) {
+      primaryGrades.push(grade)
+    }
+  }
+
+  // Sort primary grades to get the lowest
+  primaryGrades.sort((a, b) => a - b)
+
+  return {
+    primaryGrade: primaryGrades.length > 0 ? primaryGrades[0] : 99,
+    hasPrimary: primaryGrades.length > 0,
+    gradeSpread: gradeCounts.size
+  }
+}
 
 interface Quarter {
   id: string
@@ -32,17 +105,8 @@ interface HistoryItem {
   generated_at: string
   selected_option: number | null
   studyHallsPlaced?: number
+  is_saved: boolean
   quarter: { id: string; name: string }
-}
-
-interface LastRun {
-  timestamp: string
-  quarterId: string
-  quarterName: string
-  studyHallsPlaced: number
-  backToBackIssues: number
-  saved: boolean
-  options: ScheduleOption[] // Store full results so we can view them
 }
 
 interface Grade {
@@ -55,6 +119,9 @@ interface DBClass {
   id: string
   teacher: { id: string; name: string }
   grade: { id: string; name: string; display_name: string }
+  grade_ids?: string[]
+  grades?: Array<{ id: string; name: string; display_name: string; sort_order: number }>
+  is_elective?: boolean
   subject: { id: string; name: string }
   days_per_week: number
   restrictions: Array<{
@@ -64,6 +131,7 @@ interface DBClass {
 }
 
 export default function GeneratePage() {
+  const router = useRouter()
   const [activeQuarter, setActiveQuarter] = useState<Quarter | null>(null)
   const [teachers, setTeachers] = useState<Teacher[]>([])
   const [grades, setGrades] = useState<Grade[]>([])
@@ -74,28 +142,29 @@ export default function GeneratePage() {
   const [results, setResults] = useState<ScheduleOption[] | null>(null)
   const [selectedOption, setSelectedOption] = useState("1")
   const [viewMode, setViewMode] = useState<"teacher" | "grade">("teacher")
-  const [saving, setSaving] = useState(false)
   const [showConfirmDialog, setShowConfirmDialog] = useState(false)
   const [recentHistory, setRecentHistory] = useState<HistoryItem[]>([])
-  const [lastRun, setLastRun] = useState<LastRun | null>(null)
-  const [scheduleError, setScheduleError] = useState<{ type: 'infeasible' | 'error'; message: string } | null>(null)
+  const [scheduleError, setScheduleError] = useState<{ type: 'infeasible' | 'error'; message: string; diagnostics?: ScheduleDiagnostics } | null>(null)
+  const [solverStatus, setSolverStatus] = useState<{ isLocal: boolean; url: string } | null>(null)
   const generationIdRef = useRef<string | null>(null)
 
   useEffect(() => {
     loadData()
-    // Load last run from localStorage
-    const stored = localStorage.getItem('lastScheduleRun')
-    if (stored) {
-      try {
-        setLastRun(JSON.parse(stored))
-      } catch (e) {
-        // ignore
-      }
-    }
   }, [])
 
   async function loadData() {
     try {
+      // Check solver status first
+      try {
+        const statusRes = await fetch("/api/solve-remote/status")
+        if (statusRes.ok) {
+          const statusData = await statusRes.json()
+          setSolverStatus(statusData)
+        }
+      } catch {
+        // Ignore - will just not show indicator
+      }
+
       const [teachersRes, gradesRes, quartersRes] = await Promise.all([
         fetch("/api/teachers"),
         fetch("/api/grades"),
@@ -120,7 +189,7 @@ export default function GeneratePage() {
         setClasses(classesData)
       }
 
-      // Load recent history
+      // Load recent history (saved only)
       const historyRes = await fetch("/api/history")
       if (historyRes.ok) {
         const historyData = await historyRes.json()
@@ -134,20 +203,47 @@ export default function GeneratePage() {
   }
 
   function convertToSchedulerFormat(): { teachers: Teacher[]; classes: ClassEntry[] } {
-    const teacherList: Teacher[] = teachers.map((t) => ({
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const teacherList: Teacher[] = teachers.map((t: any) => ({
       id: t.id,
       name: t.name,
       status: t.status,
-      canSuperviseStudyHall: t.canSuperviseStudyHall,
+      // API returns snake_case, convert to camelCase for solver
+      canSuperviseStudyHall: t.can_supervise_study_hall,
     }))
 
     const classList: ClassEntry[] = classes.map((c) => {
+      // Build grades array - prefer new grades field, fall back to single grade
+      let gradesList: string[] = []
+      let gradeDisplay = ''
+
+      if (c.grades && c.grades.length > 0) {
+        // New multi-grade format
+        gradesList = c.grades.map(g => g.display_name)
+        // Create display name based on grade range
+        if (gradesList.length === 1) {
+          gradeDisplay = gradesList[0]
+        } else {
+          const sorted = [...c.grades].sort((a, b) => a.sort_order - b.sort_order)
+          const first = sorted[0].display_name.replace(' Grade', '')
+          const last = sorted[sorted.length - 1].display_name.replace(' Grade', '')
+          gradeDisplay = `${first}-${last} Grade`
+        }
+      } else if (c.grade) {
+        // Legacy single grade format
+        gradesList = [c.grade.display_name]
+        gradeDisplay = c.grade.display_name
+      }
+
       const entry: ClassEntry = {
         id: c.id,
         teacher: c.teacher.name,
-        grade: c.grade.display_name,
+        grade: gradeDisplay,  // Keep for backward compat
+        grades: gradesList,   // New: array of grade names
+        gradeDisplay: gradeDisplay,
         subject: c.subject.name,
         daysPerWeek: c.days_per_week,
+        isElective: c.is_elective || false,
       }
 
       // Process restrictions
@@ -182,15 +278,15 @@ export default function GeneratePage() {
     setGenerating(true)
     setResults(null)
     setScheduleError(null)
-    setLastRun(null) // Clear last run when starting new generation
-    setProgress({ current: 0, total: 50, message: "Initializing solver..." })
+    setProgress({ current: 0, total: 150, message: "Connecting to OR-Tools solver..." })
 
     try {
       const { teachers: teacherList, classes: classList } = convertToSchedulerFormat()
 
-      const result = await generateSchedules(teacherList, classList, {
-        numOptions: 3,
-        numAttempts: 50,
+      const result = await generateSchedulesRemote(teacherList, classList, {
+        numOptions: 1,
+        numAttempts: 150,
+        maxTimeSeconds: 120,
         onProgress: (current, total, message) => {
           setProgress({ current, total, message })
         },
@@ -213,36 +309,62 @@ export default function GeneratePage() {
       if (result.status === 'infeasible') {
         setScheduleError({
           type: 'infeasible',
-          message: result.message || "The current class constraints are impossible to satisfy."
+          message: result.message || "The current class constraints are impossible to satisfy.",
+          diagnostics: result.diagnostics,
         })
         setResults(null) // Explicit clear
       } else if (result.status === 'error' || result.options.length === 0) {
         setScheduleError({
           type: 'error',
-          message: result.message || "Could not find a valid schedule. Try adjusting constraints."
+          message: result.message || "Could not find a valid schedule. Try adjusting constraints.",
+          diagnostics: result.diagnostics,
         })
         setResults(null) // Explicit clear
       } else {
         setScheduleError(null)
-        setResults(result.options)
         toast.success(`Generated ${result.options.length} schedule option(s)`)
 
-        // Store last run in localStorage
-        const run: LastRun = {
-          timestamp: new Date().toISOString(),
-          quarterId: activeQuarter?.id || '',
-          quarterName: activeQuarter?.name || '',
-          studyHallsPlaced: result.options[0].studyHallsPlaced,
-          backToBackIssues: result.options[0].backToBackIssues,
-          saved: false,
-          options: result.options, // Store full results for viewing later
-        }
-        setLastRun(run)
+        // Auto-save to database for shareable URL
         try {
-          localStorage.setItem('lastScheduleRun', JSON.stringify(run))
+          const classesSnapshot = classes.map((c) => ({
+            teacher_id: c.teacher.id,
+            teacher_name: c.teacher.name,
+            grade_id: c.grade.id,
+            grade_name: c.grade.name,
+            grade_display_name: c.grade.display_name,
+            subject_id: c.subject.id,
+            subject_name: c.subject.name,
+            days_per_week: c.days_per_week,
+            restrictions: c.restrictions,
+          }))
+
+          const saveRes = await fetch("/api/history", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              quarter_id: activeQuarter?.id,
+              options: result.options,
+              allSolutions: result.allSolutions || [],
+              selected_option: 1,
+              classes_snapshot: classesSnapshot,
+            }),
+          })
+
+          if (saveRes.ok) {
+            const savedData = await saveRes.json()
+            // Redirect to shareable history URL (don't show results here)
+            router.replace(`/history/${savedData.id}`)
+            return // Don't set results - we're redirecting
+          } else {
+            // Save failed - show results on this page as fallback
+            console.warn('Could not auto-save to database')
+            toast.error('Could not save to history - results shown below')
+            setResults(result.options)
+          }
         } catch (e) {
-          // localStorage might be full - that's ok, we still have it in state
-          console.warn('Could not save last run to localStorage:', e)
+          console.warn('Could not auto-save:', e)
+          toast.error('Could not save to history - results shown below')
+          setResults(result.options)
         }
       }
     } catch (error) {
@@ -250,59 +372,6 @@ export default function GeneratePage() {
       toast.error("Schedule generation failed")
     } finally {
       setGenerating(false)
-    }
-  }
-
-  async function handleSave() {
-    if (!results || !activeQuarter) return
-
-    setSaving(true)
-    try {
-      // Save classes snapshot along with the schedule
-      const classesSnapshot = classes.map((c) => ({
-        teacher_id: c.teacher.id,
-        teacher_name: c.teacher.name,
-        grade_id: c.grade.id,
-        grade_name: c.grade.name,
-        grade_display_name: c.grade.display_name,
-        subject_id: c.subject.id,
-        subject_name: c.subject.name,
-        days_per_week: c.days_per_week,
-        restrictions: c.restrictions,
-      }))
-
-      const res = await fetch("/api/history", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          quarter_id: activeQuarter.id,
-          options: results,
-          selected_option: parseInt(selectedOption),
-          classes_snapshot: classesSnapshot,
-        }),
-      })
-
-      if (res.ok) {
-        toast.success("Schedule saved to history")
-        // Mark last run as saved
-        if (lastRun) {
-          const updatedRun = { ...lastRun, saved: true }
-          setLastRun(updatedRun)
-          localStorage.setItem('lastScheduleRun', JSON.stringify(updatedRun))
-        }
-        // Refresh history
-        const historyRes = await fetch("/api/history")
-        if (historyRes.ok) {
-          const historyData = await historyRes.json()
-          setRecentHistory(historyData.slice(0, 5))
-        }
-      } else {
-        toast.error("Failed to save schedule")
-      }
-    } catch (error) {
-      toast.error("Failed to save schedule")
-    } finally {
-      setSaving(false)
     }
   }
 
@@ -348,6 +417,37 @@ export default function GeneratePage() {
 
   return (
     <div className="max-w-7xl mx-auto p-8">
+      {/* Solver Status Banner */}
+      {solverStatus && (
+        <div className={`mb-4 px-4 py-2 rounded-lg flex items-center justify-between ${
+          solverStatus.isLocal
+            ? "bg-amber-50 border border-amber-300"
+            : "bg-emerald-50 border border-emerald-300"
+        }`}>
+          <div className="flex items-center gap-2">
+            {solverStatus.isLocal ? (
+              <>
+                <Server className="h-4 w-4 text-amber-600" />
+                <span className="text-sm font-medium text-amber-800">LOCAL SOLVER</span>
+                <span className="text-xs text-amber-600">({solverStatus.url})</span>
+              </>
+            ) : (
+              <>
+                <Cloud className="h-4 w-4 text-emerald-600" />
+                <span className="text-sm font-medium text-emerald-800">CLOUD RUN</span>
+              </>
+            )}
+          </div>
+          {solverStatus.isLocal && (
+            <div className="flex items-center gap-3">
+              <span className="text-xs text-amber-600">
+                Remember: <code className="bg-amber-100 px-1 rounded">cd backend && ./deploy.sh</code> before production
+              </span>
+            </div>
+          )}
+        </div>
+      )}
+
       <div className="mb-6 flex items-center justify-between">
         <div>
           <h1 className="text-3xl font-bold mb-2">Generate Schedule</h1>
@@ -391,10 +491,10 @@ export default function GeneratePage() {
             <DialogDescription asChild>
               <div className="pt-2 space-y-3 text-sm text-muted-foreground">
                 <p>
-                  this could take a minute or two.
+                  The OR-Tools solver will run up to 150 attempts to find the best schedules. This typically takes 1-2 minutes.
                 </p>
                 <p className="text-slate-500">
-                  (and depending on how many browser tabs you have open, it might take longer. take a coffee break.)
+                  (Perfect time for a coffee break!)
                 </p>
               </div>
             </DialogDescription>
@@ -470,7 +570,116 @@ export default function GeneratePage() {
             <div className="space-y-4">
               <p className="text-red-700">{scheduleError.message}</p>
 
-              {scheduleError.type === 'infeasible' && (
+              {/* Diagnostics Section */}
+              {scheduleError.diagnostics && (
+                <div className="bg-white/80 rounded-lg p-4 border border-red-200 space-y-3">
+                  <p className="font-medium text-red-800">Issues Found:</p>
+
+                  {/* Incomplete classes - most important, show first */}
+                  {scheduleError.diagnostics.incompleteClasses && scheduleError.diagnostics.incompleteClasses.length > 0 && (
+                    <div className="bg-red-100 rounded p-3 border border-red-300">
+                      <p className="font-medium text-red-800 text-sm mb-2">Classes with missing required fields:</p>
+                      <ul className="text-sm text-red-700 space-y-1">
+                        {scheduleError.diagnostics.incompleteClasses.map((c, i) => (
+                          <li key={i}>
+                            <strong>Class #{c.index}</strong>:
+                            {c.teacher !== '(none)' && <span className="ml-1">{c.teacher}</span>}
+                            {c.subject !== '(none)' && <span className="ml-1">- {c.subject}</span>}
+                            <span className="ml-2 text-red-600 font-medium">({c.issues.join(', ')})</span>
+                          </li>
+                        ))}
+                      </ul>
+                      <p className="text-xs text-red-600 mt-2">
+                        Please fix or remove these classes before generating a schedule.
+                      </p>
+                    </div>
+                  )}
+
+                  {/* Basic stats - only show if solver ran */}
+                  {scheduleError.diagnostics.totalSessions !== undefined && (
+                    <div className="text-sm text-slate-700 flex gap-4 flex-wrap">
+                      <span>Total sessions: <strong>{scheduleError.diagnostics.totalSessions}</strong></span>
+                      <span>Fixed sessions: <strong>{scheduleError.diagnostics.fixedSessions}</strong></span>
+                      {scheduleError.diagnostics.solverStatus && (
+                        <span>Status: <strong className="text-red-600">{scheduleError.diagnostics.solverStatus}</strong></span>
+                      )}
+                    </div>
+                  )}
+
+                  {/* Teacher overload */}
+                  {scheduleError.diagnostics.teacherOverload && scheduleError.diagnostics.teacherOverload.length > 0 && (
+                    <div className="bg-red-100 rounded p-3 border border-red-200">
+                      <p className="font-medium text-red-800 text-sm mb-1">Teachers with too many sessions (&gt;25):</p>
+                      <ul className="text-sm text-red-700 space-y-0.5">
+                        {scheduleError.diagnostics.teacherOverload.map((t, i) => (
+                          <li key={i}><strong>{t.teacher}</strong>: {t.sessions} sessions (max 25)</li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+
+                  {/* Grade overload */}
+                  {scheduleError.diagnostics.gradeOverload && scheduleError.diagnostics.gradeOverload.length > 0 && (
+                    <div className="bg-red-100 rounded p-3 border border-red-200">
+                      <p className="font-medium text-red-800 text-sm mb-1">Grades with too many sessions (&gt;25):</p>
+                      <ul className="text-sm text-red-700 space-y-0.5">
+                        {scheduleError.diagnostics.gradeOverload.map((g, i) => (
+                          <li key={i}><strong>{g.grade}</strong>: {g.sessions} sessions (max 25)</li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+
+                  {/* Fixed slot conflicts */}
+                  {scheduleError.diagnostics.fixedSlotConflicts && scheduleError.diagnostics.fixedSlotConflicts.length > 0 && (
+                    <div className="bg-red-100 rounded p-3 border border-red-200">
+                      <p className="font-medium text-red-800 text-sm mb-1">Fixed Slot Conflicts (same teacher, same time):</p>
+                      <ul className="text-sm text-red-700 space-y-1">
+                        {scheduleError.diagnostics.fixedSlotConflicts.map((c, i) => (
+                          <li key={i}>
+                            <strong>{c.teacher}</strong> on {c.day} Block {c.block}:
+                            <span className="text-red-600 ml-1">{c.class1.subject}</span> vs
+                            <span className="text-red-600 ml-1">{c.class2.subject}</span>
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+
+                  {/* Co-taught mismatches */}
+                  {scheduleError.diagnostics.cotaughtMismatches && scheduleError.diagnostics.cotaughtMismatches.length > 0 && (
+                    <div className="bg-amber-100 rounded p-3 border border-amber-200">
+                      <p className="font-medium text-amber-800 text-sm mb-1">Co-taught Session Mismatches:</p>
+                      <p className="text-xs text-amber-600 mb-2">Teachers teaching same class must have same days_per_week</p>
+                      <ul className="text-sm text-amber-700 space-y-1">
+                        {scheduleError.diagnostics.cotaughtMismatches.map((m, i) => (
+                          <li key={i}>
+                            <strong>{m.grade} - {m.subject}</strong>:
+                            <span className="ml-1">{m.teacher1} ({m.sessions1}x)</span> vs
+                            <span className="ml-1">{m.teacher2} ({m.sessions2}x)</span>
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+
+                  {/* Co-taught classes info */}
+                  {scheduleError.diagnostics.cotaughtClasses && scheduleError.diagnostics.cotaughtClasses.length > 0 && (
+                    <details className="text-sm">
+                      <summary className="cursor-pointer text-slate-600 hover:text-slate-800">
+                        {scheduleError.diagnostics.cotaughtClasses.length} co-taught classes ({scheduleError.diagnostics.cotaughtConstraints} constraints)
+                      </summary>
+                      <ul className="mt-2 text-slate-600 space-y-0.5 pl-4">
+                        {scheduleError.diagnostics.cotaughtClasses.map((c, i) => (
+                          <li key={i}>{c.grade} - {c.subject}: {c.teachers.join(', ')}</li>
+                        ))}
+                      </ul>
+                    </details>
+                  )}
+                </div>
+              )}
+
+              {scheduleError.type === 'infeasible' && !scheduleError.diagnostics?.incompleteClasses?.length && !scheduleError.diagnostics?.fixedSlotConflicts?.length && !scheduleError.diagnostics?.teacherOverload?.length && !scheduleError.diagnostics?.gradeOverload?.length && (
                 <div className="bg-white/60 rounded-lg p-4 border border-red-200">
                   <p className="font-medium text-red-800 mb-2">Common causes:</p>
                   <ul className="text-sm text-red-700 space-y-1.5 list-disc list-inside">
@@ -512,9 +721,9 @@ export default function GeneratePage() {
                     {results[i] && (
                       <Badge
                         variant="outline"
-                        className={`ml-2 ${results[i].studyHallsPlaced === 5 ? 'border-emerald-400 text-emerald-700' : 'border-amber-400 text-amber-700'}`}
+                        className={`ml-2 ${results[i].studyHallsPlaced >= (results[i].studyHallAssignments?.length || 5) ? 'border-emerald-400 text-emerald-700' : 'border-amber-400 text-amber-700'}`}
                       >
-                        {results[i].studyHallsPlaced}/5 SH
+                        {results[i].studyHallsPlaced}/{results[i].studyHallAssignments?.length || 5} SH
                       </Badge>
                     )}
                   </TabsTrigger>
@@ -539,14 +748,6 @@ export default function GeneratePage() {
                 <Download className="h-4 w-4" />
                 Export
               </Button>
-              <Button size="sm" onClick={handleSave} disabled={saving} className="gap-1 bg-emerald-500 hover:bg-emerald-600 text-white">
-                {saving ? (
-                  <Loader2 className="h-4 w-4 animate-spin" />
-                ) : (
-                  <Save className="h-4 w-4" />
-                )}
-                Save
-              </Button>
             </div>
           </div>
 
@@ -570,11 +771,31 @@ export default function GeneratePage() {
                 <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
                   {viewMode === "teacher"
                     ? Object.entries(selectedResult.teacherSchedules)
-                        .sort(([teacherA], [teacherB]) => {
+                        .sort(([teacherA, scheduleA], [teacherB, scheduleB]) => {
                           const statA = selectedResult.teacherStats.find(s => s.teacher === teacherA)
                           const statB = selectedResult.teacherStats.find(s => s.teacher === teacherB)
+                          const infoA = analyzeTeacherGrades(scheduleA)
+                          const infoB = analyzeTeacherGrades(scheduleB)
+
+                          // 1. Full-time before part-time (part-time at bottom)
                           if (statA?.status === 'full-time' && statB?.status !== 'full-time') return -1
                           if (statA?.status !== 'full-time' && statB?.status === 'full-time') return 1
+
+                          // 2. Teachers with a primary grade before those without
+                          if (infoA.hasPrimary && !infoB.hasPrimary) return -1
+                          if (!infoA.hasPrimary && infoB.hasPrimary) return 1
+
+                          // 3. Sort by primary grade (Kindergarten first)
+                          if (infoA.primaryGrade !== infoB.primaryGrade) {
+                            return infoA.primaryGrade - infoB.primaryGrade
+                          }
+
+                          // 4. Sort by grade spread (fewer grades = more focused = higher)
+                          if (infoA.gradeSpread !== infoB.gradeSpread) {
+                            return infoA.gradeSpread - infoB.gradeSpread
+                          }
+
+                          // 5. Alphabetical
                           return teacherA.localeCompare(teacherB)
                         })
                         .map(([teacher, schedule]) => (
@@ -588,6 +809,7 @@ export default function GeneratePage() {
                         ))
                     : Object.entries(selectedResult.gradeSchedules)
                         .filter(([grade]) => !grade.includes("Elective"))
+                        .sort(([a], [b]) => gradeSort(a, b))
                         .map(([grade, schedule]) => (
                           <ScheduleGrid
                             key={grade}
@@ -636,57 +858,9 @@ export default function GeneratePage() {
         </Card>
       )}
 
-      {/* Last Run and Recent History - only in ready state (not generating, not showing results) */}
+      {/* Recent History - only in ready state (not generating, not showing results) */}
       {!generating && !results && (
         <div className="space-y-4 mb-6">
-          {/* Last Run - clickable to view results */}
-          {lastRun && lastRun.options && lastRun.options.length > 0 && (
-            <Card
-              className="bg-white shadow-sm cursor-pointer hover:bg-slate-50 transition-colors"
-              onClick={() => {
-                setResults(lastRun.options)
-                setSelectedOption("1")
-              }}
-            >
-              <CardHeader className="pb-2">
-                <CardTitle className="text-slate-600 text-sm font-medium flex items-center gap-2">
-                  <Clock className="h-4 w-4" />
-                  Last Run
-                  <span className="text-xs text-slate-400 font-normal ml-auto">Click to view</span>
-                </CardTitle>
-              </CardHeader>
-              <CardContent>
-                <div className="flex items-center justify-between text-sm">
-                  <div>
-                    <span className="text-slate-600">{lastRun.quarterName}</span>
-                    <span className="text-slate-400 mx-2">·</span>
-                    <span className="text-slate-400">
-                      {new Date(lastRun.timestamp).toLocaleString(undefined, {
-                        month: 'short',
-                        day: 'numeric',
-                        hour: 'numeric',
-                        minute: '2-digit',
-                      })}
-                    </span>
-                  </div>
-                  <div className="flex items-center gap-3">
-                    <Badge
-                      variant="outline"
-                      className={lastRun.studyHallsPlaced === 5 ? 'border-emerald-300 text-emerald-600' : 'border-amber-300 text-amber-600'}
-                    >
-                      {lastRun.studyHallsPlaced}/5 SH
-                    </Badge>
-                    {lastRun.saved ? (
-                      <Badge variant="outline" className="border-slate-300 text-slate-500">Saved</Badge>
-                    ) : (
-                      <Badge variant="outline" className="border-amber-300 text-amber-600">Not saved</Badge>
-                    )}
-                  </div>
-                </div>
-              </CardContent>
-            </Card>
-          )}
-
           {/* Recent History */}
           <Card className="bg-white shadow-sm">
             <CardHeader className="pb-2">

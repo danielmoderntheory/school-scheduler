@@ -2,6 +2,8 @@
 
 import { cn } from "@/lib/utils"
 import { Badge } from "@/components/ui/badge"
+import { Checkbox } from "@/components/ui/checkbox"
+import { RefreshCw } from "lucide-react"
 import type { TeacherSchedule, GradeSchedule } from "@/lib/types"
 
 const DAYS = ["Mon", "Tues", "Wed", "Thurs", "Fri"]
@@ -12,9 +14,21 @@ interface ScheduleGridProps {
   type: "teacher" | "grade"
   name: string
   status?: string
+  // Selection mode props
+  showCheckbox?: boolean
+  isSelected?: boolean
+  onToggleSelect?: () => void
 }
 
-export function ScheduleGrid({ schedule, type, name, status }: ScheduleGridProps) {
+export function ScheduleGrid({
+  schedule,
+  type,
+  name,
+  status,
+  showCheckbox,
+  isSelected,
+  onToggleSelect,
+}: ScheduleGridProps) {
   function getCellContent(day: string, block: number): [string, string] | null {
     return schedule[day]?.[block] || null
   }
@@ -28,29 +42,52 @@ export function ScheduleGrid({ schedule, type, name, status }: ScheduleGridProps
   }
 
   return (
-    <div className="border rounded-lg overflow-hidden bg-white shadow-sm">
-      <div className="bg-slate-50 px-3 py-2 font-medium border-b flex items-center justify-between">
-        <span>{name}</span>
-        {status && (
-          <Badge
-            variant="outline"
-            className={cn(
-              "text-xs",
-              status === "full-time"
-                ? "border-sky-400 text-sky-700 bg-sky-50"
-                : "border-slate-300 text-slate-500"
-            )}
-          >
-            {status}
-          </Badge>
+    <div
+      className={cn(
+        "border rounded-lg overflow-hidden bg-white shadow-sm transition-all",
+        isSelected && "ring-2 ring-sky-500 border-sky-500"
+      )}
+    >
+      <div
+        className={cn(
+          "px-3 py-2 font-medium border-b flex items-center justify-between",
+          isSelected ? "bg-sky-50" : "bg-slate-50"
+        )}
+      >
+        <div className="flex items-center gap-2">
+          <span>{name}</span>
+          {status && (
+            <Badge
+              variant="outline"
+              className={cn(
+                "text-xs",
+                status === "full-time"
+                  ? "border-sky-400 text-sky-700 bg-sky-50"
+                  : "border-slate-300 text-slate-500"
+              )}
+            >
+              {status}
+            </Badge>
+          )}
+        </div>
+        {showCheckbox && type === "teacher" && (
+          <label className="flex items-center gap-1.5 cursor-pointer">
+            <RefreshCw className={cn("h-3 w-3", isSelected ? "text-sky-600" : "text-muted-foreground")} />
+            <span className={cn("text-xs", isSelected ? "text-sky-600" : "text-muted-foreground")}>Regen</span>
+            <Checkbox
+              checked={isSelected}
+              onCheckedChange={onToggleSelect}
+              className="data-[state=checked]:bg-sky-600 data-[state=checked]:border-sky-600"
+            />
+          </label>
         )}
       </div>
-      <table className="w-full text-sm">
+      <table className="w-full text-sm table-fixed">
         <thead>
           <tr className="border-b bg-muted/50">
-            <th className="p-2 text-left w-16"></th>
+            <th className="p-1.5 text-left w-14 text-xs"></th>
             {DAYS.map((day) => (
-              <th key={day} className="p-2 text-center font-medium">
+              <th key={day} className="p-1.5 text-center font-medium text-xs">
                 {day}
               </th>
             ))}
@@ -59,8 +96,8 @@ export function ScheduleGrid({ schedule, type, name, status }: ScheduleGridProps
         <tbody>
           {BLOCKS.map((block) => (
             <tr key={block} className="border-b last:border-b-0">
-              <td className="p-2 font-medium text-muted-foreground bg-muted/30">
-                Block {block}
+              <td className="p-1.5 font-medium text-muted-foreground bg-muted/30 whitespace-nowrap text-xs">
+                B{block}
               </td>
               {DAYS.map((day) => {
                 const entry = getCellContent(day, block)
@@ -69,16 +106,16 @@ export function ScheduleGrid({ schedule, type, name, status }: ScheduleGridProps
                   <td
                     key={day}
                     className={cn(
-                      "p-2 text-center border-l",
+                      "p-1 text-center border-l overflow-hidden",
                       getCellClass(entry)
                     )}
                   >
                     {entry ? (
-                      <div>
-                        <div className="font-medium text-xs truncate">
-                          {type === "teacher" ? primary : secondary}
+                      <div className="max-w-full overflow-hidden">
+                        <div className="font-medium text-xs leading-tight truncate" title={type === "teacher" ? primary : secondary}>
+                          {type === "teacher" ? primary.replace(' Grade', '').replace('Kindergarten', 'K') : secondary}
                         </div>
-                        <div className="text-xs text-muted-foreground truncate">
+                        <div className="text-[10px] leading-tight text-muted-foreground truncate" title={type === "teacher" ? secondary : primary}>
                           {type === "teacher" ? secondary : primary}
                         </div>
                       </div>

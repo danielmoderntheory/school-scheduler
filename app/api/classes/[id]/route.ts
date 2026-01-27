@@ -10,9 +10,19 @@ export async function PUT(
 
   const updates: Record<string, unknown> = {}
   if (body.teacher_id !== undefined) updates.teacher_id = body.teacher_id
-  if (body.grade_id !== undefined) updates.grade_id = body.grade_id
   if (body.subject_id !== undefined) updates.subject_id = body.subject_id
   if (body.days_per_week !== undefined) updates.days_per_week = body.days_per_week
+  if (body.is_elective !== undefined) updates.is_elective = body.is_elective
+
+  // Handle grade_ids (new) or grade_id (legacy)
+  if (body.grade_ids !== undefined && Array.isArray(body.grade_ids)) {
+    updates.grade_ids = body.grade_ids
+    // Also update grade_id for backward compatibility
+    updates.grade_id = body.grade_ids.length > 0 ? body.grade_ids[0] : null
+  } else if (body.grade_id !== undefined) {
+    updates.grade_id = body.grade_id
+    updates.grade_ids = body.grade_id ? [body.grade_id] : []
+  }
 
   const { data, error } = await supabase
     .from("classes")
@@ -20,7 +30,7 @@ export async function PUT(
     .eq("id", id)
     .select(`
       *,
-      teacher:teachers(id, name),
+      teacher:teachers(id, name, status),
       grade:grades(id, name, display_name),
       subject:subjects(id, name),
       restrictions(*)
@@ -35,6 +45,16 @@ export async function PUT(
       )
     }
     return NextResponse.json({ error: error.message }, { status: 500 })
+  }
+
+  // Fetch grades for the grade_ids
+  if (data.grade_ids && data.grade_ids.length > 0) {
+    const { data: gradesData } = await supabase
+      .from("grades")
+      .select("id, name, display_name, sort_order")
+      .in("id", data.grade_ids)
+
+    data.grades = gradesData?.sort((a: { sort_order: number }, b: { sort_order: number }) => a.sort_order - b.sort_order) || []
   }
 
   return NextResponse.json(data)

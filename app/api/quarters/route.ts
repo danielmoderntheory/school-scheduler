@@ -28,7 +28,8 @@ export async function POST(request: NextRequest) {
 
   const name = `Q${body.quarter_num} ${body.year}`
 
-  const { data, error } = await supabase
+  // Create the new quarter
+  const { data: newQuarter, error } = await supabase
     .from("quarters")
     .insert({
       name,
@@ -49,5 +50,86 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: error.message }, { status: 500 })
   }
 
-  return NextResponse.json(data)
+  let classesCopied = 0
+
+  // Copy classes from another quarter if specified
+  if (body.copy_from_quarter_id) {
+    // Get classes from source quarter with their restrictions
+    const { data: sourceClasses, error: classesError } = await supabase
+      .from("classes")
+      .select(`
+        teacher_id,
+        grade_id,
+        subject_id,
+        days_per_week,
+        restrictions (
+          restriction_type,
+          value
+        )
+      `)
+      .eq("quarter_id", body.copy_from_quarter_id)
+
+    if (!classesError && sourceClasses && sourceClasses.length > 0) {
+      // Insert classes for new quarter
+      const newClasses = sourceClasses.map((c) => ({
+        teacher_id: c.teacher_id,
+        grade_id: c.grade_id,
+        subject_id: c.subject_id,
+        days_per_week: c.days_per_week,
+        quarter_id: newQuarter.id,
+      }))
+
+      const { data: insertedClasses, error: insertError } = await supabase
+        .from("classes")
+        .insert(newClasses)
+        .select("id")
+
+      if (!insertError && insertedClasses) {
+        classesCopied = insertedClasses.length
+
+        // Copy restrictions for each class
+        const allRestrictions: Array<{
+          class_id: string
+          restriction_type: string
+          value: unknown
+        }> = []
+
+        for (let i = 0; i < sourceClasses.length; i++) {
+          const sourceClass = sourceClasses[i]
+          const newClassId = insertedClasses[i]?.id
+
+          if (newClassId && sourceClass.restrictions) {
+            for (const r of sourceClass.restrictions) {
+              allRestrictions.push({
+                class_id: newClassId,
+                restriction_type: r.restriction_type,
+                value: r.value,
+              })
+            }
+          }
+        }
+
+        if (allRestrictions.length > 0) {
+          await supabase.from("restrictions").insert(allRestrictions)
+        }
+      }
+    }
+  }
+
+  // Activate the new quarter
+  if (!isFirst) {
+    // Deactivate all other quarters
+    await supabase
+      .from("quarters")
+      .update({ is_active: false })
+      .neq("id", newQuarter.id)
+
+    // Activate the new one
+    await supabase
+      .from("quarters")
+      .update({ is_active: true })
+      .eq("id", newQuarter.id)
+  }
+
+  return NextResponse.json({ ...newQuarter, classes_copied: classesCopied })
 }

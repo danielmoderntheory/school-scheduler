@@ -10,7 +10,7 @@ import {
 } from "@/components/ui/dropdown-menu"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
-import { ChevronDown, Plus, Check } from "lucide-react"
+import { ChevronDown, Plus, Check, Copy, Trash2 } from "lucide-react"
 import toast from "react-hot-toast"
 
 interface Quarter {
@@ -27,6 +27,7 @@ export function QuarterSelector() {
   const [isCreating, setIsCreating] = useState(false)
   const [newYear, setNewYear] = useState(new Date().getFullYear())
   const [newQuarterNum, setNewQuarterNum] = useState(1)
+  const [copyFromQuarterId, setCopyFromQuarterId] = useState<string>("")
   const [isOpen, setIsOpen] = useState(false)
 
   useEffect(() => {
@@ -41,6 +42,10 @@ export function QuarterSelector() {
         setQuarters(data)
         const active = data.find((q: Quarter) => q.is_active)
         setActiveQuarter(active || null)
+        // Default to most recent quarter for copying (first in list, sorted by created_at desc)
+        if (data.length > 0) {
+          setCopyFromQuarterId(data[0].id)
+        }
       }
     } catch (error) {
       console.error("Failed to load quarters:", error)
@@ -61,6 +66,29 @@ export function QuarterSelector() {
     setIsOpen(false)
   }
 
+  async function deleteQuarter(id: string, name: string) {
+    if (!confirm(`Delete "${name}"? This cannot be undone.`)) {
+      return
+    }
+
+    try {
+      const res = await fetch(`/api/quarters/${id}`, { method: "DELETE" })
+      if (res.ok) {
+        toast.success("Quarter deleted")
+        loadQuarters()
+        // If we deleted the active quarter, reload the page
+        if (activeQuarter?.id === id) {
+          window.location.href = "/classes"
+        }
+      } else {
+        const error = await res.json()
+        toast.error(error.error || "Failed to delete quarter")
+      }
+    } catch (error) {
+      toast.error("Failed to delete quarter")
+    }
+  }
+
   async function createQuarter() {
     try {
       const res = await fetch("/api/quarters", {
@@ -69,10 +97,17 @@ export function QuarterSelector() {
         body: JSON.stringify({
           year: newYear,
           quarter_num: newQuarterNum,
+          copy_from_quarter_id: copyFromQuarterId || undefined,
         }),
       })
       if (res.ok) {
-        toast.success("Quarter created")
+        const data = await res.json()
+        const classesCopied = data.classes_copied || 0
+        if (classesCopied > 0) {
+          toast.success(`Quarter created with ${classesCopied} classes copied`)
+        } else {
+          toast.success("Quarter created")
+        }
         setIsCreating(false)
         // Redirect to classes page (full reload to ensure fresh data)
         window.location.href = "/classes"
@@ -95,14 +130,25 @@ export function QuarterSelector() {
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end" className="w-56">
         {quarters.map((quarter) => (
-          <DropdownMenuItem
-            key={quarter.id}
-            onClick={() => activateQuarter(quarter.id)}
-            className="flex items-center justify-between"
-          >
-            {quarter.name}
-            {quarter.is_active && <Check className="h-4 w-4" />}
-          </DropdownMenuItem>
+          <div key={quarter.id} className="flex items-center group">
+            <DropdownMenuItem
+              onClick={() => activateQuarter(quarter.id)}
+              className="flex-1 flex items-center justify-between"
+            >
+              {quarter.name}
+              {quarter.is_active && <Check className="h-4 w-4" />}
+            </DropdownMenuItem>
+            <button
+              onClick={(e) => {
+                e.stopPropagation()
+                deleteQuarter(quarter.id, quarter.name)
+              }}
+              className="p-2 opacity-0 group-hover:opacity-100 hover:text-destructive transition-opacity"
+              title="Delete quarter"
+            >
+              <Trash2 className="h-3.5 w-3.5" />
+            </button>
+          </div>
         ))}
         {quarters.length > 0 && <DropdownMenuSeparator />}
         {isCreating ? (
@@ -127,6 +173,26 @@ export function QuarterSelector() {
                 <option value={4}>Q4</option>
               </select>
             </div>
+            {quarters.length > 0 && (
+              <div className="space-y-1">
+                <label className="text-xs text-muted-foreground flex items-center gap-1">
+                  <Copy className="h-3 w-3" />
+                  Copy classes from
+                </label>
+                <select
+                  value={copyFromQuarterId}
+                  onChange={(e) => setCopyFromQuarterId(e.target.value)}
+                  className="w-full h-8 rounded-md border border-input bg-background px-2 text-sm"
+                >
+                  <option value="">Don&apos;t copy</option>
+                  {quarters.map((q) => (
+                    <option key={q.id} value={q.id}>
+                      {q.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            )}
             <div className="flex gap-2">
               <Button
                 size="sm"

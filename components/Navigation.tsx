@@ -11,7 +11,7 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
-import { Settings, Users, History, Cog, Heart } from "lucide-react"
+import { Settings, Users, History, Cog, Heart, GraduationCap, BookOpen } from "lucide-react"
 
 const mainNavItems = [
   { href: "/classes", label: "Classes" },
@@ -20,6 +20,8 @@ const mainNavItems = [
 
 const moreItems = [
   { href: "/teachers", label: "Teachers", icon: Users },
+  { href: "/settings/grades", label: "Grades", icon: GraduationCap },
+  { href: "/settings/subjects", label: "Subjects", icon: BookOpen },
   { href: "/rules", label: "Rules", icon: Cog },
   { href: "/history", label: "History", icon: History },
 ]

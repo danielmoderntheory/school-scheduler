@@ -7,19 +7,25 @@ A web application for generating optimized K-11th grade school schedules using c
 ## Tech Stack
 
 - **Frontend**: Next.js 14 (App Router) + TypeScript + Tailwind CSS
-- **Solver**: Pure JavaScript backtracking solver (runs client-side!)
+- **Solver**: OR-Tools CP-SAT on Google Cloud Run (primary), JS backtracking (fallback)
 - **Database**: Supabase (PostgreSQL)
-- **Hosting**: Vercel only (no separate backend needed!)
+- **Hosting**: Vercel (frontend) + Cloud Run (solver)
 - **Auth**: Simple password protection via middleware
 
 ### Solver Architecture
 
-We use a **custom JavaScript constraint solver** instead of Python OR-Tools:
-- Runs entirely in the browser (client-side)
-- No server timeouts to worry about
+**Primary: OR-Tools CP-SAT on Cloud Run**
+- Python FastAPI service with Google OR-Tools
+- Constraint Programming with SAT solver for optimal solutions
+- ~50 seeds tried, returns top 3 unique schedules
+- Post-processing: study hall assignment + back-to-back redistribution
+- Auto-scales to zero when idle (free tier friendly)
+
+**Fallback: JavaScript Backtracking (client-side)**
+- Pure JS solver in `lib/scheduler.ts`
+- Runs entirely in browser if Cloud Run is unavailable
 - ~50 attempts with randomized backtracking
-- Typically finds solution in 1-5 seconds
-- Falls back to HiGHS WASM for complex cases
+- Same post-processing logic as OR-Tools version
 
 ## Project Structure
 
@@ -28,21 +34,31 @@ school-scheduler/
 ├── app/
 │   ├── page.tsx             # Main dashboard
 │   ├── teachers/            # Teacher management
-│   ├── classes/             # Class/subject management  
+│   ├── classes/             # Class/subject management
 │   ├── rules/               # Scheduling rules config
-│   ├── generate/            # Schedule generation (runs client-side!)
-│   ├── history/             # Past schedules
-│   └── api/                 # API routes for Supabase
+│   ├── generate/            # Schedule generation UI
+│   ├── history/             # Past schedules (shareable URLs)
+│   └── api/
+│       ├── teachers/        # Teacher CRUD
+│       ├── classes/         # Class CRUD
+│       ├── history/         # Schedule history
+│       ├── solve-remote/    # Proxy to Cloud Run solver
+│       └── export/          # XLSX/CSV export
+├── backend/                 # OR-Tools solver (deployed to Cloud Run)
+│   ├── solver.py            # CP-SAT constraint solver
+│   ├── main.py              # FastAPI service
+│   ├── Dockerfile
+│   ├── requirements.txt
+│   └── deploy.sh            # Cloud Run deployment script
 ├── components/
-│   ├── ui/                  # Reusable UI components (shadcn)
-│   ├── TeacherForm.tsx
-│   ├── ClassForm.tsx
-│   ├── RulesEditor.tsx
-│   ├── ScheduleGrid.tsx
-│   └── ScheduleTabs.tsx
+│   ├── ui/                  # shadcn components
+│   ├── ScheduleGrid.tsx     # Weekly schedule display
+│   ├── ScheduleStats.tsx    # Stats + teacher utilization
+│   └── ...
 ├── lib/
 │   ├── supabase.ts          # Database client
-│   ├── scheduler.ts         # JavaScript constraint solver
+│   ├── scheduler.ts         # JS backtracking solver (fallback)
+│   ├── scheduler-remote.ts  # Cloud Run client
 │   ├── types.ts             # TypeScript types
 │   └── export.ts            # XLS/CSV export utilities
 ├── middleware.ts            # Password protection
@@ -170,8 +186,6 @@ CREATE TABLE study_hall_groups (
 
 ## API Routes (Next.js)
 
-All API routes handle Supabase operations. The scheduler runs client-side.
-
 ```
 # Teachers
 GET    /api/teachers
@@ -188,66 +202,62 @@ DELETE /api/classes/[id]
 # Rules
 GET    /api/rules
 PUT    /api/rules/[id]
-POST   /api/rules/reorder
 
 # Quarters
 GET    /api/quarters
 POST   /api/quarters
 PUT    /api/quarters/[id]/activate
 
-# History (save/load generated schedules)
+# History (auto-saved on generation for shareable URLs)
 GET    /api/history?quarter_id=...
-POST   /api/history          # Save generation result
+POST   /api/history
 GET    /api/history/[id]
 
+# Solver (proxy to Cloud Run)
+POST   /api/solve-remote     # Proxies to Cloud Run OR-Tools solver
+
 # Export
-GET    /api/export/xlsx?generation_id=...&option=1
-GET    /api/export/csv?generation_id=...&option=1
+GET    /api/export?generation_id=...&option=1&format=xlsx
 ```
 
 ## Key Implementation Details
 
-### Schedule Generation Flow (Client-Side)
+### Schedule Generation Flow
 
 1. **Load Data**: Fetch teachers, classes, restrictions from Supabase
-2. **Run Solver**: Execute JavaScript backtracking solver in browser
-3. **Multi-Attempt**: Run ~50 attempts with randomized slot ordering
-4. **Rank Solutions**: Score by back-to-back issues + study halls placed
-5. **Post-Process**: Add study halls, redistribute OPEN blocks
-6. **Return Top 3**: Return best 3 unique options with stats
+2. **Call Cloud Run**: POST to `/api/solve-remote` → Cloud Run OR-Tools solver
+3. **CP-SAT Solving**: OR-Tools tries ~50 seeds with different random orderings
+4. **Post-Process**: Add study halls, redistribute OPEN blocks (2000 iterations)
+5. **Rank Solutions**: Score = `(5 - studyHallsPlaced) * 100 + backToBackIssues`
+6. **Auto-Save**: Results saved to database immediately
+7. **Redirect**: User sent to `/history/[id]` (shareable URL)
 
-### JavaScript Solver Algorithm
+### OR-Tools CP-SAT Solver (backend/solver.py)
 
-```typescript
-// Backtracking with constraint propagation
-function solve(sessionIndex) {
-  if (sessionIndex === sessions.length) return true; // Found solution
-  
-  // Get valid slots (respecting all constraints)
-  const validSlots = getValidSlots(sessions[sessionIndex]);
-  
-  // Try slots in randomized order
-  shuffle(validSlots);
-  for (const slot of validSlots) {
-    assign(sessionIndex, slot);
-    if (solve(sessionIndex + 1)) return true;
-    unassign(sessionIndex);
-  }
-  return false; // Backtrack
-}
+**Hard Constraints:**
+- No teacher conflicts (AddAllDifferent)
+- No grade conflicts (AddAllDifferent)
+- No duplicate subjects per day per grade (AddDivisionEquality for day extraction)
+- Fixed slot restrictions (domain limited to single slot)
+- Teacher availability (domain limited to valid slots)
+
+**Post-Processing (not modeled in CP-SAT):**
+- Study hall assignment: Cycle through eligible teachers evenly
+- Back-to-back redistribution: 2000-iteration swap loop to break up consecutive OPEN blocks
+- Both OPEN and Study Hall count as "open" for BTB detection
+
+### Scoring Formula
+
+```python
+score = (5 - study_halls_placed) * 100 + total_back_to_back
 ```
 
-### Constraints Checked During Solving
-
-1. **Teacher conflict**: `teacherSlots[teacher].has(slot)`
-2. **Grade conflict**: `gradeSlots[grade].has(slot)`
-3. **Subject/day conflict**: `gradeSubjectDays[grade|subject].has(day)`
-4. **Availability**: `session.validSlots.includes(slot)`
+This heavily penalizes missing study halls (each missing = +100) over back-to-back issues (+1 each).
 
 ### Export Formats
 
-- **XLSX**: Full workbook with Summary + Option tabs (using openpyxl)
-- **CSV**: One file per option, pipe-delimited for multi-value cells
+- **XLSX**: Full workbook with teacher schedules
+- **CSV**: Comma-separated export
 
 ## Environment Variables
 
@@ -256,6 +266,7 @@ function solve(sessionIndex) {
 NEXT_PUBLIC_SUPABASE_URL=https://xxx.supabase.co
 NEXT_PUBLIC_SUPABASE_ANON_KEY=xxx
 APP_PASSWORD=your-secure-password
+SCHEDULER_API_URL=https://school-scheduler-api-xxx.us-central1.run.app
 ```
 
 ## Development Commands
@@ -275,16 +286,29 @@ npx supabase start   # Local Supabase
 npx supabase db push # Push migrations
 ```
 
-## Deployment (Vercel)
+## Deployment
+
+### Frontend (Vercel)
 
 ```bash
-# One-command deploy
 vercel --prod
-
-# Or connect GitHub repo in Vercel dashboard
 ```
 
 Set environment variables in Vercel project settings.
+
+### Solver Backend (Cloud Run)
+
+```bash
+cd backend
+./deploy.sh
+```
+
+Deployment settings (free tier optimized):
+- `--min-instances 0` (scales to zero when idle)
+- `--max-instances 1` (prevents runaway costs)
+- `--concurrency 1` (solver is CPU-bound)
+- `--memory 512Mi`
+- `--timeout 300`
 
 ## Common Tasks
 
@@ -302,33 +326,21 @@ Set environment variables in Vercel project settings.
 
 ### Generating a Schedule
 1. Ensure active quarter has all classes configured
-2. Review rules on /rules page
-3. Go to /generate
-4. Click "Generate Schedule"
-5. Review 3 options in tabs
-6. Export preferred option as XLSX/CSV
+2. Go to /generate
+3. Click "Generate Schedule" (calls Cloud Run OR-Tools solver)
+4. Wait ~1-2 minutes for solver to complete
+5. Auto-redirects to /history/[id] with shareable URL
+6. Review 3 options in tabs
+7. Export preferred option as XLSX/CSV
 
-### Modifying Rules Priority
+### Viewing Rules
 1. Go to /rules
-2. Drag rules to reorder priority
-3. Toggle rules on/off
-4. Adjust soft constraint weights
+2. Toggle rules on/off (hard constraints always enforced)
 
 ## Code Style
 
 - TypeScript strict mode
 - Prettier for formatting
 - ESLint with Next.js config
-- Python: Black + isort
+- Python: Black + isort (backend)
 - Commit messages: Conventional Commits
-
-## Testing
-
-```bash
-# Frontend
-npm run test
-npm run test:e2e
-
-# Backend
-pytest
-```

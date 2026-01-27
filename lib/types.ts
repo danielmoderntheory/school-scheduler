@@ -18,9 +18,12 @@ export interface Restriction {
 export interface ClassEntry {
   id?: string;
   teacher: string;
-  grade: string;
+  grade: string;  // Display name (legacy, kept for backward compat)
+  grades?: string[];  // Array of grade names (new)
+  gradeDisplay?: string;  // Display name for UI
   subject: string;
   daysPerWeek: number;
+  isElective?: boolean;  // Electives skip grade conflicts
   availableDays?: string[];
   availableBlocks?: number[];
   fixedSlots?: [string, number][]; // [day, block][]
@@ -91,6 +94,17 @@ export interface ScheduleOption {
   gradeSchedules: Record<string, GradeSchedule>;
   studyHallAssignments: StudyHallAssignment[];
   teacherStats: TeacherStat[];
+}
+
+// Lightweight solution for alternative browsing (no stats computed)
+export interface AlternativeSolution {
+  index: number;
+  score: number;
+  backToBackIssues: number;
+  studyHallsPlaced: number;
+  teacherSchedules: Record<string, TeacherSchedule>;
+  gradeSchedules: Record<string, GradeSchedule>;
+  studyHallAssignments: StudyHallAssignment[];
 }
 
 export interface GenerationResult {

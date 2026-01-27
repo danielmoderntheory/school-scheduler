@@ -8,6 +8,9 @@ const inter = Inter({ subsets: ['latin'] })
 export const metadata: Metadata = {
   title: 'School Scheduler',
   description: 'Generate optimized K-11th grade school schedules',
+  icons: {
+    icon: '/icon.svg',
+  },
 }
 
 export default function RootLayout({

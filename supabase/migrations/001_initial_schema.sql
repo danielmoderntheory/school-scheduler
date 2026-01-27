@@ -1,5 +1,5 @@
 -- School Schedule Generator Database Schema
--- Initial migration
+-- Complete schema for Journey School scheduler
 
 -- Enable UUID extension
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
@@ -82,6 +82,8 @@ CREATE TABLE classes (
     grade_id UUID NOT NULL REFERENCES grades(id) ON DELETE CASCADE,
     subject_id UUID NOT NULL REFERENCES subjects(id) ON DELETE CASCADE,
     days_per_week INT NOT NULL CHECK (days_per_week BETWEEN 1 AND 5),
+    is_elective BOOLEAN DEFAULT false,
+    grade_ids UUID[],
     created_at TIMESTAMPTZ DEFAULT NOW(),
     updated_at TIMESTAMPTZ DEFAULT NOW(),
     UNIQUE(quarter_id, teacher_id, grade_id, subject_id)
@@ -105,9 +107,9 @@ CREATE TABLE rules (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     name TEXT NOT NULL,
     description TEXT,
-    rule_key TEXT NOT NULL UNIQUE,  -- Machine-readable key
+    rule_key TEXT NOT NULL UNIQUE,
     rule_type TEXT NOT NULL CHECK (rule_type IN ('hard', 'soft')),
-    priority INT DEFAULT 0,  -- Lower = higher priority for soft constraints
+    priority INT DEFAULT 0,
     enabled BOOLEAN DEFAULT true,
     config JSONB,
     created_at TIMESTAMPTZ DEFAULT NOW(),
@@ -137,9 +139,6 @@ CREATE TABLE study_hall_groups (
     created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
--- Seed study hall groups (will need to update with actual grade UUIDs after creation)
--- This is a placeholder - actual seeding should be done programmatically
-
 -- ============================================================================
 -- SCHEDULE GENERATIONS (History)
 -- ============================================================================
@@ -147,10 +146,11 @@ CREATE TABLE schedule_generations (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     quarter_id UUID NOT NULL REFERENCES quarters(id) ON DELETE CASCADE,
     generated_at TIMESTAMPTZ DEFAULT NOW(),
-    options JSONB NOT NULL,  -- Array of schedule options
+    options JSONB NOT NULL,
     stats JSONB,
-    selected_option INT,  -- Which option was chosen (1, 2, or 3)
-    notes TEXT
+    selected_option INT,
+    notes TEXT,
+    is_saved BOOLEAN NOT NULL DEFAULT false
 );
 
 -- ============================================================================
@@ -161,6 +161,7 @@ CREATE INDEX idx_classes_teacher ON classes(teacher_id);
 CREATE INDEX idx_restrictions_class ON restrictions(class_id);
 CREATE INDEX idx_generations_quarter ON schedule_generations(quarter_id);
 CREATE INDEX idx_generations_date ON schedule_generations(generated_at DESC);
+CREATE INDEX idx_generations_saved ON schedule_generations(is_saved);
 
 -- ============================================================================
 -- TRIGGERS for updated_at
@@ -184,10 +185,3 @@ CREATE TRIGGER classes_updated_at BEFORE UPDATE ON classes
 
 CREATE TRIGGER rules_updated_at BEFORE UPDATE ON rules
     FOR EACH ROW EXECUTE FUNCTION update_updated_at();
-
--- ============================================================================
--- ROW LEVEL SECURITY (Optional - enable if using Supabase auth)
--- ============================================================================
--- ALTER TABLE teachers ENABLE ROW LEVEL SECURITY;
--- ALTER TABLE classes ENABLE ROW LEVEL SECURITY;
--- etc.
