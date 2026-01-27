@@ -23,7 +23,7 @@ import {
   AlertDialogTitle,
   AlertDialogTrigger,
 } from "@/components/ui/alert-dialog"
-import { Loader2, Trash2, Eye, Download, Check } from "lucide-react"
+import { Loader2, Trash2, Download, Check } from "lucide-react"
 import { Checkbox } from "@/components/ui/checkbox"
 import toast from "react-hot-toast"
 
@@ -75,6 +75,29 @@ export default function HistoryPage() {
     }
   }
 
+  async function unsaveGeneration(id: string) {
+    try {
+      const res = await fetch(`/api/history/${id}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ is_saved: false, notes: null }),
+      })
+      if (res.ok) {
+        // If not showing unsaved, remove from list; otherwise update it
+        if (!showUnsaved) {
+          setGenerations((prev) => prev.filter((g) => g.id !== id))
+        } else {
+          setGenerations((prev) => prev.map((g) => g.id === id ? { ...g, is_saved: false, notes: null } : g))
+        }
+        toast.success("Schedule unsaved")
+      } else {
+        toast.error("Failed to unsave schedule")
+      }
+    } catch (error) {
+      toast.error("Failed to unsave schedule")
+    }
+  }
+
   function formatDate(dateString: string) {
     return new Date(dateString).toLocaleString()
   }
@@ -115,7 +138,7 @@ export default function HistoryPage() {
         <div className="text-center py-12 text-muted-foreground">
           <p>No schedules generated yet.</p>
           <Link href="/generate">
-            <Button className="mt-4">Generate a Schedule</Button>
+            <Button className="mt-4">Go to Schedules</Button>
           </Link>
         </div>
       ) : (
@@ -123,50 +146,47 @@ export default function HistoryPage() {
           <Table>
             <TableHeader>
               <TableRow>
-                <TableHead className="w-[80px]">Status</TableHead>
-                <TableHead>Quarter</TableHead>
-                <TableHead>Generated</TableHead>
-                <TableHead>Selected Option</TableHead>
-                <TableHead>Notes</TableHead>
-                <TableHead className="w-[150px]">Actions</TableHead>
+                <TableHead>Schedule</TableHead>
+                <TableHead className="w-[100px]">Status</TableHead>
+                <TableHead className="w-[100px]">Actions</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
               {generations.map((gen) => (
-                <TableRow key={gen.id}>
+                <TableRow key={gen.id} className="group">
+                  <TableCell className="py-3">
+                    <Link href={`/history/${gen.id}`} className="block hover:bg-slate-50 -m-3 p-3 rounded-lg transition-colors">
+                      <div className="flex items-center gap-3">
+                        <div className="flex items-center gap-2">
+                          <Badge variant="outline">{gen.quarter?.name}</Badge>
+                          {gen.selected_option && (
+                            <span className="text-xs text-muted-foreground">Option {gen.selected_option}</span>
+                          )}
+                        </div>
+                        <span className="text-xs text-muted-foreground">
+                          {formatDate(gen.generated_at)}
+                        </span>
+                        <span className="text-xs text-slate-300">{gen.id.slice(0, 8)}</span>
+                        {gen.notes && (
+                          <span className="text-xs text-slate-500 truncate max-w-[300px]" title={gen.notes}>
+                            — {gen.notes}
+                          </span>
+                        )}
+                      </div>
+                    </Link>
+                  </TableCell>
                   <TableCell>
                     {gen.is_saved ? (
-                      <Badge className="bg-emerald-500 gap-1">
-                        <Check className="h-3 w-3" />
+                      <span className="inline-flex items-center gap-1 text-emerald-600 text-sm font-medium">
+                        <Check className="h-3.5 w-3.5" />
                         Saved
-                      </Badge>
+                      </span>
                     ) : (
-                      <span className="text-xs text-muted-foreground">Unsaved</span>
-                    )}
-                  </TableCell>
-                  <TableCell>
-                    <Badge variant="outline">{gen.quarter?.name}</Badge>
-                  </TableCell>
-                  <TableCell>{formatDate(gen.generated_at)}</TableCell>
-                  <TableCell>
-                    {gen.selected_option ? (
-                      <Badge>Option {gen.selected_option}</Badge>
-                    ) : (
-                      <span className="text-muted-foreground">Not selected</span>
-                    )}
-                  </TableCell>
-                  <TableCell className="max-w-[200px] truncate">
-                    {gen.notes || (
-                      <span className="text-muted-foreground">-</span>
+                      <span className="text-xs text-muted-foreground">—</span>
                     )}
                   </TableCell>
                   <TableCell>
                     <div className="flex gap-1">
-                      <Link href={`/history/${gen.id}`}>
-                        <Button variant="ghost" size="icon" className="h-8 w-8">
-                          <Eye className="h-4 w-4" />
-                        </Button>
-                      </Link>
                       <a
                         href={`/api/export?generation_id=${gen.id}&option=${gen.selected_option || 1}&format=xlsx`}
                         download
@@ -183,18 +203,22 @@ export default function HistoryPage() {
                         </AlertDialogTrigger>
                         <AlertDialogContent>
                           <AlertDialogHeader>
-                            <AlertDialogTitle>Delete schedule?</AlertDialogTitle>
+                            <AlertDialogTitle>
+                              {gen.is_saved ? "Unsave schedule?" : "Delete schedule?"}
+                            </AlertDialogTitle>
                             <AlertDialogDescription>
-                              This will permanently delete this generated schedule.
+                              {gen.is_saved
+                                ? "This will remove the schedule from your saved list. You can still find it by enabling 'Show all'."
+                                : "This will permanently delete this generated schedule."}
                             </AlertDialogDescription>
                           </AlertDialogHeader>
                           <AlertDialogFooter>
                             <AlertDialogCancel>Cancel</AlertDialogCancel>
                             <AlertDialogAction
-                              onClick={() => deleteGeneration(gen.id)}
-                              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+                              onClick={() => gen.is_saved ? unsaveGeneration(gen.id) : deleteGeneration(gen.id)}
+                              className={gen.is_saved ? "" : "bg-destructive text-destructive-foreground hover:bg-destructive/90"}
                             >
-                              Delete
+                              {gen.is_saved ? "Unsave" : "Delete"}
                             </AlertDialogAction>
                           </AlertDialogFooter>
                         </AlertDialogContent>

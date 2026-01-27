@@ -17,7 +17,7 @@ import {
 } from "@/components/ui/dialog"
 import { ScheduleGrid } from "@/components/ScheduleGrid"
 import { ScheduleStats } from "@/components/ScheduleStats"
-import { Loader2, Play, Download, Coffee, Eye, History, AlertTriangle, X, Server } from "lucide-react"
+import { Loader2, Play, Download, Coffee, History, AlertTriangle, X, Server, Eye } from "lucide-react"
 import { generateSchedulesRemote, type ScheduleDiagnostics } from "@/lib/scheduler-remote"
 import type { Teacher, ClassEntry, ScheduleOption } from "@/lib/types"
 import toast from "react-hot-toast"
@@ -354,7 +354,7 @@ export default function GeneratePage() {
           if (saveRes.ok) {
             const savedData = await saveRes.json()
             // Redirect to shareable history URL (don't show results here)
-            router.replace(`/history/${savedData.id}`)
+            router.replace(`/history/${savedData.id}?new=true`)
             return // Don't set results - we're redirecting
           } else {
             // Save failed - show results on this page as fallback
@@ -406,7 +406,7 @@ export default function GeneratePage() {
   if (!activeQuarter) {
     return (
       <div className="max-w-6xl mx-auto p-8">
-        <h1 className="text-3xl font-bold mb-4">Generate Schedule</h1>
+        <h1 className="text-3xl font-bold mb-4">Schedules</h1>
         <p className="text-muted-foreground">
           Please create and select a quarter first using the dropdown in the navigation.
         </p>
@@ -436,7 +436,7 @@ export default function GeneratePage() {
 
       <div className="mb-6 flex items-center justify-between">
         <div>
-          <h1 className="text-3xl font-bold mb-2">Generate Schedule</h1>
+          <h1 className="text-3xl font-bold mb-2">Schedules</h1>
           <p className="text-muted-foreground">
             {activeQuarter.name} - {classes.length} classes, {teachers.length} teachers
           </p>
@@ -862,42 +862,34 @@ export default function GeneratePage() {
                 )}
               </div>
             </CardHeader>
-            <CardContent>
+            <CardContent className="px-3">
               {recentHistory.length > 0 ? (
-                <div className="space-y-2">
+                <div className="divide-y divide-slate-100">
                   {recentHistory.map((item) => (
-                    <div key={item.id} className="py-2 border-b border-slate-100 last:border-0">
-                      <div className="flex items-center justify-between">
-                        <div className="flex items-center gap-3 text-sm">
-                          <span className="text-slate-600">{item.quarter?.name}</span>
-                          <span className="text-slate-400 text-xs">
-                            {new Date(item.generated_at).toLocaleString(undefined, {
-                              month: 'short',
-                              day: 'numeric',
-                              hour: 'numeric',
-                              minute: '2-digit',
-                            })}
-                          </span>
-                        </div>
-                        <div className="flex items-center gap-2">
-                          {item.selected_option && (
-                            <Badge variant="outline" className="text-xs border-slate-300 text-slate-500">
-                              Option {item.selected_option}
-                            </Badge>
-                          )}
-                          <Link href={`/history/${item.id}`}>
-                            <Button variant="ghost" size="sm" className="h-6 w-6 p-0">
-                              <Eye className="h-3.5 w-3.5 text-slate-400" />
-                            </Button>
-                          </Link>
-                        </div>
-                      </div>
-                      {item.notes && (
-                        <p className="text-xs text-slate-500 mt-1 italic truncate" title={item.notes}>
-                          &ldquo;{item.notes}&rdquo;
-                        </p>
+                    <Link
+                      key={item.id}
+                      href={`/history/${item.id}`}
+                      className="flex items-center gap-3 py-2.5 px-2 -mx-2 rounded-lg hover:bg-slate-50 transition-colors group"
+                    >
+                      <Badge variant="outline" className="text-xs">{item.quarter?.name}</Badge>
+                      {item.selected_option && (
+                        <span className="text-xs text-muted-foreground">Option {item.selected_option}</span>
                       )}
-                    </div>
+                      <span className="text-xs text-muted-foreground">
+                        {new Date(item.generated_at).toLocaleString(undefined, {
+                          month: 'short',
+                          day: 'numeric',
+                          hour: 'numeric',
+                          minute: '2-digit',
+                        })}
+                      </span>
+                      {item.notes && (
+                        <span className="text-xs text-slate-500 truncate flex-1" title={item.notes}>
+                          — {item.notes}
+                        </span>
+                      )}
+                      <Eye className="h-3.5 w-3.5 text-slate-300 group-hover:text-slate-500 ml-auto flex-shrink-0" />
+                    </Link>
                   ))}
                 </div>
               ) : (

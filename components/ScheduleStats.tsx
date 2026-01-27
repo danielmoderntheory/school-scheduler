@@ -153,39 +153,40 @@ export function ScheduleStats({
     <TooltipProvider>
       <div className="space-y-4">
         {/* Collapsible header - matches Study Hall & Teacher Details styling */}
+        {/* On screen: clickable, shows expanded/collapsed state */}
+        {/* On print: always shows collapsed inline summary */}
         <div
-          className="border border-slate-200 rounded-lg p-3 bg-slate-50/50 cursor-pointer no-print"
+          className="border border-slate-200 rounded-lg p-3 bg-slate-50/50 cursor-pointer print:cursor-default"
           onClick={() => setExpanded(!expanded)}
         >
-          <summary className="list-none flex items-center gap-2 text-sm font-medium text-slate-600 hover:text-slate-800">
-            <ChevronDown className={`h-4 w-4 transition-transform ${!expanded ? '-rotate-90' : ''}`} />
+          <summary className="list-none flex items-center gap-2 text-sm font-medium text-slate-600 hover:text-slate-800 print:hover:text-slate-600">
+            <ChevronDown className={`h-4 w-4 transition-transform no-print ${!expanded ? '-rotate-90' : ''}`} />
             Schedule Summary
-            {!expanded && (
-              <>
-                <span className="text-slate-300 ml-2">—</span>
-                <span className={`font-normal text-slate-500 ${classesStatus === 'error' ? 'text-red-600 font-medium' : ''}`}>
-                  Classes: {totalClasses - unscheduledClasses}/{totalClasses}
+            {/* Show inline stats when collapsed OR when printing */}
+            <span className={`contents ${expanded ? 'hidden print:contents' : ''}`}>
+              <span className="text-slate-300 ml-2">—</span>
+              <span className={`font-normal text-slate-500 ${classesStatus === 'error' ? 'text-red-600 font-medium' : ''}`}>
+                Classes: {totalClasses - unscheduledClasses}/{totalClasses}
+              </span>
+              <span className="text-slate-300">|</span>
+              <span className={`font-normal text-slate-500 ${studyHallStatus === 'warning' ? 'text-amber-600 font-medium' : ''}`}>
+                Study Halls: {studyHallsPlaced}/6
+              </span>
+              <span className="text-slate-300">|</span>
+              <span className="font-normal text-slate-500">BTB: {backToBackIssues}</span>
+              <span className="text-slate-300">|</span>
+              <span className="font-normal text-slate-500">Avg Open: {fullTimeTeachers.length > 0 ? (fullTimeTeachers.reduce((sum, t) => sum + t.open, 0) / fullTimeTeachers.length).toFixed(1) : 0}</span>
+              {issues.length > 0 && (
+                <span className="text-xs font-normal text-amber-600 ml-1">
+                  ({issues.length} note{issues.length !== 1 ? 's' : ''})
                 </span>
-                <span className="text-slate-300">|</span>
-                <span className={`font-normal text-slate-500 ${studyHallStatus === 'warning' ? 'text-amber-600 font-medium' : ''}`}>
-                  Study Halls: {studyHallsPlaced}/6
-                </span>
-                <span className="text-slate-300">|</span>
-                <span className="font-normal text-slate-500">BTB: {backToBackIssues}</span>
-                <span className="text-slate-300">|</span>
-                <span className="font-normal text-slate-500">Avg Open: {fullTimeTeachers.length > 0 ? (fullTimeTeachers.reduce((sum, t) => sum + t.open, 0) / fullTimeTeachers.length).toFixed(1) : 0}</span>
-                {issues.length > 0 && (
-                  <span className="text-xs font-normal text-amber-600 ml-1">
-                    ({issues.length} note{issues.length !== 1 ? 's' : ''})
-                  </span>
-                )}
-              </>
-            )}
+              )}
+            </span>
           </summary>
         </div>
 
-        {/* Summary Stats - Shown when expanded */}
-        <div className={`grid grid-cols-2 md:grid-cols-4 gap-4 print-stats ${!expanded ? 'hidden' : ''}`}>
+        {/* Summary Stats - Shown when expanded on screen, hidden on print */}
+        <div className={`grid grid-cols-2 md:grid-cols-4 gap-4 no-print ${!expanded ? 'hidden' : ''}`}>
           {/* Classes Scheduled */}
           <div className={`border rounded-lg p-4 ${unscheduledClasses > 0 ? 'border-red-300 bg-red-50' : 'border-emerald-200 bg-emerald-50'}`}>
             <div className="text-sm text-slate-600">
@@ -271,9 +272,9 @@ export function ScheduleStats({
           </div>
         </div>
 
-        {/* Issues & Suggestions - Only show if there are issues and expanded */}
+        {/* Issues & Suggestions - Only show if there are issues and expanded, hidden on print */}
         {issues.length > 0 && expanded && (
-          <div className="border border-amber-200 rounded-lg bg-amber-50/50 p-4 print-notes">
+          <div className="border border-amber-200 rounded-lg bg-amber-50/50 p-4 no-print">
             <h3 className="font-medium text-amber-800 mb-2 flex items-center gap-2">
               <AlertTriangle className="h-4 w-4" />
               Notes & Suggestions
@@ -292,8 +293,11 @@ export function ScheduleStats({
         {/* Detailed Tables - Collapsed */}
         <details id="stats-details" className="group border border-slate-200 rounded-lg p-3 bg-slate-50/50">
           <summary className="cursor-pointer list-none flex items-center gap-2 text-sm font-medium text-slate-600 hover:text-slate-800">
-            <ChevronDown className="h-4 w-4 transition-transform group-open:rotate-180" />
+            <ChevronDown className="h-4 w-4 transition-transform -rotate-90 group-open:rotate-0" />
             Study Hall & Teacher Details
+            <span className="font-normal text-slate-500 group-open:hidden">
+              — {sortedStats.filter(s => s.status === 'full-time').length} full-time, {sortedStats.filter(s => s.status !== 'full-time').length} part-time teachers
+            </span>
           </summary>
 
           <div className="mt-3 space-y-4">

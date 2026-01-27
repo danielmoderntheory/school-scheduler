@@ -1,9 +1,8 @@
 "use client"
 
 import { useState, useEffect } from "react"
-import { useParams } from "next/navigation"
+import { useParams, useSearchParams } from "next/navigation"
 import { Button } from "@/components/ui/button"
-import { Badge } from "@/components/ui/badge"
 import { ScheduleGrid, CellLocation } from "@/components/ScheduleGrid"
 import { ScheduleStats } from "@/components/ScheduleStats"
 import { Loader2, Download, ArrowLeft, Save, Check, RefreshCw, Shuffle, Trash2, Star, MoreVertical, Users, GraduationCap, Printer, ArrowLeftRight, X } from "lucide-react"
@@ -122,7 +121,9 @@ interface Generation {
 
 export default function HistoryDetailPage() {
   const params = useParams()
+  const searchParams = useSearchParams()
   const id = params.id as string
+  const isNewGeneration = searchParams.get('new') === 'true'
   const [generation, setGeneration] = useState<Generation | null>(null)
   const [loading, setLoading] = useState(true)
   const [selectedOption, setSelectedOption] = useState("1")
@@ -138,14 +139,12 @@ export default function HistoryDetailPage() {
   const [previewOption, setPreviewOption] = useState<ScheduleOption | null>(null)
   const [showingPreview, setShowingPreview] = useState(true) // Toggle between preview and original
   const [previewTeachers, setPreviewTeachers] = useState<Set<string>>(new Set()) // Teachers that were regenerated
+  const [previewType, setPreviewType] = useState<"regen" | "study-hall" | null>(null) // Type of preview
 
   // Swap mode state
   const [swapMode, setSwapMode] = useState(false)
   const [selectedCell, setSelectedCell] = useState<CellLocation | null>(null)
   const [validTargets, setValidTargets] = useState<CellLocation[]>([])
-
-  // Study hall revert state - stores previous option before reassignment
-  const [previousOption, setPreviousOption] = useState<ScheduleOption | null>(null)
 
   // Save dialog state
   const [showSaveDialog, setShowSaveDialog] = useState(false)
@@ -161,10 +160,10 @@ export default function HistoryDetailPage() {
     setSwapMode(false)
     setSelectedCell(null)
     setValidTargets([])
-    setPreviousOption(null)
     setPreviewOption(null)
     setShowingPreview(true)
     setPreviewTeachers(new Set())
+    setPreviewType(null)
   }, [selectedOption])
 
   async function loadGeneration() {
@@ -213,28 +212,6 @@ export default function HistoryDetailPage() {
       }
     } catch (error) {
       toast.error("Failed to save schedule")
-    } finally {
-      setSaving(false)
-    }
-  }
-
-  async function handleUnsave() {
-    if (!generation || !generation.is_saved) return
-    setSaving(true)
-    try {
-      const res = await fetch(`/api/history/${id}`, {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ is_saved: false }),
-      })
-      if (res.ok) {
-        setGeneration({ ...generation, is_saved: false })
-        toast.success("Schedule marked as not saved")
-      } else {
-        toast.error("Failed to update schedule")
-      }
-    } catch (error) {
-      toast.error("Failed to update schedule")
     } finally {
       setSaving(false)
     }
@@ -356,6 +333,7 @@ export default function HistoryDetailPage() {
       // Save which teachers were regenerated before clearing selection
       setPreviewTeachers(new Set(selectedForRegen))
       setPreviewOption(newOption)
+      setPreviewType("regen")
       setSelectedForRegen(new Set()) // Clear selections
       toast.success("Preview generated - review and choose to keep or discard")
     } catch (error) {
@@ -370,7 +348,23 @@ export default function HistoryDetailPage() {
     if (!generation || !previewOption) return
 
     try {
-      const updatedOptions = [...generation.options, previewOption]
+      let updatedOptions: ScheduleOption[]
+      let successMessage: string
+
+      if (previewType === "study-hall") {
+        // Study hall preview: update current option in place
+        const optionIndex = parseInt(selectedOption) - 1
+        updatedOptions = [...generation.options]
+        updatedOptions[optionIndex] = {
+          ...previewOption,
+          optionNumber: optionIndex + 1,
+        }
+        successMessage = `Study halls reassigned for Option ${optionIndex + 1}`
+      } else {
+        // Regen preview: add as new option
+        updatedOptions = [...generation.options, previewOption]
+        successMessage = `Saved as Option ${generation.options.length + 1}`
+      }
 
       const updateRes = await fetch(`/api/history/${id}`, {
         method: "PUT",
@@ -380,27 +374,29 @@ export default function HistoryDetailPage() {
 
       if (updateRes.ok) {
         setGeneration({ ...generation, options: updatedOptions })
-        setSelectedOption((generation.options.length + 1).toString())
+        if (previewType === "regen") {
+          setSelectedOption((generation.options.length + 1).toString())
+        }
         setPreviewOption(null)
-        toast.success(`Saved as Option ${generation.options.length + 1}`)
+        setPreviewType(null)
+        toast.success(successMessage)
       } else {
-        toast.error("Failed to save option")
+        toast.error("Failed to save changes")
       }
     } catch (error) {
       console.error('Save preview error:', error)
-      toast.error("Failed to save option")
+      toast.error("Failed to save changes")
     }
   }
 
   function handleDiscardPreview() {
     setPreviewOption(null)
+    setPreviewType(null)
     toast("Preview discarded", { icon: "🗑️" })
   }
 
   async function handleReassignStudyHalls() {
     if (!generation || !selectedResult) return
-
-    const optionIndex = parseInt(selectedOption) - 1
 
     try {
       // Fetch current teachers
@@ -425,63 +421,14 @@ export default function HistoryDetailPage() {
         return
       }
 
-      // Save the current option for potential revert
-      setPreviousOption(selectedResult)
-
-      // Update the current option in place
-      const updatedOption = {
-        ...result.newOption,
-        optionNumber: optionIndex + 1,
-      }
-
-      const updatedOptions = [...generation.options]
-      updatedOptions[optionIndex] = updatedOption
-
-      // Save to the server
-      const updateRes = await fetch(`/api/history/${id}`, {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ options: updatedOptions }),
-      })
-
-      if (updateRes.ok) {
-        setGeneration({ ...generation, options: updatedOptions })
-        toast.success(`Reassigned study halls for Option ${optionIndex + 1}`)
-      } else {
-        toast.error("Failed to save changes")
-      }
+      // Set as preview (not saved yet)
+      setPreviewOption(result.newOption)
+      setPreviewType("study-hall")
+      setShowingPreview(true)
+      toast.success("Preview generated - review and choose to keep or discard")
     } catch (error) {
       console.error('Reassign study halls error:', error)
       toast.error("Failed to reassign study halls")
-    }
-  }
-
-  async function handleRevertStudyHalls() {
-    if (!generation || !previousOption) return
-
-    const optionIndex = parseInt(selectedOption) - 1
-
-    try {
-      const updatedOptions = [...generation.options]
-      updatedOptions[optionIndex] = previousOption
-
-      // Save to the server
-      const updateRes = await fetch(`/api/history/${id}`, {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ options: updatedOptions }),
-      })
-
-      if (updateRes.ok) {
-        setGeneration({ ...generation, options: updatedOptions })
-        setPreviousOption(null)
-        toast.success(`Reverted study halls for Option ${optionIndex + 1}`)
-      } else {
-        toast.error("Failed to revert changes")
-      }
-    } catch (error) {
-      console.error('Revert study halls error:', error)
-      toast.error("Failed to revert study halls")
     }
   }
 
@@ -782,31 +729,20 @@ export default function HistoryDetailPage() {
   return (
     <div className="max-w-7xl mx-auto p-8">
       <div className="mb-6">
-        <Link
-          href="/history"
-          className="inline-flex items-center text-sm text-muted-foreground hover:text-foreground mb-4 no-print"
-        >
-          <ArrowLeft className="h-4 w-4 mr-1" />
-          Back to History
-        </Link>
-        <div className="flex items-center justify-between">
-          <div>
-            <h1 className="text-3xl font-bold mb-2">
+        <div className="flex items-center justify-between mb-2">
+          <div className="flex items-center gap-4">
+            <Link
+              href="/history"
+              className="inline-flex items-center text-sm text-muted-foreground hover:text-foreground no-print"
+            >
+              <ArrowLeft className="h-4 w-4 mr-1" />
+              Back
+            </Link>
+            <h1 className="text-2xl font-bold">
               {generation.quarter?.name} Schedule
-              {generation.is_saved && (
-                <Badge className="ml-3 bg-emerald-500 no-print">Saved</Badge>
-              )}
             </h1>
-            <p className="text-muted-foreground">
-              Generated {new Date(generation.generated_at).toLocaleString()}
-            </p>
-            {generation.notes && (
-              <p className="text-sm text-slate-600 mt-1 italic no-print">
-                &ldquo;{generation.notes}&rdquo;
-              </p>
-            )}
           </div>
-          {/* Save button or saved indicator with unsave option */}
+          {/* Save button or saved indicator */}
           {!generation.is_saved ? (
             <Button
               onClick={openSaveDialog}
@@ -817,20 +753,19 @@ export default function HistoryDetailPage() {
               Save Schedule
             </Button>
           ) : (
-            <Button
-              onClick={handleUnsave}
-              disabled={saving}
-              variant="outline"
-              size="sm"
-              className="gap-1 no-print"
-            >
-              {saving ? (
-                <Loader2 className="h-4 w-4 animate-spin" />
-              ) : (
-                <Check className="h-4 w-4" />
-              )}
-              Unsave
-            </Button>
+            <div className="flex items-center gap-1.5 text-emerald-600 no-print">
+              <Check className="h-4 w-4" />
+              <span className="text-sm font-medium">Saved</span>
+            </div>
+          )}
+        </div>
+        <div className="flex items-center gap-3 text-sm text-muted-foreground">
+          <span>{new Date(generation.generated_at).toLocaleString()}</span>
+          <span className="text-slate-300">{generation.id.slice(0, 8)}</span>
+          {generation.notes && (
+            <span className="text-slate-600 italic no-print">
+              — &ldquo;{generation.notes}&rdquo;
+            </span>
           )}
         </div>
       </div>
@@ -890,7 +825,7 @@ export default function HistoryDetailPage() {
                         : 'text-violet-600 hover:text-violet-800'
                     }`}
                   >
-                    Preview
+                    {previewType === "study-hall" ? "Preview" : "Preview"}
                     <span className={`text-xs ${previewOption.studyHallsPlaced >= 6 ? 'text-emerald-600' : 'text-amber-600'}`}>
                       {previewOption.studyHallsPlaced}/{previewOption.studyHallAssignments?.length || 6}
                     </span>
@@ -950,17 +885,10 @@ export default function HistoryDetailPage() {
                     {swapMode ? "Exit Swap Mode" : "Swap Mode"}
                   </DropdownMenuItem>
                   <DropdownMenuSeparator />
-                  {previousOption ? (
-                    <DropdownMenuItem onClick={handleRevertStudyHalls}>
-                      <Shuffle className="h-4 w-4 mr-2" />
-                      Revert Study Halls
-                    </DropdownMenuItem>
-                  ) : (
-                    <DropdownMenuItem onClick={handleReassignStudyHalls}>
-                      <Shuffle className="h-4 w-4 mr-2" />
-                      Reassign Study Halls
-                    </DropdownMenuItem>
-                  )}
+                  <DropdownMenuItem onClick={handleReassignStudyHalls}>
+                    <Shuffle className="h-4 w-4 mr-2" />
+                    Reassign Study Halls
+                  </DropdownMenuItem>
                   {generation.selected_option !== parseInt(selectedOption) && !previewOption && (
                     <DropdownMenuItem onClick={handleMarkAsSelected}>
                       <Star className="h-4 w-4 mr-2" />
@@ -1017,19 +945,29 @@ export default function HistoryDetailPage() {
             </div>
           )}
 
-          {/* Preview Banner - shows when regenerated option is pending review */}
+          {/* Preview Banner - shows when regenerated/reassigned option is pending review */}
           {previewOption && !isGenerating && (
             <div className={`border rounded-lg p-4 no-print ${showingPreview ? 'bg-violet-50 border-violet-200' : 'bg-slate-50 border-slate-200'}`}>
               <div className="flex items-center justify-between">
                 <div className="flex items-center gap-3">
-                  <RefreshCw className={`h-5 w-5 ${showingPreview ? 'text-violet-600' : 'text-slate-500'}`} />
+                  {previewType === "study-hall" ? (
+                    <Shuffle className={`h-5 w-5 ${showingPreview ? 'text-violet-600' : 'text-slate-500'}`} />
+                  ) : (
+                    <RefreshCw className={`h-5 w-5 ${showingPreview ? 'text-violet-600' : 'text-slate-500'}`} />
+                  )}
                   <div>
                     <span className={`font-medium ${showingPreview ? 'text-violet-800' : 'text-slate-700'}`}>
-                      {showingPreview ? `Preview: Option ${generation.options.length + 1}` : `Original: Option ${selectedOption}`}
+                      {showingPreview
+                        ? previewType === "study-hall"
+                          ? `Preview: Reassigned Study Halls`
+                          : `Preview: Option ${generation.options.length + 1}`
+                        : `Original: Option ${selectedOption}`}
                     </span>
                     <p className={`text-sm ${showingPreview ? 'text-violet-600' : 'text-slate-500'}`}>
                       {showingPreview
-                        ? "Viewing regenerated schedule. Toggle to compare with original."
+                        ? previewType === "study-hall"
+                          ? "Viewing reassigned study halls. Toggle to compare with original."
+                          : "Viewing regenerated schedule. Toggle to compare with original."
                         : "Viewing original schedule. Toggle to see the preview."}
                     </p>
                   </div>
@@ -1152,6 +1090,7 @@ export default function HistoryDetailPage() {
                         : 0
                     }
                     unscheduledClasses={0}
+                    defaultExpanded={isNewGeneration}
                   />
                 </div>
               )}
@@ -1179,18 +1118,18 @@ export default function HistoryDetailPage() {
                     View by {viewMode === "teacher" ? "Grade" : "Teacher"}
                   </Button>
                 </div>
-                {/* Show message when in preview mode */}
-                {previewOption && showingPreview && previewTeachers.size > 0 && viewMode === "teacher" && (
+                {/* Show message when in regen preview mode */}
+                {previewOption && previewType === "regen" && previewTeachers.size > 0 && viewMode === "teacher" && (
                   <div className="col-span-full mb-2 text-sm text-violet-600 bg-violet-50 border border-violet-200 rounded-lg px-3 py-2">
-                    Showing {previewTeachers.size} regenerated teacher{previewTeachers.size !== 1 ? 's' : ''}. Toggle to &quot;Original&quot; to see all teachers.
+                    Comparing {previewTeachers.size} regenerated teacher{previewTeachers.size !== 1 ? 's' : ''}. Toggle between Original and Preview to compare.
                   </div>
                 )}
                 <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 print-grid">
                   {viewMode === "teacher"
                     ? Object.entries(selectedResult.teacherSchedules)
-                        // Filter to only show regenerated teachers when previewing
+                        // Filter to only show regenerated teachers during regen preview (both Original and Preview views)
                         .filter(([teacher]) => {
-                          if (previewOption && showingPreview && previewTeachers.size > 0) {
+                          if (previewOption && previewType === "regen" && previewTeachers.size > 0) {
                             return previewTeachers.has(teacher)
                           }
                           return true

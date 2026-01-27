@@ -15,7 +15,7 @@ import { Settings, Users, History, Cog, Heart, GraduationCap, BookOpen } from "l
 
 const mainNavItems = [
   { href: "/classes", label: "Classes" },
-  { href: "/generate", label: "Generate" },
+  { href: "/generate", label: "Schedules" },
 ]
 
 const moreItems = [
