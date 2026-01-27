@@ -72,9 +72,29 @@ export function ScheduleStats({
   const unplacedStudyHalls = studyHallAssignments.filter(sh => !sh.teacher)
   const teachersWithBTB = sortedStats.filter(s => s.backToBackIssues > 0)
   const fullTimeTeachers = sortedStats.filter(s => s.status === 'full-time')
-  const avgUtilization = stats.length > 0
-    ? Math.round((stats.reduce((sum, s) => sum + s.totalUsed, 0) / stats.length / 25) * 100)
+
+  // Calculate utilization for full-time teachers only
+  const avgUtilization = fullTimeTeachers.length > 0
+    ? Math.round((fullTimeTeachers.reduce((sum, s) => sum + s.totalUsed, 0) / fullTimeTeachers.length / 25) * 100)
     : 0
+
+  // Find full-time teachers with most open blocks (candidates for more classes)
+  const ftWithOpenBlocks = fullTimeTeachers
+    .filter(t => t.open > 0)
+    .sort((a, b) => b.open - a.open)
+
+  // Calculate average open blocks for full-time teachers
+  const avgOpenBlocks = fullTimeTeachers.length > 0
+    ? fullTimeTeachers.reduce((sum, t) => sum + t.open, 0) / fullTimeTeachers.length
+    : 0
+
+  // Find the busiest full-time teacher (fewest open blocks)
+  const minOpenBlocks = fullTimeTeachers.length > 0
+    ? Math.min(...fullTimeTeachers.map(t => t.open))
+    : 0
+
+  // Teachers with 3+ more open blocks than the busiest teacher - they could take more classes
+  const underutilizedTeachers = ftWithOpenBlocks.filter(t => t.open >= minOpenBlocks + 3)
 
   // Identify potential issues
   const issues: { type: 'warning' | 'info'; message: string }[] = []
@@ -95,18 +115,28 @@ export function ScheduleStats({
   }
 
   if (teachersWithBTB.length > 0) {
-    const names = teachersWithBTB.slice(0, 3).map(t => t.teacher).join(', ')
-    const more = teachersWithBTB.length > 3 ? ` +${teachersWithBTB.length - 3} more` : ''
+    const names = teachersWithBTB.slice(0, 8).map(t => t.teacher).join(', ')
+    const more = teachersWithBTB.length > 8 ? ` +${teachersWithBTB.length - 8} more` : ''
     issues.push({
       type: 'info',
       message: `Back-to-back open blocks: ${names}${more}. This is a soft constraint - schedule is still valid.`
     })
   }
 
-  if (avgUtilization < 50 && fullTimeTeachers.length > 0) {
+  if (underutilizedTeachers.length > 0) {
+    const names = underutilizedTeachers.slice(0, 8).map(t => `${t.teacher} (${t.open} open)`).join(', ')
+    const more = underutilizedTeachers.length > 8 ? ` +${underutilizedTeachers.length - 8} more` : ''
     issues.push({
       type: 'info',
-      message: `Low average utilization (${avgUtilization}%). Teachers have many open blocks - consider adding more classes or reducing staff.`
+      message: `Consider assigning more classes to: ${names}${more}.`
+    })
+  }
+
+  // High average open blocks (more than half the week free)
+  if (avgOpenBlocks > 12 && fullTimeTeachers.length > 0) {
+    issues.push({
+      type: 'info',
+      message: `Full-time teachers average ${avgOpenBlocks.toFixed(1)} open blocks. Consider adding more classes or adjusting staffing.`
     })
   }
 
@@ -179,19 +209,24 @@ export function ScheduleStats({
             )}
           </div>
 
-          {/* Utilization */}
+          {/* Avg Open Blocks - Full-time teachers only */}
           <div
             className="border rounded-lg p-4 border-slate-200 bg-slate-50 cursor-pointer hover:border-slate-300"
             onClick={() => scrollToSection('teacher-util-section')}
           >
             <div className="text-sm text-slate-600">
-              Avg Utilization
-              <InfoTooltip text="Average percentage of time slots used (teaching + study hall) across all teachers. Higher means teachers are busier. Based on 25 slots/week (5 days x 5 blocks)." />
+              Avg Open Blocks
+              <InfoTooltip text="Average number of unassigned blocks per full-time teacher. Lower means teachers are busier. Teachers with many open blocks could take on more classes." />
             </div>
             <div className="text-2xl font-bold text-slate-700">
-              {avgUtilization}%
+              {fullTimeTeachers.length > 0
+                ? (fullTimeTeachers.reduce((sum, t) => sum + t.open, 0) / fullTimeTeachers.length).toFixed(1)
+                : 0}
+              <span className="text-sm font-normal text-slate-500 ml-1">
+                / 25
+              </span>
             </div>
-            <div className="text-xs text-slate-500 mt-1">Click for breakdown</div>
+            <div className="text-xs text-slate-500 mt-1">Full-time teachers only</div>
           </div>
         </div>
 

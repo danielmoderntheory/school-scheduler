@@ -601,7 +601,7 @@ export async function generateSchedules(
   const eligible = getStudyHallEligible(teachers, classes);
   const sessions = buildSessions(classes);
 
-  onProgress?.(0, numAttempts, 'Initializing MIP solver...');
+  onProgress?.(0, numAttempts, 'Initializing solver...');
   await new Promise(resolve => setTimeout(resolve, 10));
 
   const candidates: {
