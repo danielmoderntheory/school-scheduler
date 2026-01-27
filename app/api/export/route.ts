@@ -41,7 +41,10 @@ export async function GET(request: NextRequest) {
   }
 
   // Default to XLSX
-  const xlsx = generateXLSX(option)
+  const xlsx = generateXLSX(option, {
+    scheduleId: generationId,
+    generatedAt: generation.generated_at,
+  })
   return new NextResponse(xlsx, {
     headers: {
       "Content-Type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",

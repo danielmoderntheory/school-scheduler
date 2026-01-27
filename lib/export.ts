@@ -206,7 +206,12 @@ function applyRowStyle(sheet: XLSX.WorkSheet, row: number, startCol: number, end
   }
 }
 
-export function generateXLSX(option: ScheduleOption): Blob {
+export interface ExportMetadata {
+  scheduleId?: string
+  generatedAt?: string
+}
+
+export function generateXLSX(option: ScheduleOption, metadata?: ExportMetadata): Blob {
   const workbook = XLSX.utils.book_new()
 
   // Get sorted teacher order (same as schedule view)
@@ -224,9 +229,24 @@ export function generateXLSX(option: ScheduleOption): Blob {
     return indexA - indexB
   })
 
+  // Format the date if provided
+  const formattedDate = metadata?.generatedAt
+    ? new Date(metadata.generatedAt).toLocaleDateString("en-US", {
+        weekday: "long",
+        year: "numeric",
+        month: "long",
+        day: "numeric",
+        hour: "numeric",
+        minute: "2-digit",
+      })
+    : null
+
   // Summary sheet
   const summaryData = [
-    ["Schedule Generation Summary"],
+    ["Schedule Generation"],
+    [],
+    ...(metadata?.scheduleId ? [["Schedule ID", metadata.scheduleId]] : []),
+    ...(formattedDate ? [["Generated", formattedDate]] : []),
     [],
     ["Option", option.optionNumber],
     ["Back-to-Back Issues", option.backToBackIssues],
@@ -255,13 +275,21 @@ export function generateXLSX(option: ScheduleOption): Blob {
   ]
   const summarySheet = XLSX.utils.aoa_to_sheet(summaryData)
 
-  // Apply summary styles
-  applyRowStyle(summarySheet, 0, 0, 5, styles.title) // Title row
-  applyRowStyle(summarySheet, 6, 0, 3, styles.sectionHeader) // Study Hall Assignments header
-  applyRowStyle(summarySheet, 7, 0, 3, styles.tableHeader) // Study Hall table header
+  // Calculate row offsets based on metadata presence
+  const metadataRows = (metadata?.scheduleId ? 1 : 0) + (formattedDate ? 1 : 0)
+  const studyHallHeaderRow = 9 + metadataRows
+  const studyHallTableHeaderRow = studyHallHeaderRow + 1
+  const studyHallDataStart = studyHallTableHeaderRow + 1
+
+  // Apply summary styles (matching Teacher Schedules tab colors)
+  applyRowStyle(summarySheet, 0, 0, 5, styles.nameRow) // Title row - slate like teacher names
+
+  // Metadata rows (Schedule ID, Generated) have no special styling - plain cells
+
+  applyRowStyle(summarySheet, studyHallHeaderRow, 0, 3, styles.nameRow) // Study Hall Assignments header
+  applyRowStyle(summarySheet, studyHallTableHeaderRow, 0, 3, styles.dayHeader) // Study Hall table header
 
   // Style study hall data rows
-  const studyHallDataStart = 8
   const studyHallDataEnd = studyHallDataStart + option.studyHallAssignments.length
   for (let row = studyHallDataStart; row < studyHallDataEnd; row++) {
     const style = (row - studyHallDataStart) % 2 === 0 ? styles.dataRowEven : styles.dataRowOdd
@@ -270,8 +298,8 @@ export function generateXLSX(option: ScheduleOption): Blob {
 
   // Teacher Statistics section
   const teacherStatsHeaderRow = studyHallDataEnd + 1
-  applyRowStyle(summarySheet, teacherStatsHeaderRow, 0, 5, styles.sectionHeader)
-  applyRowStyle(summarySheet, teacherStatsHeaderRow + 1, 0, 5, styles.tableHeader)
+  applyRowStyle(summarySheet, teacherStatsHeaderRow, 0, 5, styles.nameRow)
+  applyRowStyle(summarySheet, teacherStatsHeaderRow + 1, 0, 5, styles.dayHeader)
 
   // Style teacher stats data rows
   for (let i = 0; i < option.teacherStats.length; i++) {
