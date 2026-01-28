@@ -12,6 +12,7 @@ export function Toaster() {
           background: "hsl(var(--background))",
           color: "hsl(var(--foreground))",
           border: "1px solid hsl(var(--border))",
+          fontSize: "0.875rem", // text-sm equivalent
         },
         success: {
           iconTheme: {

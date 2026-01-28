@@ -3,9 +3,9 @@
 import { useState, useEffect } from "react"
 import { useParams, useSearchParams } from "next/navigation"
 import { Button } from "@/components/ui/button"
-import { ScheduleGrid, CellLocation } from "@/components/ScheduleGrid"
+import { ScheduleGrid } from "@/components/ScheduleGrid"
 import { ScheduleStats } from "@/components/ScheduleStats"
-import { Loader2, Download, ArrowLeft, Save, Check, RefreshCw, Shuffle, Trash2, Star, MoreVertical, Users, GraduationCap, Printer, ArrowLeftRight, X } from "lucide-react"
+import { Loader2, Download, ArrowLeft, Save, Check, RefreshCw, Shuffle, Trash2, Star, MoreVertical, Users, GraduationCap, Printer, ArrowLeftRight, X, Hand } from "lucide-react"
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -21,10 +21,20 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog"
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog"
 import { Textarea } from "@/components/ui/textarea"
 import { Label } from "@/components/ui/label"
 import Link from "next/link"
-import type { ScheduleOption, TeacherSchedule, Teacher } from "@/lib/types"
+import type { ScheduleOption, TeacherSchedule, GradeSchedule, Teacher, FloatingBlock, PendingPlacement, ValidationError, CellLocation } from "@/lib/types"
 import toast from "react-hot-toast"
 import { generateSchedules, reassignStudyHalls } from "@/lib/scheduler"
 
@@ -131,6 +141,7 @@ export default function HistoryDetailPage() {
   const [saving, setSaving] = useState(false)
 
   // Regeneration state - teachers selected for regeneration
+  const [regenMode, setRegenMode] = useState(false)
   const [selectedForRegen, setSelectedForRegen] = useState<Set<string>>(new Set())
   const [isGenerating, setIsGenerating] = useState(false)
   const [generationProgress, setGenerationProgress] = useState({ current: 0, total: 0, message: "" })
@@ -140,11 +151,46 @@ export default function HistoryDetailPage() {
   const [showingPreview, setShowingPreview] = useState(true) // Toggle between preview and original
   const [previewTeachers, setPreviewTeachers] = useState<Set<string>>(new Set()) // Teachers that were regenerated
   const [previewType, setPreviewType] = useState<"regen" | "study-hall" | null>(null) // Type of preview
+  const [studyHallMode, setStudyHallMode] = useState(false) // Whether we're in study hall reassignment mode
+  const [studyHallSeed, setStudyHallSeed] = useState<number | null>(null) // Seed for study hall shuffling
+
+  // Confirmation dialog state for "update option" actions
+  const [showUpdateConfirm, setShowUpdateConfirm] = useState(false)
+  const [pendingUpdateAction, setPendingUpdateAction] = useState<(() => void) | null>(null)
 
   // Swap mode state
   const [swapMode, setSwapMode] = useState(false)
   const [selectedCell, setSelectedCell] = useState<CellLocation | null>(null)
   const [validTargets, setValidTargets] = useState<CellLocation[]>([])
+  const [highlightedCells, setHighlightedCells] = useState<CellLocation[]>([])
+  const [highlightTimeout, setHighlightTimeout] = useState<ReturnType<typeof setTimeout> | null>(null)
+  const [swapWorkingSchedules, setSwapWorkingSchedules] = useState<{
+    teacherSchedules: Record<string, TeacherSchedule>
+    gradeSchedules: Record<string, GradeSchedule>
+    studyHallAssignments: Array<{ group: string; teacher: string | null; day: string | null; block: number | null }>
+  } | null>(null)
+  const [swapCount, setSwapCount] = useState(0)
+
+  // Freeform mode state
+  const [freeformMode, setFreeformMode] = useState(false)
+  const [floatingBlocks, setFloatingBlocks] = useState<FloatingBlock[]>([])
+  const [pendingPlacements, setPendingPlacements] = useState<PendingPlacement[]>([])
+  const [selectedFloatingBlock, setSelectedFloatingBlock] = useState<string | null>(null)
+  const [validationErrors, setValidationErrors] = useState<ValidationError[]>([])
+  const [workingSchedules, setWorkingSchedules] = useState<{
+    teacherSchedules: Record<string, TeacherSchedule>
+    gradeSchedules: Record<string, GradeSchedule>
+  } | null>(null)
+  const [freeformClasses, setFreeformClasses] = useState<Array<{
+    teacher: string
+    grade: string
+    subject: string
+    daysPerWeek: number
+    fixedSlots?: [string, number][]
+    availableDays: string[]
+    availableBlocks: number[]
+  }> | null>(null)
+
 
   // Save dialog state
   const [showSaveDialog, setShowSaveDialog] = useState(false)
@@ -156,6 +202,7 @@ export default function HistoryDetailPage() {
 
   // Clear selections when switching options
   useEffect(() => {
+    setRegenMode(false)
     setSelectedForRegen(new Set())
     setSwapMode(false)
     setSelectedCell(null)
@@ -164,6 +211,16 @@ export default function HistoryDetailPage() {
     setShowingPreview(true)
     setPreviewTeachers(new Set())
     setPreviewType(null)
+    // Clear study hall mode state
+    setStudyHallMode(false)
+    setStudyHallSeed(null)
+    // Clear freeform mode state
+    setFreeformMode(false)
+    setFloatingBlocks([])
+    setPendingPlacements([])
+    setSelectedFloatingBlock(null)
+    setValidationErrors([])
+    setWorkingSchedules(null)
   }, [selectedOption])
 
   async function loadGeneration() {
@@ -215,6 +272,18 @@ export default function HistoryDetailPage() {
     } finally {
       setSaving(false)
     }
+  }
+
+  function enterRegenMode() {
+    setRegenMode(true)
+    setSelectedForRegen(new Set())
+  }
+
+  function exitRegenMode() {
+    setRegenMode(false)
+    setSelectedForRegen(new Set())
+    setPreviewOption(null)
+    setPreviewType(null)
   }
 
   function toggleTeacherSelection(teacher: string) {
@@ -330,12 +399,11 @@ export default function HistoryDetailPage() {
         optionNumber: generation.options.length + 1,
       }
 
-      // Save which teachers were regenerated before clearing selection
+      // Save which teachers were regenerated
       setPreviewTeachers(new Set(selectedForRegen))
       setPreviewOption(newOption)
       setPreviewType("regen")
-      setSelectedForRegen(new Set()) // Clear selections
-      toast.success("Preview generated - review and choose to keep or discard")
+      toast.success("Schedules regenerated")
     } catch (error) {
       console.error('Regeneration error:', error)
       toast.error("Failed to generate variation")
@@ -344,26 +412,32 @@ export default function HistoryDetailPage() {
     }
   }
 
-  async function handleKeepPreview() {
+  async function handleKeepPreview(saveAsNew: boolean = false) {
     if (!generation || !previewOption) return
 
     try {
       let updatedOptions: ScheduleOption[]
       let successMessage: string
 
-      if (previewType === "study-hall") {
-        // Study hall preview: update current option in place
+      if (!saveAsNew) {
+        // Update current option in place
         const optionIndex = parseInt(selectedOption) - 1
         updatedOptions = [...generation.options]
         updatedOptions[optionIndex] = {
           ...previewOption,
           optionNumber: optionIndex + 1,
         }
-        successMessage = `Study halls reassigned for Option ${optionIndex + 1}`
+        successMessage = previewType === "study-hall"
+          ? `Study halls reassigned for Option ${optionIndex + 1}`
+          : `Option ${optionIndex + 1} updated`
       } else {
-        // Regen preview: add as new option
-        updatedOptions = [...generation.options, previewOption]
-        successMessage = `Saved as Option ${generation.options.length + 1}`
+        // Save as new option
+        const newOptionNumber = generation.options.length + 1
+        updatedOptions = [...generation.options, {
+          ...previewOption,
+          optionNumber: newOptionNumber,
+        }]
+        successMessage = `Saved as Option ${newOptionNumber}`
       }
 
       const updateRes = await fetch(`/api/history/${id}`, {
@@ -374,11 +448,15 @@ export default function HistoryDetailPage() {
 
       if (updateRes.ok) {
         setGeneration({ ...generation, options: updatedOptions })
-        if (previewType === "regen") {
+        if (saveAsNew) {
           setSelectedOption((generation.options.length + 1).toString())
         }
         setPreviewOption(null)
         setPreviewType(null)
+        setStudyHallMode(false)
+        setStudyHallSeed(null)
+        setRegenMode(false)
+        setSelectedForRegen(new Set())
         toast.success(successMessage)
       } else {
         toast.error("Failed to save changes")
@@ -392,18 +470,39 @@ export default function HistoryDetailPage() {
   function handleDiscardPreview() {
     setPreviewOption(null)
     setPreviewType(null)
+    setStudyHallMode(false)
+    setStudyHallSeed(null)
+    setRegenMode(false)
+    setSelectedForRegen(new Set())
     toast("Preview discarded", { icon: "🗑️" })
   }
 
-  async function handleReassignStudyHalls() {
-    if (!generation || !selectedResult) return
+  function enterStudyHallMode() {
+    setStudyHallMode(true)
+  }
+
+  function exitStudyHallMode() {
+    setStudyHallMode(false)
+    setPreviewOption(null)
+    setPreviewType(null)
+    setStudyHallSeed(null)
+  }
+
+  async function generateStudyHallArrangement() {
+    // Always use the current saved option, not a previous preview
+    const currentOption = generation?.options?.[parseInt(selectedOption) - 1]
+    if (!generation || !currentOption) return
 
     try {
       // Fetch current teachers
       const teachersRes = await fetch('/api/teachers')
       const teachers: Teacher[] = await teachersRes.json()
 
-      const result = reassignStudyHalls(selectedResult, teachers)
+      // Generate a new random seed each time
+      const seed = Math.floor(Math.random() * 2147483647)
+      setStudyHallSeed(seed)
+
+      const result = reassignStudyHalls(currentOption, teachers, seed)
 
       if (!result.success) {
         toast.error(result.message || "Could not reassign study halls")
@@ -425,7 +524,7 @@ export default function HistoryDetailPage() {
       setPreviewOption(result.newOption)
       setPreviewType("study-hall")
       setShowingPreview(true)
-      toast.success("Preview generated - review and choose to keep or discard")
+      toast.success("Study halls randomized")
     } catch (error) {
       console.error('Reassign study halls error:', error)
       toast.error("Failed to reassign study halls")
@@ -507,11 +606,12 @@ export default function HistoryDetailPage() {
     if (!selectedResult) return []
 
     const targets: CellLocation[] = []
+    const schedules = swapWorkingSchedules?.teacherSchedules || selectedResult.teacherSchedules
 
     // For study hall: find OPEN blocks on eligible teachers at the SAME day/block
     // (the grade needs the study hall at this specific time, we're just changing the teacher)
     // For open: find all OPEN blocks (can swap OPEN with OPEN on any slot)
-    for (const [teacher, schedule] of Object.entries(selectedResult.teacherSchedules)) {
+    for (const [teacher, schedule] of Object.entries(schedules)) {
       // Skip the source teacher
       if (teacher === source.teacher) continue
 
@@ -543,14 +643,289 @@ export default function HistoryDetailPage() {
     return targets
   }
 
+  // Find valid swap targets for teacher view class moves
+  function findValidTeacherClassSwapTargets(source: CellLocation): CellLocation[] {
+    if (!selectedResult || !source.teacher || !source.grade || !source.subject) return []
+
+    const targets: CellLocation[] = []
+    const DAYS = ["Mon", "Tues", "Wed", "Thurs", "Fri"]
+    const BLOCKS = [1, 2, 3, 4, 5]
+
+    const teacher = source.teacher
+    const grade = source.grade
+    const subject = source.subject
+
+    const teacherSchedules = swapWorkingSchedules?.teacherSchedules || selectedResult.teacherSchedules
+    const gradeSchedules = swapWorkingSchedules?.gradeSchedules || selectedResult.gradeSchedules
+
+    const teacherSchedule = teacherSchedules[teacher]
+    const gradeSchedule = gradeSchedules[grade]
+    if (!teacherSchedule || !gradeSchedule) return []
+
+    // Get subjects already scheduled on each day for this grade (excluding source)
+    const subjectsByDay: Record<string, Set<string>> = {}
+    for (const day of DAYS) {
+      subjectsByDay[day] = new Set()
+      for (const block of BLOCKS) {
+        const entry = gradeSchedule[day]?.[block]
+        if (entry && entry[1] !== "OPEN" && entry[1] !== "Study Hall") {
+          if (!(day === source.day && block === source.block)) {
+            subjectsByDay[day].add(entry[1])
+          }
+        }
+      }
+    }
+
+    // Option 1: Find OPEN slots for this teacher where the grade is also free
+    for (const day of DAYS) {
+      for (const block of BLOCKS) {
+        // Skip source cell
+        if (day === source.day && block === source.block) continue
+
+        const teacherEntry = teacherSchedule[day]?.[block]
+        const gradeEntry = gradeSchedule[day]?.[block]
+
+        // Teacher must have OPEN at this slot
+        if (!teacherEntry || teacherEntry[1] !== "OPEN") continue
+
+        // Grade must be free (no class)
+        if (gradeEntry && gradeEntry[1] !== "OPEN" && gradeEntry[1] !== "Study Hall") continue
+
+        // No subject conflict - source subject can't already be on this day
+        if (subjectsByDay[day].has(subject)) continue
+
+        targets.push({ teacher, day, block, grade, subject })
+      }
+    }
+
+    // Option 2: Find other classes (same grade) that can swap times
+    // This allows swapping with classes taught by OTHER teachers
+    for (const day of DAYS) {
+      for (const block of BLOCKS) {
+        // Skip source cell
+        if (day === source.day && block === source.block) continue
+
+        const gradeEntry = gradeSchedule[day]?.[block]
+
+        // Must be a class (not OPEN, Study Hall, or empty)
+        if (!gradeEntry || gradeEntry[1] === "OPEN" || gradeEntry[1] === "Study Hall") continue
+
+        const [otherTeacher, otherSubject] = gradeEntry
+
+        // Skip if same teacher (that's Option 1)
+        if (otherTeacher === teacher) continue
+
+        const otherTeacherSchedule = teacherSchedules[otherTeacher]
+        if (!otherTeacherSchedule) continue
+
+        // Check: source teacher must have OPEN at the other class's time
+        const sourceTeacherAtOtherTime = teacherSchedule[day]?.[block]
+        if (!sourceTeacherAtOtherTime || sourceTeacherAtOtherTime[1] !== "OPEN") continue
+
+        // Check: other teacher must have OPEN at source's time
+        const otherTeacherAtSourceTime = otherTeacherSchedule[source.day]?.[source.block]
+        if (!otherTeacherAtSourceTime || otherTeacherAtSourceTime[1] !== "OPEN") continue
+
+        // Check subject conflicts after swap
+        const targetDaySubjects = new Set(subjectsByDay[day])
+        targetDaySubjects.delete(otherSubject)
+        if (targetDaySubjects.has(subject)) continue
+
+        const sourceDaySubjects = new Set(subjectsByDay[source.day])
+        if (sourceDaySubjects.has(otherSubject)) continue
+
+        // Target is in the OTHER teacher's schedule (where the swap target class is)
+        targets.push({ teacher: otherTeacher, day, block, grade, subject: otherSubject })
+      }
+    }
+
+    return targets
+  }
+
+  // Find valid swap targets for grade view (class swaps)
+  function findValidGradeSwapTargets(source: CellLocation): CellLocation[] {
+    if (!selectedResult || !source.grade || !source.teacher || !source.subject) return []
+
+    const targets: CellLocation[] = []
+    const DAYS = ["Mon", "Tues", "Wed", "Thurs", "Fri"]
+    const BLOCKS = [1, 2, 3, 4, 5]
+
+    const teacherSchedules = swapWorkingSchedules?.teacherSchedules || selectedResult.teacherSchedules
+    const gradeSchedules = swapWorkingSchedules?.gradeSchedules || selectedResult.gradeSchedules
+
+    const gradeSchedule = gradeSchedules[source.grade]
+    const teacherSchedule = teacherSchedules[source.teacher]
+    if (!gradeSchedule || !teacherSchedule) return []
+
+    // Get subjects already scheduled on each day for this grade (excluding source)
+    const subjectsByDay: Record<string, Set<string>> = {}
+    for (const day of DAYS) {
+      subjectsByDay[day] = new Set()
+      for (const block of BLOCKS) {
+        const entry = gradeSchedule[day]?.[block]
+        if (entry && entry[1] !== "OPEN" && entry[1] !== "Study Hall") {
+          // Don't count the source cell's subject
+          if (!(day === source.day && block === source.block)) {
+            subjectsByDay[day].add(entry[1])
+          }
+        }
+      }
+    }
+
+    // Option 1: Find OPEN slots where this class can move
+    // Requirements: teacher has OPEN, grade has no class, no subject conflict on that day
+    for (const day of DAYS) {
+      for (const block of BLOCKS) {
+        // Skip source cell
+        if (day === source.day && block === source.block) continue
+
+        const teacherEntry = teacherSchedule[day]?.[block]
+        const gradeEntry = gradeSchedule[day]?.[block]
+
+        // Teacher must have OPEN at this slot
+        if (!teacherEntry || teacherEntry[1] !== "OPEN") continue
+
+        // Grade must be free (no class, or OPEN/Study Hall is ok to swap into conceptually but we're moving a class)
+        if (gradeEntry && gradeEntry[1] !== "OPEN" && gradeEntry[1] !== "Study Hall") continue
+
+        // No subject conflict - source subject can't already be on this day
+        if (subjectsByDay[day].has(source.subject)) continue
+
+        targets.push({ grade: source.grade, day, block, teacher: source.teacher, subject: source.subject })
+      }
+    }
+
+    // Option 2: Find other classes that can swap times
+    // Requirements: both teachers have OPEN at each other's time, no subject conflicts
+    for (const day of DAYS) {
+      for (const block of BLOCKS) {
+        // Skip source cell
+        if (day === source.day && block === source.block) continue
+
+        const gradeEntry = gradeSchedule[day]?.[block]
+
+        // Must be a class (not OPEN, Study Hall, or empty)
+        if (!gradeEntry || gradeEntry[1] === "OPEN" || gradeEntry[1] === "Study Hall") continue
+
+        const [otherTeacher, otherSubject] = gradeEntry
+
+        // Can't swap with same teacher's class (that's just Option 1)
+        if (otherTeacher === source.teacher) continue
+
+        const otherTeacherSchedule = teacherSchedules[otherTeacher]
+        if (!otherTeacherSchedule) continue
+
+        // Check: source teacher must have OPEN at the other class's time
+        const sourceTeacherAtOtherTime = teacherSchedule[day]?.[block]
+        if (!sourceTeacherAtOtherTime || sourceTeacherAtOtherTime[1] !== "OPEN") continue
+
+        // Check: other teacher must have OPEN at source's time
+        const otherTeacherAtSourceTime = otherTeacherSchedule[source.day]?.[source.block]
+        if (!otherTeacherAtSourceTime || otherTeacherAtSourceTime[1] !== "OPEN") continue
+
+        // Check subject conflicts after swap:
+        // - Source subject moving to target day: can't have duplicate
+        // - Other subject moving to source day: can't have duplicate
+        const targetDaySubjects = new Set(subjectsByDay[day])
+        targetDaySubjects.delete(otherSubject) // Remove the class we're swapping out
+        if (targetDaySubjects.has(source.subject)) continue
+
+        const sourceDaySubjects = new Set(subjectsByDay[source.day])
+        // sourceDaySubjects already excludes source.subject
+        if (sourceDaySubjects.has(otherSubject)) continue
+
+        targets.push({ grade: source.grade, day, block, teacher: otherTeacher, subject: otherSubject })
+      }
+    }
+
+    return targets
+  }
+
   function handleCellClick(location: CellLocation, cellType: "study-hall" | "open" | "class") {
     if (!swapMode || !selectedResult) return
 
+    // Handle grade view
+    if (viewMode === "grade") {
+      // If clicking on a valid target, perform the swap
+      if (selectedCell && validTargets.some(t =>
+        t.grade === location.grade && t.day === location.day && t.block === location.block
+      )) {
+        // Determine which type of swap based on what was selected
+        if (selectedCell.subject && selectedCell.subject !== "Study Hall") {
+          performGradeSwap(selectedCell, location)
+        } else {
+          // Study hall swap in grade view - use the teacher swap logic
+          performSwap(
+            { teacher: selectedCell.teacher!, day: selectedCell.day, block: selectedCell.block },
+            { teacher: location.teacher!, day: location.day, block: location.block }
+          )
+        }
+        return
+      }
+
+      // If clicking on the same cell, deselect
+      if (selectedCell?.grade === location.grade &&
+          selectedCell?.day === location.day &&
+          selectedCell?.block === location.block) {
+        setSelectedCell(null)
+        setValidTargets([])
+        return
+      }
+
+      // Allow selecting classes or study halls in grade view
+      if (cellType !== "class" && cellType !== "study-hall") {
+        toast.error("Select a class or study hall to move")
+        return
+      }
+
+      // Select the cell and find valid targets
+      setSelectedCell(location)
+      let targets: CellLocation[]
+      if (cellType === "study-hall") {
+        // For study hall in grade view, find other teachers who can take it
+        const teacherTargets = findValidSwapTargets(
+          { teacher: location.teacher!, day: location.day, block: location.block },
+          "study-hall"
+        )
+        // Convert to grade view format
+        targets = teacherTargets.map(t => ({ ...t, grade: location.grade }))
+      } else {
+        targets = findValidGradeSwapTargets(location)
+      }
+      setValidTargets(targets)
+
+      if (targets.length === 0) {
+        toast("No valid move/swap targets found", { icon: "ℹ️" })
+      } else {
+        toast(`${targets.length} valid target${targets.length !== 1 ? 's' : ''} found`, { icon: "✓" })
+      }
+      return
+    }
+
+    // Handle teacher view
     // If clicking on a valid target, perform the swap
     if (selectedCell && validTargets.some(t =>
       t.teacher === location.teacher && t.day === location.day && t.block === location.block
     )) {
-      performSwap(selectedCell, location)
+      // Determine which type of swap based on what was selected
+      const selectedCellType = selectedCell.subject === "Study Hall" ? "study-hall"
+        : selectedCell.subject === "OPEN" ? "open"
+        : "class"
+
+      if (selectedCellType === "class") {
+        // Check if swapping within same teacher (Option 1) or with another teacher (Option 2)
+        if (selectedCell.teacher === location.teacher) {
+          performTeacherClassSwap(selectedCell, location)
+        } else {
+          // Option 2: Swap with another teacher's class - use grade swap logic
+          performGradeSwap(
+            { ...selectedCell, grade: selectedCell.grade! },
+            { ...location, grade: selectedCell.grade! }
+          )
+        }
+      } else {
+        performSwap(selectedCell, location)
+      }
       return
     }
 
@@ -563,39 +938,45 @@ export default function HistoryDetailPage() {
       return
     }
 
-    // Only allow selecting study halls or open blocks
-    if (cellType !== "study-hall" && cellType !== "open") {
-      toast.error("Can only swap Study Halls or OPEN blocks")
+    // Allow selecting study halls, open blocks, or classes in teacher view
+    if (cellType !== "study-hall" && cellType !== "open" && cellType !== "class") {
+      toast.error("Select a class, Study Hall, or OPEN block")
       return
     }
 
     // Select the cell and find valid targets
     setSelectedCell(location)
-    const targets = findValidSwapTargets(location, cellType)
+    let targets: CellLocation[]
+    if (cellType === "class") {
+      targets = findValidTeacherClassSwapTargets(location)
+    } else {
+      targets = findValidSwapTargets(location, cellType)
+    }
     setValidTargets(targets)
 
     if (targets.length === 0) {
       toast("No valid swap targets found", { icon: "ℹ️" })
+    } else {
+      toast(`${targets.length} valid target${targets.length !== 1 ? 's' : ''} found`, { icon: "✓" })
     }
   }
 
-  async function performSwap(source: CellLocation, target: CellLocation) {
-    if (!generation || !selectedResult) return
+  function performSwap(source: CellLocation, target: CellLocation) {
+    if (!swapWorkingSchedules) return
 
-    const optionIndex = parseInt(selectedOption) - 1
-
-    // Get the cell contents
-    const sourceEntry = selectedResult.teacherSchedules[source.teacher]?.[source.day]?.[source.block]
-    const targetEntry = selectedResult.teacherSchedules[target.teacher]?.[target.day]?.[target.block]
+    // Get the cell contents from working schedules
+    const sourceEntry = swapWorkingSchedules.teacherSchedules[source.teacher]?.[source.day]?.[source.block]
+    const targetEntry = swapWorkingSchedules.teacherSchedules[target.teacher]?.[target.day]?.[target.block]
 
     if (!sourceEntry || !targetEntry) {
       toast.error("Invalid swap")
       return
     }
 
-    // Create deep copy of the schedules
-    const newTeacherSchedules = JSON.parse(JSON.stringify(selectedResult.teacherSchedules))
-    const newGradeSchedules = JSON.parse(JSON.stringify(selectedResult.gradeSchedules))
+    // Create deep copy of the working schedules
+    const newTeacherSchedules = JSON.parse(JSON.stringify(swapWorkingSchedules.teacherSchedules))
+    const newGradeSchedules = JSON.parse(JSON.stringify(swapWorkingSchedules.gradeSchedules))
+    let newStudyHallAssignments = [...swapWorkingSchedules.studyHallAssignments]
 
     // Perform the swap in teacher schedules
     newTeacherSchedules[source.teacher][source.day][source.block] = targetEntry
@@ -606,7 +987,7 @@ export default function HistoryDetailPage() {
       const gradeGroup = sourceEntry[0] // e.g., "6th Grade" or "6th-7th"
 
       // Update study hall assignments
-      const newStudyHallAssignments = selectedResult.studyHallAssignments.map(sh => {
+      newStudyHallAssignments = newStudyHallAssignments.map(sh => {
         if (sh.teacher === source.teacher && sh.day === source.day && sh.block === source.block) {
           return { ...sh, teacher: target.teacher, day: target.day, block: target.block }
         }
@@ -615,79 +996,203 @@ export default function HistoryDetailPage() {
 
       // Update the grade schedule - remove from old slot, add to new
       if (newGradeSchedules[gradeGroup]) {
-        // Remove study hall from old grade schedule slot
         if (newGradeSchedules[gradeGroup][source.day]?.[source.block]) {
           newGradeSchedules[gradeGroup][source.day][source.block] = null
         }
-        // Add study hall to new grade schedule slot
         if (!newGradeSchedules[gradeGroup][target.day]) {
           newGradeSchedules[gradeGroup][target.day] = {}
         }
         newGradeSchedules[gradeGroup][target.day][target.block] = [target.teacher, "Study Hall"]
       }
 
-      // Create updated option
-      const updatedOption: ScheduleOption = {
-        ...selectedResult,
-        teacherSchedules: newTeacherSchedules,
-        gradeSchedules: newGradeSchedules,
-        studyHallAssignments: newStudyHallAssignments,
-      }
-
-      // Recalculate teacher stats
-      updatedOption.teacherStats = selectedResult.teacherStats.map(stat => {
-        const schedule = newTeacherSchedules[stat.teacher]
-        let teaching = 0, studyHall = 0, open = 0, backToBackIssues = 0
-
-        const DAYS = ["Mon", "Tues", "Wed", "Thurs", "Fri"]
-        for (const day of DAYS) {
-          let prevWasOpen = false
-          for (let block = 1; block <= 5; block++) {
-            const entry = schedule?.[day]?.[block]
-            if (!entry || entry[1] === "OPEN") {
-              open++
-              if (prevWasOpen && stat.status === "full-time") backToBackIssues++
-              prevWasOpen = true
-            } else if (entry[1] === "Study Hall") {
-              studyHall++
-              prevWasOpen = true // Study hall counts as "open" for BTB
-            } else {
-              teaching++
-              prevWasOpen = false
-            }
-          }
-        }
-
-        return { ...stat, teaching, studyHall, open, totalUsed: teaching + studyHall, backToBackIssues }
-      })
-
-      // Recalculate total back-to-back issues
-      updatedOption.backToBackIssues = updatedOption.teacherStats.reduce((sum, s) => sum + s.backToBackIssues, 0)
-
-      // Save to server
-      const updatedOptions = [...generation.options]
-      updatedOptions[optionIndex] = updatedOption
-
-      try {
-        const updateRes = await fetch(`/api/history/${id}`, {
-          method: "PUT",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ options: updatedOptions }),
-        })
-
-        if (updateRes.ok) {
-          setGeneration({ ...generation, options: updatedOptions })
-          toast.success(`Moved Study Hall from ${source.teacher} to ${target.teacher}`)
-        } else {
-          toast.error("Failed to save swap")
-        }
-      } catch (error) {
-        console.error('Swap error:', error)
-        toast.error("Failed to save swap")
-      }
+      toast(`Study Hall reassigned: ${source.teacher} → ${target.teacher} (${target.day} B${target.block})`, { icon: "✓" })
     }
 
+    // Update working schedules
+    setSwapWorkingSchedules({
+      teacherSchedules: newTeacherSchedules,
+      gradeSchedules: newGradeSchedules,
+      studyHallAssignments: newStudyHallAssignments
+    })
+    setSwapCount(prev => prev + 1)
+
+    // Highlight the swapped cells
+    highlightCells([
+      { teacher: target.teacher, day: target.day, block: target.block },
+      { teacher: source.teacher, day: source.day, block: source.block },
+    ])
+
+    // Clear selection state
+    setSelectedCell(null)
+    setValidTargets([])
+  }
+
+  function performTeacherClassSwap(source: CellLocation, target: CellLocation) {
+    if (!swapWorkingSchedules || !source.teacher || !source.grade || !source.subject) return
+
+    const teacher = source.teacher
+    const grade = source.grade
+    const subject = source.subject
+
+    // Create deep copy of the working schedules
+    const newTeacherSchedules = JSON.parse(JSON.stringify(swapWorkingSchedules.teacherSchedules))
+    const newGradeSchedules = JSON.parse(JSON.stringify(swapWorkingSchedules.gradeSchedules))
+
+    // Get the source class info from working schedules
+    const sourceTeacherEntry = swapWorkingSchedules.teacherSchedules[teacher]?.[source.day]?.[source.block]
+    const sourceGradeEntry = swapWorkingSchedules.gradeSchedules[grade]?.[source.day]?.[source.block]
+
+    if (!sourceTeacherEntry || !sourceGradeEntry) {
+      toast.error("Invalid swap - source not found")
+      setSelectedCell(null)
+      setValidTargets([])
+      return
+    }
+
+    // Move class: source slot becomes OPEN, target slot gets the class
+    newTeacherSchedules[teacher][source.day][source.block] = [grade, "OPEN"]
+    newTeacherSchedules[teacher][target.day][target.block] = sourceTeacherEntry
+
+    // Update grade schedule
+    newGradeSchedules[grade][source.day][source.block] = null
+    if (!newGradeSchedules[grade][target.day]) {
+      newGradeSchedules[grade][target.day] = {}
+    }
+    newGradeSchedules[grade][target.day][target.block] = sourceGradeEntry
+
+    // Update working schedules
+    setSwapWorkingSchedules({
+      ...swapWorkingSchedules,
+      teacherSchedules: newTeacherSchedules,
+      gradeSchedules: newGradeSchedules,
+    })
+    setSwapCount(prev => prev + 1)
+
+    toast(`Moved ${grade} ${subject}: ${source.day} B${source.block} → ${target.day} B${target.block}`, { icon: "✓" })
+
+    // Highlight the destination cell
+    highlightCells([
+      { teacher, day: target.day, block: target.block, grade, subject },
+    ])
+
     // Clear swap state
+    setSelectedCell(null)
+    setValidTargets([])
+  }
+
+  function performGradeSwap(source: CellLocation, target: CellLocation) {
+    if (!swapWorkingSchedules || !source.grade) return
+
+    const grade = source.grade
+
+    // Create deep copy of the working schedules
+    const newTeacherSchedules = JSON.parse(JSON.stringify(swapWorkingSchedules.teacherSchedules))
+    const newGradeSchedules = JSON.parse(JSON.stringify(swapWorkingSchedules.gradeSchedules))
+
+    // Get the source class info from working schedules
+    const sourceTeacher = source.teacher!
+    const sourceSubject = source.subject!
+    const sourceGradeEntry = swapWorkingSchedules.gradeSchedules[grade]?.[source.day]?.[source.block]
+    const sourceTeacherEntry = swapWorkingSchedules.teacherSchedules[sourceTeacher]?.[source.day]?.[source.block]
+
+    if (!sourceGradeEntry || !sourceTeacherEntry) {
+      toast.error("Invalid swap - source not found")
+      setSelectedCell(null)
+      setValidTargets([])
+      return
+    }
+
+    // Check if this is Option 1 (move to OPEN) or Option 2 (swap with another class)
+    const targetGradeEntry = swapWorkingSchedules.gradeSchedules[grade]?.[target.day]?.[target.block]
+    const isOption1 = !targetGradeEntry || targetGradeEntry[1] === "OPEN" || targetGradeEntry[1] === "Study Hall"
+
+    let successMessage = ""
+    let destinationCells: CellLocation[] = []
+
+    if (isOption1) {
+      // Option 1: Move class to an OPEN slot
+      const targetTeacherEntry = newTeacherSchedules[sourceTeacher]?.[target.day]?.[target.block]
+      if (!targetTeacherEntry || targetTeacherEntry[1] !== "OPEN") {
+        toast.error("Invalid swap - teacher not available at target time")
+        setSelectedCell(null)
+        setValidTargets([])
+        return
+      }
+
+      // Update teacher schedule: source slot becomes OPEN, target slot gets the class
+      newTeacherSchedules[sourceTeacher][source.day][source.block] = [grade, "OPEN"]
+      newTeacherSchedules[sourceTeacher][target.day][target.block] = sourceTeacherEntry
+
+      // Update grade schedule: source slot becomes empty/null, target slot gets the class
+      newGradeSchedules[grade][source.day][source.block] = null
+      if (!newGradeSchedules[grade][target.day]) {
+        newGradeSchedules[grade][target.day] = {}
+      }
+      newGradeSchedules[grade][target.day][target.block] = sourceGradeEntry
+
+      successMessage = `Moved ${grade} ${sourceSubject}: ${source.day} B${source.block} → ${target.day} B${target.block}`
+      destinationCells = [
+        { teacher: sourceTeacher, day: target.day, block: target.block, grade, subject: sourceSubject },
+      ]
+    } else {
+      // Option 2: Exchange times between two classes
+      const targetTeacher = target.teacher!
+      const targetSubject = target.subject!
+      const targetTeacherSchedule = swapWorkingSchedules.teacherSchedules[targetTeacher]
+      const targetTeacherEntry = targetTeacherSchedule?.[target.day]?.[target.block]
+
+      if (!targetGradeEntry || !targetTeacherEntry) {
+        toast.error("Invalid swap - target not found")
+        setSelectedCell(null)
+        setValidTargets([])
+        return
+      }
+
+      // Swap in teacher schedules
+      newTeacherSchedules[sourceTeacher][source.day][source.block] = [grade, "OPEN"]
+      newTeacherSchedules[sourceTeacher][target.day][target.block] = sourceTeacherEntry
+
+      newTeacherSchedules[targetTeacher][target.day][target.block] = [grade, "OPEN"]
+      newTeacherSchedules[targetTeacher][source.day][source.block] = targetTeacherEntry
+
+      // Swap in grade schedule
+      newGradeSchedules[grade][source.day][source.block] = [targetTeacher, targetSubject]
+      newGradeSchedules[grade][target.day][target.block] = [sourceTeacher, sourceSubject]
+
+      successMessage = `Exchanged times: ${sourceTeacher}'s ${sourceSubject} → ${target.day} B${target.block}, ${targetTeacher}'s ${targetSubject} → ${source.day} B${source.block}`
+      destinationCells = [
+        { teacher: sourceTeacher, day: target.day, block: target.block, grade, subject: sourceSubject },
+        { teacher: targetTeacher, day: source.day, block: source.block, grade, subject: targetSubject },
+      ]
+    }
+
+    // Update working schedules
+    setSwapWorkingSchedules({
+      ...swapWorkingSchedules,
+      teacherSchedules: newTeacherSchedules,
+      gradeSchedules: newGradeSchedules,
+    })
+    setSwapCount(prev => prev + 1)
+
+    toast(successMessage, { icon: "✓" })
+    highlightCells(destinationCells)
+
+    // Clear swap state
+    setSelectedCell(null)
+    setValidTargets([])
+  }
+
+  function enterSwapMode() {
+    if (!selectedResult) return
+    setSwapMode(true)
+    setFreeformMode(false)
+    setShowingPreview(true)
+    setSwapWorkingSchedules(JSON.parse(JSON.stringify({
+      teacherSchedules: selectedResult.teacherSchedules,
+      gradeSchedules: selectedResult.gradeSchedules,
+      studyHallAssignments: selectedResult.studyHallAssignments || []
+    })))
+    setSwapCount(0)
     setSelectedCell(null)
     setValidTargets([])
   }
@@ -696,6 +1201,900 @@ export default function HistoryDetailPage() {
     setSwapMode(false)
     setSelectedCell(null)
     setValidTargets([])
+    setHighlightedCells([])
+    setSwapWorkingSchedules(null)
+    setSwapCount(0)
+    if (highlightTimeout) clearTimeout(highlightTimeout)
+  }
+
+  async function handleApplySwap(createNew: boolean = false) {
+    if (!generation || !selectedResult || !swapWorkingSchedules || swapCount === 0) return
+
+    const optionIndex = parseInt(selectedOption) - 1
+
+    // Save current state for undo
+    const previousOptions: ScheduleOption[] = JSON.parse(JSON.stringify(generation.options))
+    const previousSelectedOption = selectedOption
+
+    // Create updated option with working schedules
+    const DAYS = ["Mon", "Tues", "Wed", "Thurs", "Fri"]
+
+    const updatedOption: ScheduleOption = {
+      ...selectedResult,
+      teacherSchedules: swapWorkingSchedules.teacherSchedules,
+      gradeSchedules: swapWorkingSchedules.gradeSchedules,
+      studyHallAssignments: swapWorkingSchedules.studyHallAssignments,
+    }
+
+    // Regenerate teacher stats
+    updatedOption.teacherStats = selectedResult.teacherStats.map(stat => {
+      const schedule = swapWorkingSchedules.teacherSchedules[stat.teacher]
+      let teaching = 0, studyHall = 0, open = 0, backToBackIssues = 0
+
+      for (const day of DAYS) {
+        let prevWasOpen = false
+        for (let block = 1; block <= 5; block++) {
+          const entry = schedule?.[day]?.[block]
+          if (!entry || entry[1] === "OPEN") {
+            open++
+            if (prevWasOpen && stat.status === "full-time") backToBackIssues++
+            prevWasOpen = true
+          } else if (entry[1] === "Study Hall") {
+            studyHall++
+            prevWasOpen = true
+          } else {
+            teaching++
+            prevWasOpen = false
+          }
+        }
+      }
+
+      return { ...stat, teaching, studyHall, open, totalUsed: teaching + studyHall, backToBackIssues }
+    })
+
+    // Regenerate total back-to-back issues
+    updatedOption.backToBackIssues = updatedOption.teacherStats.reduce((sum, s) => sum + s.backToBackIssues, 0)
+
+    let updatedOptions: ScheduleOption[]
+    let successMessage: string
+    let newOptionNumber: string | null = null
+
+    if (createNew) {
+      updatedOptions = [...generation.options, updatedOption]
+      successMessage = `Saved ${swapCount} swap${swapCount !== 1 ? 's' : ''} as Option ${generation.options.length + 1}`
+      newOptionNumber = (generation.options.length + 1).toString()
+    } else {
+      updatedOptions = [...generation.options]
+      updatedOptions[optionIndex] = updatedOption
+      successMessage = `Applied ${swapCount} swap${swapCount !== 1 ? 's' : ''} to Option ${selectedOption}`
+    }
+
+    try {
+      const updateRes = await fetch(`/api/history/${id}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ options: updatedOptions }),
+      })
+
+      if (updateRes.ok) {
+        setGeneration({ ...generation, options: updatedOptions })
+        if (newOptionNumber) {
+          setSelectedOption(newOptionNumber)
+        }
+        exitSwapMode()
+
+        toast(
+          (t) => (
+            <div className="flex items-center gap-3">
+              <span className="text-sm">{successMessage}</span>
+              <button
+                onClick={async () => {
+                  toast.dismiss(t.id)
+                  try {
+                    const undoRes = await fetch(`/api/history/${id}`, {
+                      method: "PUT",
+                      headers: { "Content-Type": "application/json" },
+                      body: JSON.stringify({ options: previousOptions }),
+                    })
+                    if (undoRes.ok) {
+                      setGeneration((prev) => prev ? { ...prev, options: previousOptions } : prev)
+                      setSelectedOption(previousSelectedOption)
+                      toast.success("Changes undone")
+                    } else {
+                      toast.error("Failed to undo")
+                    }
+                  } catch {
+                    toast.error("Failed to undo")
+                  }
+                }}
+                className="px-2 py-1 text-sm font-medium text-amber-600 hover:text-amber-800 hover:bg-amber-50 rounded transition-colors"
+              >
+                Undo
+              </button>
+            </div>
+          ),
+          {
+            duration: 10000,
+            icon: <Check className="h-4 w-4 text-emerald-600" />,
+          }
+        )
+      } else {
+        toast.error("Failed to save swaps")
+      }
+    } catch (error) {
+      console.error('Apply swap error:', error)
+      toast.error("Failed to save swaps")
+    }
+  }
+
+  // Highlight cells after a successful swap to show where things landed
+  function highlightCells(cells: CellLocation[]) {
+    // Clear any existing timeout
+    if (highlightTimeout) clearTimeout(highlightTimeout)
+
+    setHighlightedCells(cells)
+
+    // Clear highlights after 3 seconds
+    const timeout = setTimeout(() => {
+      setHighlightedCells([])
+    }, 3000)
+    setHighlightTimeout(timeout)
+  }
+
+  // Show swap success toast with undo option
+  // Pass previousOptions directly to avoid React closure issues with state
+  function showSwapSuccessToast(message: string, destinationCells: CellLocation[], previousOptions: ScheduleOption[]) {
+    highlightCells(destinationCells)
+
+    toast(
+      (t) => (
+        <div className="flex items-center gap-3">
+          <span className="text-sm">{message}</span>
+          <button
+            onClick={async () => {
+              toast.dismiss(t.id)
+              // Undo inline using the captured previousOptions
+              try {
+                const updateRes = await fetch(`/api/history/${id}`, {
+                  method: "PUT",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({ options: previousOptions }),
+                })
+
+                if (updateRes.ok) {
+                  setGeneration((prev) => prev ? { ...prev, options: previousOptions } : prev)
+                  setHighlightedCells([])
+                  toast.success("Swap undone")
+                } else {
+                  toast.error("Failed to undo swap")
+                }
+              } catch (error) {
+                console.error('Undo error:', error)
+                toast.error("Failed to undo swap")
+              }
+            }}
+            className="px-2 py-1 text-sm font-medium text-violet-600 hover:text-violet-800 hover:bg-violet-50 rounded transition-colors"
+          >
+            Undo
+          </button>
+        </div>
+      ),
+      {
+        duration: 10000,
+        icon: <Check className="h-4 w-4 text-emerald-600" />,
+      }
+    )
+  }
+
+  // Freeform mode functions
+  async function enterFreeformMode() {
+    if (!selectedResult || !generation) return
+    setFreeformMode(true)
+    setSwapMode(false)
+    setShowingPreview(true)
+    setWorkingSchedules(JSON.parse(JSON.stringify({
+      teacherSchedules: selectedResult.teacherSchedules,
+      gradeSchedules: selectedResult.gradeSchedules
+    })))
+    setFloatingBlocks([])
+    setPendingPlacements([])
+    setSelectedFloatingBlock(null)
+    setValidationErrors([])
+
+    // Fetch classes with restrictions for validation
+    try {
+      const classesRes = await fetch(`/api/classes?quarter_id=${generation.quarter_id}`)
+      const classesRaw = await classesRes.json()
+
+      const classes = classesRaw.map((c: {
+        teacher: { name: string }
+        grade: { display_name: string }
+        subject: { name: string }
+        days_per_week: number
+        restrictions?: Array<{
+          restriction_type: string
+          value: unknown
+        }>
+      }) => {
+        const restrictions = c.restrictions || []
+        const fixedSlots: [string, number][] = []
+        let availableDays = ['Mon', 'Tues', 'Wed', 'Thurs', 'Fri']
+        let availableBlocks = [1, 2, 3, 4, 5]
+
+        restrictions.forEach((r: { restriction_type: string; value: unknown }) => {
+          if (r.restriction_type === 'fixed_slot') {
+            const v = r.value as { day: string; block: number }
+            fixedSlots.push([v.day, v.block])
+          } else if (r.restriction_type === 'available_days') {
+            availableDays = r.value as string[]
+          } else if (r.restriction_type === 'available_blocks') {
+            availableBlocks = r.value as number[]
+          }
+        })
+
+        return {
+          teacher: c.teacher.name,
+          grade: c.grade.display_name,
+          subject: c.subject.name,
+          daysPerWeek: c.days_per_week,
+          fixedSlots: fixedSlots.length > 0 ? fixedSlots : undefined,
+          availableDays,
+          availableBlocks,
+        }
+      })
+
+      setFreeformClasses(classes)
+    } catch (error) {
+      console.error('Failed to load classes for validation:', error)
+      // Continue without class data - some validations won't run
+    }
+  }
+
+  function exitFreeformMode() {
+    setFreeformMode(false)
+    setFloatingBlocks([])
+    setPendingPlacements([])
+    setSelectedFloatingBlock(null)
+    setValidationErrors([])
+    setWorkingSchedules(null)
+    setFreeformClasses(null)
+  }
+
+  function handlePickUpBlock(location: CellLocation) {
+    if (!workingSchedules || !location.grade || !location.subject) return
+
+    const entry = workingSchedules.teacherSchedules[location.teacher]?.[location.day]?.[location.block]
+    if (!entry || entry[1] === "OPEN") return
+
+    // Check if this cell has already been picked up
+    const alreadyPickedUp = floatingBlocks.some(b =>
+      b.sourceTeacher === location.teacher &&
+      b.sourceDay === location.day &&
+      b.sourceBlock === location.block
+    )
+    if (alreadyPickedUp) return
+
+    const blockId = `${location.teacher}-${location.day}-${location.block}-${Date.now()}`
+    const block: FloatingBlock = {
+      id: blockId,
+      sourceTeacher: location.teacher,
+      sourceDay: location.day,
+      sourceBlock: location.block,
+      grade: entry[0],
+      subject: entry[1],
+      entry
+    }
+
+    setFloatingBlocks(prev => [...prev, block])
+
+    // Update working schedules - set cell to OPEN
+    const newTeacherSchedules = JSON.parse(JSON.stringify(workingSchedules.teacherSchedules))
+    const newGradeSchedules = JSON.parse(JSON.stringify(workingSchedules.gradeSchedules))
+
+    newTeacherSchedules[location.teacher][location.day][location.block] = [entry[0], "OPEN"]
+
+    // Remove from grade schedule (works for both classes and study halls)
+    if (newGradeSchedules[entry[0]]?.[location.day]?.[location.block]) {
+      newGradeSchedules[entry[0]][location.day][location.block] = null
+    }
+
+    setWorkingSchedules({ teacherSchedules: newTeacherSchedules, gradeSchedules: newGradeSchedules })
+    setSelectedFloatingBlock(blockId)
+
+    // Clear any previous validation errors
+    setValidationErrors([])
+  }
+
+  function handlePlaceBlock(location: CellLocation) {
+    if (!selectedFloatingBlock || !workingSchedules) return
+
+    const block = floatingBlocks.find(b => b.id === selectedFloatingBlock)
+    if (!block) return
+
+    // Create a single copy of schedules for all modifications
+    const newTeacherSchedules = JSON.parse(JSON.stringify(workingSchedules.teacherSchedules))
+    const newGradeSchedules = JSON.parse(JSON.stringify(workingSchedules.gradeSchedules))
+
+    // Check if the target location has a class/study hall that we need to pick up
+    const targetEntry = newTeacherSchedules[location.teacher]?.[location.day]?.[location.block]
+    let newFloatingBlock: FloatingBlock | null = null
+
+    if (targetEntry && targetEntry[1] !== "OPEN") {
+      // Check this cell hasn't already been picked up
+      const alreadyPickedUp = floatingBlocks.some(b =>
+        b.sourceTeacher === location.teacher &&
+        b.sourceDay === location.day &&
+        b.sourceBlock === location.block
+      )
+
+      if (!alreadyPickedUp) {
+        // Create a new floating block for the displaced content
+        const newBlockId = `${location.teacher}-${location.day}-${location.block}-${Date.now()}`
+        newFloatingBlock = {
+          id: newBlockId,
+          sourceTeacher: location.teacher,
+          sourceDay: location.day,
+          sourceBlock: location.block,
+          grade: targetEntry[0],
+          subject: targetEntry[1],
+          entry: targetEntry
+        }
+
+        // Remove from grade schedule
+        if (newGradeSchedules[targetEntry[0]]?.[location.day]?.[location.block]) {
+          newGradeSchedules[targetEntry[0]][location.day][location.block] = null
+        }
+      }
+    }
+
+    // Check if the selected block was already placed somewhere else
+    const existingPlacement = pendingPlacements.find(p => p.blockId === block.id)
+    if (existingPlacement) {
+      // Restore OPEN at old placement location
+      const oldEntry = newTeacherSchedules[existingPlacement.teacher][existingPlacement.day][existingPlacement.block]
+      if (oldEntry) {
+        newTeacherSchedules[existingPlacement.teacher][existingPlacement.day][existingPlacement.block] = [oldEntry[0], "OPEN"]
+      }
+
+      // Remove from grade schedule at old location
+      if (newGradeSchedules[block.grade]?.[existingPlacement.day]?.[existingPlacement.block]) {
+        newGradeSchedules[block.grade][existingPlacement.day][existingPlacement.block] = null
+      }
+    }
+
+    // Place the selected block at new location
+    newTeacherSchedules[location.teacher][location.day][location.block] = block.entry
+
+    if (!newGradeSchedules[block.grade]) {
+      newGradeSchedules[block.grade] = {}
+    }
+    if (!newGradeSchedules[block.grade][location.day]) {
+      newGradeSchedules[block.grade][location.day] = {}
+    }
+    newGradeSchedules[block.grade][location.day][location.block] = [location.teacher, block.subject]
+
+    // Update state
+    setWorkingSchedules({ teacherSchedules: newTeacherSchedules, gradeSchedules: newGradeSchedules })
+
+    // Update placements
+    if (existingPlacement) {
+      setPendingPlacements(prev => [
+        ...prev.filter(p => p.blockId !== block.id),
+        { blockId: block.id, teacher: location.teacher, day: location.day, block: location.block }
+      ])
+    } else {
+      setPendingPlacements(prev => [...prev, {
+        blockId: block.id,
+        teacher: location.teacher,
+        day: location.day,
+        block: location.block
+      }])
+    }
+
+    // Add the displaced block to floating blocks and select it
+    if (newFloatingBlock) {
+      setFloatingBlocks(prev => [...prev, newFloatingBlock!])
+      setSelectedFloatingBlock(newFloatingBlock.id)
+    } else {
+      setSelectedFloatingBlock(null)
+    }
+
+    // Clear validation errors
+    setValidationErrors([])
+  }
+
+  function handleReturnBlock(blockId: string) {
+    const block = floatingBlocks.find(b => b.id === blockId)
+    if (!block || !workingSchedules) return
+
+    // Check if this block was placed
+    const placement = pendingPlacements.find(p => p.blockId === blockId)
+
+    const newTeacherSchedules = JSON.parse(JSON.stringify(workingSchedules.teacherSchedules))
+    const newGradeSchedules = JSON.parse(JSON.stringify(workingSchedules.gradeSchedules))
+
+    // If it was placed, clear that location
+    if (placement) {
+      newTeacherSchedules[placement.teacher][placement.day][placement.block] = [block.grade, "OPEN"]
+      if (newGradeSchedules[block.grade]?.[placement.day]?.[placement.block]) {
+        newGradeSchedules[block.grade][placement.day][placement.block] = null
+      }
+      setPendingPlacements(prev => prev.filter(p => p.blockId !== blockId))
+    }
+
+    // Restore to original location
+    newTeacherSchedules[block.sourceTeacher][block.sourceDay][block.sourceBlock] = block.entry
+    if (!newGradeSchedules[block.grade]) {
+      newGradeSchedules[block.grade] = {}
+    }
+    if (!newGradeSchedules[block.grade][block.sourceDay]) {
+      newGradeSchedules[block.grade][block.sourceDay] = {}
+    }
+    newGradeSchedules[block.grade][block.sourceDay][block.sourceBlock] = [block.sourceTeacher, block.subject]
+
+    setWorkingSchedules({ teacherSchedules: newTeacherSchedules, gradeSchedules: newGradeSchedules })
+    setFloatingBlocks(prev => prev.filter(b => b.id !== blockId))
+
+    if (selectedFloatingBlock === blockId) {
+      setSelectedFloatingBlock(null)
+    }
+
+    // Clear validation errors
+    setValidationErrors([])
+  }
+
+  function handleUnplaceBlock(blockId: string) {
+    const block = floatingBlocks.find(b => b.id === blockId)
+    const placement = pendingPlacements.find(p => p.blockId === blockId)
+    if (!block || !placement || !workingSchedules) return
+
+    const newTeacherSchedules = JSON.parse(JSON.stringify(workingSchedules.teacherSchedules))
+    const newGradeSchedules = JSON.parse(JSON.stringify(workingSchedules.gradeSchedules))
+
+    // Clear the placement location - set to OPEN
+    newTeacherSchedules[placement.teacher][placement.day][placement.block] = [block.grade, "OPEN"]
+    if (newGradeSchedules[block.grade]?.[placement.day]?.[placement.block]) {
+      newGradeSchedules[block.grade][placement.day][placement.block] = null
+    }
+
+    setWorkingSchedules({ teacherSchedules: newTeacherSchedules, gradeSchedules: newGradeSchedules })
+    setPendingPlacements(prev => prev.filter(p => p.blockId !== blockId))
+    setSelectedFloatingBlock(blockId)
+
+    // Clear validation errors
+    setValidationErrors([])
+  }
+
+  function handleSelectFloatingBlock(blockId: string) {
+    // If block is already placed, don't allow selection
+    const isPlaced = pendingPlacements.some(p => p.blockId === blockId)
+    if (isPlaced) return
+
+    setSelectedFloatingBlock(blockId === selectedFloatingBlock ? null : blockId)
+  }
+
+  function validatePlacements(): ValidationError[] {
+    if (!workingSchedules || !selectedResult) return []
+
+    const errors: ValidationError[] = []
+    const DAYS = ["Mon", "Tues", "Wed", "Thurs", "Fri"]
+
+    // Build a set of picked-up source locations to exclude from "existing" checks
+    const pickedUpLocations = new Set(
+      floatingBlocks.map(b => `${b.grade}|${b.sourceDay}|${b.sourceBlock}`)
+    )
+
+    // Build a map of teacher status for eligibility checks
+    const teacherStatus = new Map(
+      selectedResult.teacherStats.map(s => [s.teacher, s.status])
+    )
+
+    // 1. Check unplaced blocks
+    for (const block of floatingBlocks) {
+      if (!pendingPlacements.find(p => p.blockId === block.id)) {
+        errors.push({
+          type: 'unplaced',
+          message: `[Unplaced] ${block.grade} ${block.subject} must be placed`,
+          blockId: block.id,
+          cells: []
+        })
+      }
+    }
+
+    // 2. Check Study Hall teacher eligibility (only full-time teachers)
+    for (const placement of pendingPlacements) {
+      const placedBlock = floatingBlocks.find(b => b.id === placement.blockId)
+      if (!placedBlock || placedBlock.subject !== "Study Hall") continue
+
+      const status = teacherStatus.get(placement.teacher)
+      if (status !== "full-time") {
+        errors.push({
+          type: 'teacher_conflict',
+          message: `[Study Hall Rule] ${placement.teacher} is ${status || 'unknown'}, only full-time teachers can supervise Study Hall`,
+          cells: [{ teacher: placement.teacher, day: placement.day, block: placement.block }]
+        })
+      }
+    }
+
+    // 3. Check teacher conflicts (same teacher, same day, same block)
+    for (const [teacher, schedule] of Object.entries(workingSchedules.teacherSchedules)) {
+      for (const day of DAYS) {
+        for (let block = 1; block <= 5; block++) {
+          const entry = schedule[day]?.[block]
+          if (!entry || entry[1] === "OPEN" || entry[1] === "Study Hall") continue
+
+          // Count how many classes this teacher has at this slot (should be 1)
+          const placementsHere = pendingPlacements.filter(p =>
+            p.teacher === teacher && p.day === day && p.block === block
+          )
+          if (placementsHere.length > 1) {
+            errors.push({
+              type: 'teacher_conflict',
+              message: `[No Teacher Conflicts] ${teacher} has ${placementsHere.length} classes at ${day} B${block}`,
+              cells: placementsHere.map(p => ({ teacher: p.teacher, day: p.day, block: p.block }))
+            })
+          }
+        }
+      }
+    }
+
+    // 4. Check grade conflicts - each placement must not collide with existing grade classes
+    // (Skip Study Halls - they don't conflict with regular classes)
+    for (const placement of pendingPlacements) {
+      const placedBlock = floatingBlocks.find(b => b.id === placement.blockId)
+      if (!placedBlock) continue
+
+      // Skip Study Halls - they don't cause grade conflicts
+      if (placedBlock.subject === "Study Hall") continue
+
+      const grade = placedBlock.grade
+      const { day, block } = placement
+
+      // Check if the original schedule has a class for this grade at this slot
+      // that wasn't picked up
+      const originalEntry = selectedResult.gradeSchedules[grade]?.[day]?.[block]
+      if (originalEntry && originalEntry[1] !== "OPEN" && originalEntry[1] !== "Study Hall") {
+        // There's an existing class - is it one we picked up?
+        const isPickedUp = pickedUpLocations.has(`${grade}|${day}|${block}`)
+        if (!isPickedUp) {
+          errors.push({
+            type: 'grade_conflict',
+            message: `[No Grade Conflicts] ${grade} already has ${originalEntry[1]} at ${day} B${block}`,
+            cells: [{ teacher: placement.teacher, day, block, grade }]
+          })
+        }
+      }
+
+      // Also check for multiple placements at same grade/slot (excluding Study Halls)
+      const otherPlacementsAtSlot = pendingPlacements.filter(p => {
+        if (p === placement) return false
+        const otherBlock = floatingBlocks.find(b => b.id === p.blockId)
+        // Skip Study Halls
+        if (otherBlock?.subject === "Study Hall") return false
+        return otherBlock && otherBlock.grade === grade && p.day === day && p.block === block
+      })
+      if (otherPlacementsAtSlot.length > 0) {
+        // Only report once per conflict set
+        const allInConflict = [placement, ...otherPlacementsAtSlot]
+        const alreadyReported = errors.some(e =>
+          e.type === 'grade_conflict' && e.message.includes(`${grade}`) && e.message.includes(`${day} B${block}`)
+        )
+        if (!alreadyReported) {
+          errors.push({
+            type: 'grade_conflict',
+            message: `[No Grade Conflicts] ${grade} has ${allInConflict.length} classes scheduled at ${day} B${block}`,
+            cells: allInConflict.map(p => ({ teacher: p.teacher, day: p.day, block: p.block, grade }))
+          })
+        }
+      }
+    }
+
+    // 5. Check subject conflicts (same subject twice on same day for a grade)
+    for (const [grade, schedule] of Object.entries(workingSchedules.gradeSchedules)) {
+      for (const day of DAYS) {
+        const subjectsOnDay = new Map<string, CellLocation[]>()
+
+        for (let block = 1; block <= 5; block++) {
+          const entry = schedule[day]?.[block]
+          if (!entry || entry[1] === "OPEN" || entry[1] === "Study Hall") continue
+
+          const subject = entry[1]
+          if (!subjectsOnDay.has(subject)) {
+            subjectsOnDay.set(subject, [])
+          }
+          subjectsOnDay.get(subject)!.push({ teacher: entry[0], day, block, grade, subject })
+        }
+
+        for (const [subject, locations] of subjectsOnDay) {
+          if (locations.length > 1) {
+            errors.push({
+              type: 'subject_conflict',
+              message: `[No Duplicate Subjects] ${grade} has ${subject} twice on ${day}`,
+              cells: locations
+            })
+          }
+        }
+      }
+    }
+
+    // Additional validations using class definitions (if loaded)
+    if (freeformClasses) {
+      // 6. Check fixed slot restrictions
+      for (const placement of pendingPlacements) {
+        const placedBlock = floatingBlocks.find(b => b.id === placement.blockId)
+        if (!placedBlock || placedBlock.subject === "Study Hall") continue
+
+        // Find the class definition for this placement
+        const classDef = freeformClasses.find(c =>
+          c.teacher === placement.teacher &&
+          c.grade === placedBlock.grade &&
+          c.subject === placedBlock.subject
+        )
+
+        if (classDef?.fixedSlots && classDef.fixedSlots.length > 0) {
+          const isValidSlot = classDef.fixedSlots.some(
+            ([day, block]) => day === placement.day && block === placement.block
+          )
+          if (!isValidSlot) {
+            const validSlots = classDef.fixedSlots.map(([d, b]) => `${d} B${b}`).join(', ')
+            errors.push({
+              type: 'teacher_conflict',
+              message: `[Fixed Slot] ${placedBlock.grade} ${placedBlock.subject} with ${placement.teacher} must be at: ${validSlots}`,
+              cells: [{ teacher: placement.teacher, day: placement.day, block: placement.block }]
+            })
+          }
+        }
+      }
+
+      // 7. Check teacher availability (days and blocks)
+      for (const placement of pendingPlacements) {
+        const placedBlock = floatingBlocks.find(b => b.id === placement.blockId)
+        if (!placedBlock || placedBlock.subject === "Study Hall") continue
+
+        // Find the class definition
+        const classDef = freeformClasses.find(c =>
+          c.teacher === placement.teacher &&
+          c.grade === placedBlock.grade &&
+          c.subject === placedBlock.subject
+        )
+
+        if (classDef) {
+          // Check available days
+          if (!classDef.availableDays.includes(placement.day)) {
+            errors.push({
+              type: 'teacher_conflict',
+              message: `[Teacher Availability] ${placement.teacher} is not available on ${placement.day} for ${placedBlock.subject}`,
+              cells: [{ teacher: placement.teacher, day: placement.day, block: placement.block }]
+            })
+          }
+
+          // Check available blocks
+          if (!classDef.availableBlocks.includes(placement.block)) {
+            errors.push({
+              type: 'teacher_conflict',
+              message: `[Teacher Availability] ${placement.teacher} is not available at B${placement.block} for ${placedBlock.subject}`,
+              cells: [{ teacher: placement.teacher, day: placement.day, block: placement.block }]
+            })
+          }
+        }
+      }
+
+      // 8. Check co-taught classes (same grade+subject with different teachers must be at same time)
+      // Group classes by grade+subject to find co-taught pairs
+      const coTaughtGroups = new Map<string, typeof freeformClasses>()
+      for (const cls of freeformClasses) {
+        const key = `${cls.grade}|${cls.subject}`
+        if (!coTaughtGroups.has(key)) {
+          coTaughtGroups.set(key, [])
+        }
+        coTaughtGroups.get(key)!.push(cls)
+      }
+
+      // For each co-taught group with multiple teachers, check that placements are at the same slot
+      for (const [key, classes] of coTaughtGroups) {
+        if (classes.length <= 1) continue // Not co-taught
+
+        const [grade, subject] = key.split('|')
+
+        // Find all placements for this grade+subject
+        const relevantPlacements = pendingPlacements.filter(p => {
+          const block = floatingBlocks.find(b => b.id === p.blockId)
+          return block && block.grade === grade && block.subject === subject
+        })
+
+        if (relevantPlacements.length <= 1) continue // Only one placement, nothing to compare
+
+        // Check that all placements are at the same day+block
+        const firstPlacement = relevantPlacements[0]
+        const mismatchedPlacements = relevantPlacements.filter(p =>
+          p.day !== firstPlacement.day || p.block !== firstPlacement.block
+        )
+
+        if (mismatchedPlacements.length > 0) {
+          const slots = relevantPlacements.map(p => `${p.teacher}: ${p.day} B${p.block}`).join(', ')
+          errors.push({
+            type: 'grade_conflict',
+            message: `[Co-Taught] ${grade} ${subject} teachers must be scheduled together (${slots})`,
+            cells: relevantPlacements.map(p => ({ teacher: p.teacher, day: p.day, block: p.block, grade, subject }))
+          })
+        }
+      }
+    }
+
+    return errors
+  }
+
+  function handleValidate() {
+    const errors = validatePlacements()
+    setValidationErrors(errors)
+
+    if (errors.length === 0) {
+      toast.success("No validation errors found")
+    } else {
+      toast.error(`${errors.length} validation error${errors.length !== 1 ? 's' : ''} found`)
+    }
+  }
+
+  async function handleApplyFreeform(createNew: boolean = false) {
+    if (!generation || !selectedResult || !workingSchedules) return
+
+    const errors = validatePlacements()
+    if (errors.length > 0) {
+      setValidationErrors(errors)
+      toast.error(`${errors.length} error${errors.length !== 1 ? 's' : ''} - fix before applying`)
+      return
+    }
+
+    const optionIndex = parseInt(selectedOption) - 1
+
+    // Save current state for undo
+    const previousOptions: ScheduleOption[] = JSON.parse(JSON.stringify(generation.options))
+    const previousSelectedOption = selectedOption
+
+    // Build updated option with working schedules
+    const DAYS = ["Mon", "Tues", "Wed", "Thurs", "Fri"]
+
+    // Update studyHallAssignments if any study halls were moved
+    let updatedStudyHallAssignments = [...selectedResult.studyHallAssignments]
+    for (const placement of pendingPlacements) {
+      const block = floatingBlocks.find(b => b.id === placement.blockId)
+      if (block && block.subject === "Study Hall") {
+        // Find the study hall assignment for this grade group and update it
+        const assignmentIndex = updatedStudyHallAssignments.findIndex(sh =>
+          sh.group === block.grade &&
+          sh.teacher === block.sourceTeacher &&
+          sh.day === block.sourceDay &&
+          sh.block === block.sourceBlock
+        )
+        if (assignmentIndex >= 0) {
+          updatedStudyHallAssignments[assignmentIndex] = {
+            ...updatedStudyHallAssignments[assignmentIndex],
+            teacher: placement.teacher,
+            day: placement.day,
+            block: placement.block
+          }
+        }
+      }
+    }
+
+    const updatedOption: ScheduleOption = {
+      ...selectedResult,
+      teacherSchedules: workingSchedules.teacherSchedules,
+      gradeSchedules: workingSchedules.gradeSchedules,
+      studyHallAssignments: updatedStudyHallAssignments,
+    }
+
+    // Regenerate teacher stats
+    updatedOption.teacherStats = selectedResult.teacherStats.map(stat => {
+      const schedule = workingSchedules.teacherSchedules[stat.teacher]
+      let teaching = 0, studyHall = 0, open = 0, backToBackIssues = 0
+
+      for (const day of DAYS) {
+        let prevWasOpen = false
+        for (let block = 1; block <= 5; block++) {
+          const entry = schedule?.[day]?.[block]
+          if (!entry || entry[1] === "OPEN") {
+            open++
+            if (prevWasOpen && stat.status === "full-time") backToBackIssues++
+            prevWasOpen = true
+          } else if (entry[1] === "Study Hall") {
+            studyHall++
+            prevWasOpen = true
+          } else {
+            teaching++
+            prevWasOpen = false
+          }
+        }
+      }
+
+      return { ...stat, teaching, studyHall, open, totalUsed: teaching + studyHall, backToBackIssues }
+    })
+
+    // Regenerate total back-to-back issues
+    updatedOption.backToBackIssues = updatedOption.teacherStats.reduce((sum, s) => sum + s.backToBackIssues, 0)
+
+    // Save to server
+    let updatedOptions: ScheduleOption[]
+    let newOptionIndex: number
+
+    if (createNew) {
+      // Append as new option
+      updatedOptions = [...generation.options, updatedOption]
+      newOptionIndex = updatedOptions.length
+    } else {
+      // Overwrite current option
+      updatedOptions = [...generation.options]
+      updatedOptions[optionIndex] = updatedOption
+      newOptionIndex = optionIndex + 1
+    }
+
+    try {
+      const updateRes = await fetch(`/api/history/${id}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ options: updatedOptions }),
+      })
+
+      if (updateRes.ok) {
+        setGeneration({ ...generation, options: updatedOptions })
+        exitFreeformMode()
+
+        // Switch to the new option if created
+        if (createNew) {
+          setSelectedOption(String(newOptionIndex))
+        }
+
+        // Show success toast with undo
+        const moveCount = floatingBlocks.length
+        const message = createNew
+          ? `Created Option ${newOptionIndex} with ${moveCount} change${moveCount !== 1 ? 's' : ''}`
+          : `Applied ${moveCount} change${moveCount !== 1 ? 's' : ''} to Option ${selectedOption}`
+
+        toast(
+          (t) => (
+            <div className="flex items-center gap-3">
+              <span className="text-sm">{message}</span>
+              <button
+                onClick={async () => {
+                  toast.dismiss(t.id)
+                  try {
+                    const undoRes = await fetch(`/api/history/${id}`, {
+                      method: "PUT",
+                      headers: { "Content-Type": "application/json" },
+                      body: JSON.stringify({ options: previousOptions }),
+                    })
+                    if (undoRes.ok) {
+                      setGeneration((prev) => prev ? { ...prev, options: previousOptions } : prev)
+                      if (createNew) {
+                        setSelectedOption(previousSelectedOption)
+                      }
+                      toast.success("Changes undone")
+                    } else {
+                      toast.error("Failed to undo changes")
+                    }
+                  } catch (error) {
+                    console.error('Undo error:', error)
+                    toast.error("Failed to undo changes")
+                  }
+                }}
+                className="px-2 py-1 text-sm font-medium text-indigo-600 hover:text-indigo-800 hover:bg-indigo-50 rounded transition-colors"
+              >
+                Undo
+              </button>
+            </div>
+          ),
+          {
+            duration: 10000,
+            icon: <Check className="h-4 w-4 text-emerald-600" />,
+          }
+        )
+      } else {
+        toast.error("Failed to save changes")
+      }
+    } catch (error) {
+      console.error('Apply freeform error:', error)
+      toast.error("Failed to save changes")
+    }
   }
 
   // Show preview if available and toggled on, otherwise show selected option
@@ -815,22 +2214,6 @@ export default function HistoryDetailPage() {
                     </button>
                   )
                 })}
-                {/* Preview tab */}
-                {previewOption && (
-                  <button
-                    onClick={() => setShowingPreview(true)}
-                    className={`px-3 py-1.5 rounded-md text-sm font-medium flex items-center gap-1.5 transition-colors ${
-                      showingPreview
-                        ? 'bg-violet-100 text-violet-800 shadow-sm'
-                        : 'text-violet-600 hover:text-violet-800'
-                    }`}
-                  >
-                    {previewType === "study-hall" ? "Preview" : "Preview"}
-                    <span className={`text-xs ${previewOption.studyHallsPlaced >= 6 ? 'text-emerald-600' : 'text-amber-600'}`}>
-                      {previewOption.studyHallsPlaced}/{previewOption.studyHallAssignments?.length || 6}
-                    </span>
-                  </button>
-                )}
               </div>
               <div className="text-xs text-muted-foreground pl-1">
                 <span className="text-emerald-600">3/6</span> = study halls placed • <Star className="h-3 w-3 text-sky-500 fill-sky-500 inline" /> = selected option
@@ -838,8 +2221,8 @@ export default function HistoryDetailPage() {
             </div>
 
             <div className="flex items-center gap-2 no-print">
-              {/* Export buttons - disabled during preview */}
-              {!previewOption ? (
+              {/* Export buttons - hidden during modes */}
+              {!previewOption && !regenMode && !swapMode && !freeformMode && !studyHallMode && (
                 <>
                   <a
                     href={`/api/export?generation_id=${id}&option=${selectedOption}&format=xlsx`}
@@ -869,23 +2252,29 @@ export default function HistoryDetailPage() {
                     Print
                   </Button>
                 </>
-              ) : (
-                <span className="text-sm text-muted-foreground">Save preview to enable export</span>
               )}
 
               <DropdownMenu>
                 <DropdownMenuTrigger asChild>
-                  <Button variant="outline" size="sm" disabled={isGenerating || !!previewOption}>
+                  <Button variant="outline" size="sm" disabled={isGenerating || !!previewOption || regenMode || freeformMode || studyHallMode}>
                     <MoreVertical className="h-4 w-4" />
                   </Button>
                 </DropdownMenuTrigger>
                 <DropdownMenuContent align="end">
-                  <DropdownMenuItem onClick={() => setSwapMode(!swapMode)}>
+                  <DropdownMenuItem onClick={enterRegenMode} disabled={regenMode || swapMode || freeformMode || studyHallMode}>
+                    <RefreshCw className="h-4 w-4 mr-2" />
+                    Regenerate Schedules
+                  </DropdownMenuItem>
+                  <DropdownMenuItem onClick={() => swapMode ? exitSwapMode() : enterSwapMode()} disabled={regenMode || freeformMode || studyHallMode}>
                     <ArrowLeftRight className="h-4 w-4 mr-2" />
                     {swapMode ? "Exit Swap Mode" : "Swap Mode"}
                   </DropdownMenuItem>
+                  <DropdownMenuItem onClick={enterFreeformMode} disabled={regenMode || swapMode || freeformMode || studyHallMode}>
+                    <Hand className="h-4 w-4 mr-2" />
+                    Freeform Mode
+                  </DropdownMenuItem>
                   <DropdownMenuSeparator />
-                  <DropdownMenuItem onClick={handleReassignStudyHalls}>
+                  <DropdownMenuItem onClick={enterStudyHallMode} disabled={regenMode || swapMode || freeformMode || studyHallMode}>
                     <Shuffle className="h-4 w-4 mr-2" />
                     Reassign Study Halls
                   </DropdownMenuItem>
@@ -912,168 +2301,6 @@ export default function HistoryDetailPage() {
             </div>
           </div>
 
-          {/* Swap Mode Banner */}
-          {swapMode && viewMode === "teacher" && (
-            <div className="bg-amber-50 border border-amber-200 rounded-lg p-4 no-print">
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-3">
-                  <ArrowLeftRight className="h-5 w-5 text-amber-600" />
-                  <div>
-                    <span className="text-amber-800 font-medium">Swap Mode Active</span>
-                    <p className="text-sm text-amber-600">
-                      {selectedCell
-                        ? `Selected ${selectedCell.teacher}'s ${selectedCell.day} B${selectedCell.block}. Click a green OPEN block to move the Study Hall there.`
-                        : "Click a Study Hall to select it, then click another teacher's OPEN block (same day/block) to reassign."}
-                    </p>
-                  </div>
-                </div>
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  onClick={exitSwapMode}
-                  className="text-amber-700 hover:text-amber-900 hover:bg-amber-100"
-                >
-                  <X className="h-4 w-4 mr-1" />
-                  Exit
-                </Button>
-              </div>
-              {validTargets.length > 0 && (
-                <p className="text-xs text-amber-600 mt-2">
-                  {validTargets.length} teacher{validTargets.length !== 1 ? 's have' : ' has'} OPEN at this time slot
-                </p>
-              )}
-            </div>
-          )}
-
-          {/* Preview Banner - shows when regenerated/reassigned option is pending review */}
-          {previewOption && !isGenerating && (
-            <div className={`border rounded-lg p-4 no-print ${showingPreview ? 'bg-violet-50 border-violet-200' : 'bg-slate-50 border-slate-200'}`}>
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-3">
-                  {previewType === "study-hall" ? (
-                    <Shuffle className={`h-5 w-5 ${showingPreview ? 'text-violet-600' : 'text-slate-500'}`} />
-                  ) : (
-                    <RefreshCw className={`h-5 w-5 ${showingPreview ? 'text-violet-600' : 'text-slate-500'}`} />
-                  )}
-                  <div>
-                    <span className={`font-medium ${showingPreview ? 'text-violet-800' : 'text-slate-700'}`}>
-                      {showingPreview
-                        ? previewType === "study-hall"
-                          ? `Preview: Reassigned Study Halls`
-                          : `Preview: Option ${generation.options.length + 1}`
-                        : `Original: Option ${selectedOption}`}
-                    </span>
-                    <p className={`text-sm ${showingPreview ? 'text-violet-600' : 'text-slate-500'}`}>
-                      {showingPreview
-                        ? previewType === "study-hall"
-                          ? "Viewing reassigned study halls. Toggle to compare with original."
-                          : "Viewing regenerated schedule. Toggle to compare with original."
-                        : "Viewing original schedule. Toggle to see the preview."}
-                    </p>
-                  </div>
-                </div>
-                <div className="flex items-center gap-2">
-                  {/* Toggle between Preview and Original */}
-                  <div className="inline-flex rounded-md bg-white border border-slate-200 p-0.5 mr-2">
-                    <button
-                      onClick={() => setShowingPreview(false)}
-                      className={`px-3 py-1 text-xs font-medium rounded transition-colors ${
-                        !showingPreview
-                          ? 'bg-slate-700 text-white'
-                          : 'text-slate-600 hover:text-slate-800'
-                      }`}
-                    >
-                      Original
-                    </button>
-                    <button
-                      onClick={() => setShowingPreview(true)}
-                      className={`px-3 py-1 text-xs font-medium rounded transition-colors ${
-                        showingPreview
-                          ? 'bg-violet-600 text-white'
-                          : 'text-slate-600 hover:text-slate-800'
-                      }`}
-                    >
-                      Preview
-                    </button>
-                  </div>
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    onClick={handleDiscardPreview}
-                    className="text-slate-600 border-slate-300 hover:bg-slate-100"
-                  >
-                    <X className="h-4 w-4 mr-1" />
-                    Discard
-                  </Button>
-                  <Button
-                    size="sm"
-                    onClick={handleKeepPreview}
-                    className="bg-violet-600 hover:bg-violet-700 text-white"
-                  >
-                    <Check className="h-4 w-4 mr-1" />
-                    Keep
-                  </Button>
-                </div>
-              </div>
-            </div>
-          )}
-
-          {/* Regenerate Bar - appears when teachers are selected */}
-          {(selectedCount > 0 || isGenerating) && viewMode === "teacher" && !swapMode && !previewOption && (
-            <div className="bg-sky-50 border border-sky-200 rounded-lg p-4">
-              {isGenerating ? (
-                <div className="space-y-3">
-                  <div className="flex items-center justify-between text-sm">
-                    <span className="text-sky-700 font-medium">
-                      {generationProgress.message || "Generating..."}
-                    </span>
-                    <span className="text-sky-600">
-                      {generationProgress.total > 0
-                        ? `${Math.round((generationProgress.current / generationProgress.total) * 100)}%`
-                        : "0%"}
-                    </span>
-                  </div>
-                  <div className="w-full bg-sky-100 rounded-full h-2.5 overflow-hidden">
-                    <div
-                      className="bg-sky-500 h-2.5 rounded-full transition-all duration-300"
-                      style={{
-                        width: generationProgress.total > 0
-                          ? `${(generationProgress.current / generationProgress.total) * 100}%`
-                          : "0%"
-                      }}
-                    />
-                  </div>
-                  <p className="text-xs text-sky-600">
-                    Attempt {generationProgress.current} of {generationProgress.total}
-                  </p>
-                </div>
-              ) : (
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-3">
-                    <span className="text-sky-800 font-medium">
-                      {selectedCount} teacher{selectedCount !== 1 ? 's' : ''} selected
-                    </span>
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      onClick={clearSelections}
-                      className="text-sky-600 hover:text-sky-800 h-auto py-1 px-2"
-                    >
-                      Clear
-                    </Button>
-                  </div>
-                  <Button
-                    onClick={handleRegenerate}
-                    className="gap-2 bg-sky-600 hover:bg-sky-700 text-white"
-                  >
-                    <RefreshCw className="h-4 w-4" />
-                    Regenerate as Option {generation.options.length + 1}
-                  </Button>
-                </div>
-              )}
-            </div>
-          )}
-
           {selectedResult && (
             <div className="space-y-6">
               {/* Stats Summary */}
@@ -1095,6 +2322,430 @@ export default function HistoryDetailPage() {
                 </div>
               )}
 
+              {/* Swap Mode Banner */}
+              {swapMode && (
+                <div className="bg-amber-50 border border-amber-200 rounded-lg p-4 no-print">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-3">
+                      <ArrowLeftRight className="h-5 w-5 text-amber-600" />
+                      <div>
+                        <span className="text-amber-800 font-medium">Swap Mode Active</span>
+                        <p className="text-sm text-amber-600">
+                          {viewMode === "teacher" ? (
+                            selectedCell
+                              ? selectedCell.subject === "Study Hall"
+                                ? `Selected Study Hall (${selectedCell.day} B${selectedCell.block}). Click another teacher's OPEN slot to reassign supervision.`
+                                : selectedCell.subject === "OPEN"
+                                  ? `Selected OPEN block (${selectedCell.day} B${selectedCell.block}). Click another OPEN to exchange.`
+                                  : `Selected ${selectedCell.grade} ${selectedCell.subject} (${selectedCell.day} B${selectedCell.block}). Click a highlighted slot to exchange.`
+                              : "Click a class to exchange a time slot. Or exchange a Study Hall with another teacher's OPEN slot."
+                          ) : (
+                            selectedCell
+                              ? selectedCell.subject === "Study Hall"
+                                ? `Selected Study Hall (${selectedCell.day} B${selectedCell.block}). Click another teacher's OPEN slot to reassign supervision.`
+                                : `Selected ${selectedCell.subject} (${selectedCell.day} B${selectedCell.block}). Click a highlighted slot to exchange.`
+                              : "Click a class to exchange a time slot. Or exchange a Study Hall with another teacher's OPEN slot."
+                          )}
+                        </p>
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={exitSwapMode}
+                        className="text-amber-700 border-amber-300 hover:bg-amber-100"
+                      >
+                        <X className="h-4 w-4 mr-1" />
+                        Cancel
+                      </Button>
+                      <Button
+                        size="sm"
+                        onClick={() => handleApplySwap(true)}
+                        className="bg-amber-600 hover:bg-amber-700 text-white"
+                        disabled={swapCount === 0}
+                      >
+                        <Check className="h-4 w-4 mr-1" />
+                        Save as New
+                      </Button>
+                    </div>
+                  </div>
+                  <div className="flex items-center justify-between mt-2 text-xs">
+                    <div className="flex items-center gap-4">
+                      <div className="inline-flex rounded-md bg-white border border-slate-200 p-0.5">
+                        <button
+                          onClick={() => setShowingPreview(false)}
+                          className={`px-2 py-0.5 font-medium rounded transition-colors ${
+                            !showingPreview
+                              ? 'bg-slate-700 text-white'
+                              : 'text-slate-600 hover:text-slate-800'
+                          }`}
+                        >
+                          Original
+                        </button>
+                        <button
+                          onClick={() => setShowingPreview(true)}
+                          className={`px-2 py-0.5 font-medium rounded transition-colors ${
+                            showingPreview
+                              ? 'bg-amber-600 text-white'
+                              : 'text-slate-600 hover:text-slate-800'
+                          }`}
+                        >
+                          Preview
+                        </button>
+                      </div>
+                      <span className="text-amber-600">
+                        {swapCount} swap{swapCount !== 1 ? 's' : ''} pending
+                      </span>
+                      {validTargets.length > 0 && (
+                        <span className="text-amber-600">
+                          {validTargets.length} valid target{validTargets.length !== 1 ? 's' : ''} available
+                        </span>
+                      )}
+                    </div>
+                    {swapCount > 0 && (
+                      <button
+                        onClick={() => {
+                          setPendingUpdateAction(() => () => handleApplySwap(false))
+                          setShowUpdateConfirm(true)
+                        }}
+                        className="text-amber-500 hover:text-amber-700 hover:underline"
+                      >
+                        or update Option {selectedOption}
+                      </button>
+                    )}
+                  </div>
+                </div>
+              )}
+
+              {/* Freeform Mode Banner */}
+              {freeformMode && (
+                <div className="bg-indigo-50 border border-indigo-200 rounded-lg p-4 no-print">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-3">
+                      <Hand className="h-5 w-5 text-indigo-600" />
+                      <div>
+                        <span className="text-indigo-800 font-medium">Freeform Mode</span>
+                        <p className="text-sm text-indigo-600">
+                          {selectedFloatingBlock
+                            ? "Click an OPEN slot to place the selected block"
+                            : floatingBlocks.length === 0
+                              ? "Click any class to pick it up and move it to a different time slot."
+                              : "Select a floating block, then click an OPEN slot to place it"}
+                        </p>
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={handleValidate}
+                        className="text-indigo-600 border-indigo-300 hover:bg-indigo-100"
+                        disabled={floatingBlocks.length === 0}
+                      >
+                        Validate
+                      </Button>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={exitFreeformMode}
+                        className="text-indigo-600 border-indigo-300 hover:bg-indigo-100"
+                      >
+                        <X className="h-4 w-4 mr-1" />
+                        Cancel
+                      </Button>
+                      <Button
+                        size="sm"
+                        onClick={() => handleApplyFreeform(true)}
+                        className="bg-indigo-600 hover:bg-indigo-700 text-white"
+                        disabled={floatingBlocks.length === 0}
+                      >
+                        <Check className="h-4 w-4 mr-1" />
+                        Save as New
+                      </Button>
+                    </div>
+                  </div>
+                  <div className="flex items-center justify-between mt-2 text-xs">
+                    <div className="flex items-center gap-4">
+                      <div className="inline-flex rounded-md bg-white border border-slate-200 p-0.5">
+                        <button
+                          onClick={() => setShowingPreview(false)}
+                          className={`px-2 py-0.5 font-medium rounded transition-colors ${
+                            !showingPreview
+                              ? 'bg-slate-700 text-white'
+                              : 'text-slate-600 hover:text-slate-800'
+                          }`}
+                        >
+                          Original
+                        </button>
+                        <button
+                          onClick={() => setShowingPreview(true)}
+                          className={`px-2 py-0.5 font-medium rounded transition-colors ${
+                            showingPreview
+                              ? 'bg-indigo-600 text-white'
+                              : 'text-slate-600 hover:text-slate-800'
+                          }`}
+                        >
+                          Preview
+                        </button>
+                      </div>
+                      <span className="text-indigo-600">
+                        {floatingBlocks.length} picked up
+                      </span>
+                      <span className="text-indigo-600">
+                        {pendingPlacements.length} placed
+                      </span>
+                      {validationErrors.length > 0 && (
+                        <span className="text-amber-600 font-medium">
+                          {validationErrors.length} issue{validationErrors.length !== 1 ? 's' : ''}
+                        </span>
+                      )}
+                    </div>
+                    {floatingBlocks.length > 0 && (
+                      <button
+                        onClick={() => {
+                          setPendingUpdateAction(() => () => handleApplyFreeform(false))
+                          setShowUpdateConfirm(true)
+                        }}
+                        className="text-indigo-500 hover:text-indigo-700 hover:underline"
+                      >
+                        or update Option {selectedOption}
+                      </button>
+                    )}
+                  </div>
+                  {/* Validation errors list */}
+                  {validationErrors.length > 0 && (
+                    <div className="mt-3 pt-3 border-t border-indigo-200">
+                      <div className="text-xs font-medium text-indigo-700 mb-1">Validation Issues:</div>
+                      <ul className="text-xs text-indigo-600 space-y-0.5">
+                        {validationErrors.map((error, idx) => (
+                          <li key={idx} className="flex items-start gap-1">
+                            <span className="text-indigo-400 mt-0.5">•</span>
+                            <span>{error.message}</span>
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* Study Hall Mode Banner */}
+              {studyHallMode && (
+                <div className="bg-violet-50 border border-violet-200 rounded-lg p-4 no-print">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-3">
+                      <Shuffle className="h-5 w-5 text-violet-600" />
+                      <div>
+                        <span className="text-violet-800 font-medium">Reassign Study Halls</span>
+                        <p className="text-sm text-violet-600">
+                          {previewOption
+                            ? "Preview generated. Click Randomize for a different arrangement."
+                            : "Click Randomize to generate a new study hall arrangement."}
+                        </p>
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={generateStudyHallArrangement}
+                        className="text-violet-600 border-violet-300 hover:bg-violet-100"
+                      >
+                        <Shuffle className="h-4 w-4 mr-1" />
+                        Randomize
+                      </Button>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={exitStudyHallMode}
+                        className="text-slate-600 border-slate-300 hover:bg-slate-100"
+                      >
+                        <X className="h-4 w-4 mr-1" />
+                        Cancel
+                      </Button>
+                      <Button
+                        size="sm"
+                        onClick={() => handleKeepPreview(true)}
+                        className="bg-violet-600 hover:bg-violet-700 text-white"
+                        disabled={!previewOption}
+                      >
+                        <Check className="h-4 w-4 mr-1" />
+                        Save as New
+                      </Button>
+                    </div>
+                  </div>
+                  <div className="flex items-center justify-between mt-2 text-xs">
+                    <div className="flex items-center gap-4">
+                      {previewOption && (
+                        <div className="inline-flex rounded-md bg-white border border-slate-200 p-0.5">
+                          <button
+                            onClick={() => setShowingPreview(false)}
+                            className={`px-2 py-0.5 font-medium rounded transition-colors ${
+                              !showingPreview
+                                ? 'bg-slate-700 text-white'
+                                : 'text-slate-600 hover:text-slate-800'
+                            }`}
+                          >
+                            Original
+                          </button>
+                          <button
+                            onClick={() => setShowingPreview(true)}
+                            className={`px-2 py-0.5 font-medium rounded transition-colors ${
+                              showingPreview
+                                ? 'bg-violet-600 text-white'
+                                : 'text-slate-600 hover:text-slate-800'
+                            }`}
+                          >
+                            Preview
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                    {previewOption && (
+                      <button
+                        onClick={() => {
+                          setPendingUpdateAction(() => () => handleKeepPreview(false))
+                          setShowUpdateConfirm(true)
+                        }}
+                        className="text-violet-500 hover:text-violet-700 hover:underline"
+                      >
+                        or update Option {selectedOption}
+                      </button>
+                    )}
+                  </div>
+                </div>
+              )}
+
+              {/* Regen Mode Banner */}
+              {regenMode && (
+                <div className="bg-sky-50 border border-sky-200 rounded-lg p-4 no-print">
+                  {isGenerating ? (
+                    <div className="space-y-3">
+                      <div className="flex items-center justify-between text-sm">
+                        <span className="text-sky-700 font-medium">
+                          {generationProgress.message || "Generating..."}
+                        </span>
+                        <span className="text-sky-600">
+                          {generationProgress.total > 0
+                            ? `${Math.round((generationProgress.current / generationProgress.total) * 100)}%`
+                            : "0%"}
+                        </span>
+                      </div>
+                      <div className="w-full bg-sky-100 rounded-full h-2.5 overflow-hidden">
+                        <div
+                          className="bg-sky-500 h-2.5 rounded-full transition-all duration-300"
+                          style={{
+                            width: generationProgress.total > 0
+                              ? `${(generationProgress.current / generationProgress.total) * 100}%`
+                              : "0%"
+                          }}
+                        />
+                      </div>
+                      <p className="text-xs text-sky-600">
+                        Attempt {generationProgress.current} of {generationProgress.total}
+                      </p>
+                    </div>
+                  ) : (
+                    <>
+                      <div className="flex items-center justify-between">
+                        <div className="flex items-center gap-3">
+                          <RefreshCw className="h-5 w-5 text-sky-600" />
+                          <div>
+                            <span className="text-sky-800 font-medium">Regenerate Schedules</span>
+                            <p className="text-sm text-sky-600">
+                              {previewOption
+                                ? "Preview generated. Save as a new option, or select different teachers and regenerate."
+                                : "Select teachers to regenerate their schedules. Other teachers remain locked."}
+                            </p>
+                          </div>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            onClick={handleRegenerate}
+                            className="text-sky-600 border-sky-300 hover:bg-sky-100"
+                            disabled={selectedCount === 0}
+                          >
+                            <RefreshCw className="h-4 w-4 mr-1" />
+                            Regenerate
+                          </Button>
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            onClick={exitRegenMode}
+                            className="text-slate-600 border-slate-300 hover:bg-slate-100"
+                          >
+                            <X className="h-4 w-4 mr-1" />
+                            Cancel
+                          </Button>
+                          <Button
+                            size="sm"
+                            onClick={() => handleKeepPreview(true)}
+                            className="bg-sky-600 hover:bg-sky-700 text-white"
+                            disabled={!previewOption}
+                          >
+                            <Check className="h-4 w-4 mr-1" />
+                            Save as New
+                          </Button>
+                        </div>
+                      </div>
+                      <div className="flex items-center justify-between mt-2 text-xs">
+                        <div className="flex items-center gap-4">
+                          {previewOption && (
+                            <div className="inline-flex rounded-md bg-white border border-slate-200 p-0.5">
+                              <button
+                                onClick={() => setShowingPreview(false)}
+                                className={`px-2 py-0.5 font-medium rounded transition-colors ${
+                                  !showingPreview
+                                    ? 'bg-slate-700 text-white'
+                                    : 'text-slate-600 hover:text-slate-800'
+                                }`}
+                              >
+                                Original
+                              </button>
+                              <button
+                                onClick={() => setShowingPreview(true)}
+                                className={`px-2 py-0.5 font-medium rounded transition-colors ${
+                                  showingPreview
+                                    ? 'bg-sky-600 text-white'
+                                    : 'text-slate-600 hover:text-slate-800'
+                                }`}
+                              >
+                                Preview
+                              </button>
+                            </div>
+                          )}
+                          <span className="text-sky-600">
+                            {selectedCount} teacher{selectedCount !== 1 ? 's' : ''} selected
+                          </span>
+                          {selectedCount > 0 && (
+                            <button
+                              onClick={clearSelections}
+                              className="text-sky-500 hover:text-sky-700 hover:underline"
+                            >
+                              clear selection
+                            </button>
+                          )}
+                        </div>
+                        {previewOption && (
+                          <button
+                            onClick={() => {
+                              setPendingUpdateAction(() => () => handleKeepPreview(false))
+                              setShowUpdateConfirm(true)
+                            }}
+                            className="text-sky-500 hover:text-sky-700 hover:underline"
+                          >
+                            or update Option {selectedOption}
+                          </button>
+                        )}
+                      </div>
+                    </>
+                  )}
+                </div>
+              )}
+
               {/* Schedule Grids */}
               <div>
                 <div className="flex items-center justify-between mb-4">
@@ -1104,10 +2755,13 @@ export default function HistoryDetailPage() {
                   <Button
                     variant="outline"
                     size="sm"
-                    onClick={() =>
+                    onClick={() => {
                       setViewMode(viewMode === "teacher" ? "grade" : "teacher")
-                    }
-                    disabled={isGenerating}
+                      // Clear swap state when switching views
+                      setSelectedCell(null)
+                      setValidTargets([])
+                    }}
+                    disabled={isGenerating || freeformMode}
                     className="gap-1.5 no-print"
                   >
                     {viewMode === "teacher" ? (
@@ -1120,7 +2774,7 @@ export default function HistoryDetailPage() {
                 </div>
                 {/* Show message when in regen preview mode */}
                 {previewOption && previewType === "regen" && previewTeachers.size > 0 && viewMode === "teacher" && (
-                  <div className="col-span-full mb-2 text-sm text-violet-600 bg-violet-50 border border-violet-200 rounded-lg px-3 py-2">
+                  <div className="col-span-full mb-4 text-sm text-sky-600 bg-sky-50 border border-sky-200 rounded-lg px-3 py-2">
                     Comparing {previewTeachers.size} regenerated teacher{previewTeachers.size !== 1 ? 's' : ''}. Toggle between Original and Preview to compare.
                   </div>
                 )}
@@ -1161,23 +2815,95 @@ export default function HistoryDetailPage() {
                           // 5. Alphabetical
                           return teacherA.localeCompare(teacherB)
                         })
-                        .map(([teacher, schedule]) => (
-                          <ScheduleGrid
-                            key={teacher}
-                            schedule={schedule}
-                            type="teacher"
-                            name={teacher}
-                            status={selectedResult.teacherStats.find(s => s.teacher === teacher)?.status}
-                            showCheckbox={!isGenerating && !swapMode && !previewOption}
-                            isSelected={selectedForRegen.has(teacher)}
-                            onToggleSelect={() => toggleTeacherSelection(teacher)}
-                            swapMode={swapMode}
-                            selectedCell={selectedCell}
-                            validTargets={validTargets}
-                            onCellClick={handleCellClick}
-                          />
-                        ))
-                    : Object.entries(selectedResult.gradeSchedules)
+                        .map(([teacher, schedule]) => {
+                          // Get unplaced floating blocks from this teacher
+                          const teacherFloatingBlocks = floatingBlocks.filter(b =>
+                            b.sourceTeacher === teacher &&
+                            !pendingPlacements.some(p => p.blockId === b.id)
+                          )
+
+                          return (
+                            <div key={teacher} className="space-y-2">
+                              <ScheduleGrid
+                                schedule={
+                                  freeformMode && workingSchedules && showingPreview
+                                    ? workingSchedules.teacherSchedules[teacher]
+                                    : swapMode && swapWorkingSchedules && showingPreview
+                                      ? swapWorkingSchedules.teacherSchedules[teacher]
+                                      : schedule
+                                }
+                                type="teacher"
+                                name={teacher}
+                                status={selectedResult.teacherStats.find(s => s.teacher === teacher)?.status}
+                                showCheckbox={regenMode && !isGenerating}
+                                isSelected={selectedForRegen.has(teacher)}
+                                onToggleSelect={() => toggleTeacherSelection(teacher)}
+                                swapMode={swapMode && showingPreview}
+                                selectedCell={selectedCell}
+                                validTargets={validTargets}
+                                highlightedCells={highlightedCells}
+                                onCellClick={handleCellClick}
+                                freeformMode={freeformMode && showingPreview}
+                                floatingBlocks={floatingBlocks}
+                                pendingPlacements={pendingPlacements}
+                                selectedFloatingBlock={selectedFloatingBlock}
+                                validationErrors={validationErrors}
+                                onPickUp={handlePickUpBlock}
+                                onPlace={handlePlaceBlock}
+                                onUnplace={handleUnplaceBlock}
+                              />
+                              {/* Unplaced floating blocks from this teacher */}
+                              {freeformMode && teacherFloatingBlocks.length > 0 && (
+                                <div className="flex flex-wrap gap-1.5 px-1 no-print">
+                                  {teacherFloatingBlocks.map(block => {
+                                    const isSelected = selectedFloatingBlock === block.id
+                                    const error = validationErrors.find(e => e.blockId === block.id)
+                                    const isStudyHall = block.subject === "Study Hall"
+
+                                    return (
+                                      <div
+                                        key={block.id}
+                                        onClick={() => handleSelectFloatingBlock(block.id)}
+                                        title="Click to select, then click a cell to place"
+                                        className={`
+                                          p-1 rounded border text-center w-[60px] cursor-pointer transition-all relative group
+                                          ${error
+                                            ? 'bg-red-100 border-red-300 ring-2 ring-red-400'
+                                            : isSelected
+                                              ? 'ring-2 ring-indigo-500'
+                                              : 'hover:ring-2 hover:ring-indigo-300'
+                                          }
+                                          ${isStudyHall
+                                            ? 'bg-blue-100 border-blue-200'
+                                            : 'bg-green-50 border-green-200'
+                                          }
+                                        `}
+                                      >
+                                        <div className="font-medium text-xs leading-tight truncate">
+                                          {block.grade.replace(' Grade', '').replace('Kindergarten', 'K')}
+                                        </div>
+                                        <div className="text-[10px] leading-tight text-muted-foreground truncate">
+                                          {block.subject}
+                                        </div>
+                                        <button
+                                          onClick={(e) => {
+                                            e.stopPropagation()
+                                            handleReturnBlock(block.id)
+                                          }}
+                                          className="absolute -top-1 -right-1 w-4 h-4 bg-slate-200 hover:bg-slate-300 rounded-full text-[10px] leading-none opacity-0 group-hover:opacity-100 transition-opacity"
+                                          title="Return to original position"
+                                        >
+                                          ↩
+                                        </button>
+                                      </div>
+                                    )
+                                  })}
+                                </div>
+                              )}
+                            </div>
+                          )
+                        })
+                    : Object.entries(swapMode && swapWorkingSchedules && showingPreview ? swapWorkingSchedules.gradeSchedules : selectedResult.gradeSchedules)
                         .filter(([grade]) => !grade.includes("Elective"))
                         .sort(([a], [b]) => gradeSort(a, b))
                         .map(([grade, schedule]) => (
@@ -1186,6 +2912,11 @@ export default function HistoryDetailPage() {
                             schedule={schedule}
                             type="grade"
                             name={grade}
+                            swapMode={swapMode && showingPreview}
+                            selectedCell={selectedCell}
+                            validTargets={validTargets}
+                            highlightedCells={highlightedCells}
+                            onCellClick={handleCellClick}
                           />
                         ))}
                 </div>
@@ -1240,6 +2971,36 @@ export default function HistoryDetailPage() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      {/* Confirmation dialog for updating existing option */}
+      <AlertDialog open={showUpdateConfirm} onOpenChange={setShowUpdateConfirm}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Update Option {selectedOption}?</AlertDialogTitle>
+            <AlertDialogDescription>
+              This will overwrite the current Option {selectedOption} with your changes.
+              This action cannot be undone. Consider using "Save as New" instead to preserve the original.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel onClick={() => setPendingUpdateAction(null)}>
+              Cancel
+            </AlertDialogCancel>
+            <AlertDialogAction
+              onClick={() => {
+                if (pendingUpdateAction) {
+                  pendingUpdateAction()
+                }
+                setPendingUpdateAction(null)
+                setShowUpdateConfirm(false)
+              }}
+              className="bg-amber-600 hover:bg-amber-700"
+            >
+              Update Option {selectedOption}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   )
 }

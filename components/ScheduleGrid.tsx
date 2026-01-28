@@ -4,16 +4,12 @@ import { cn } from "@/lib/utils"
 import { Badge } from "@/components/ui/badge"
 import { Checkbox } from "@/components/ui/checkbox"
 import { RefreshCw } from "lucide-react"
-import type { TeacherSchedule, GradeSchedule } from "@/lib/types"
+import type { TeacherSchedule, GradeSchedule, FloatingBlock, PendingPlacement, ValidationError, CellLocation } from "@/lib/types"
 
 const DAYS = ["Mon", "Tues", "Wed", "Thurs", "Fri"]
 const BLOCKS = [1, 2, 3, 4, 5]
 
-export interface CellLocation {
-  teacher: string
-  day: string
-  block: number
-}
+export type { CellLocation }
 
 interface ScheduleGridProps {
   schedule: TeacherSchedule | GradeSchedule
@@ -28,7 +24,17 @@ interface ScheduleGridProps {
   swapMode?: boolean
   selectedCell?: CellLocation | null
   validTargets?: CellLocation[]
+  highlightedCells?: CellLocation[]
   onCellClick?: (location: CellLocation, cellType: "study-hall" | "open" | "class") => void
+  // Freeform mode props
+  freeformMode?: boolean
+  floatingBlocks?: FloatingBlock[]
+  pendingPlacements?: PendingPlacement[]
+  selectedFloatingBlock?: string | null
+  validationErrors?: ValidationError[]
+  onPickUp?: (location: CellLocation) => void
+  onPlace?: (location: CellLocation) => void
+  onUnplace?: (blockId: string) => void
 }
 
 export function ScheduleGrid({
@@ -42,7 +48,16 @@ export function ScheduleGrid({
   swapMode,
   selectedCell,
   validTargets = [],
+  highlightedCells = [],
   onCellClick,
+  freeformMode,
+  floatingBlocks = [],
+  pendingPlacements = [],
+  selectedFloatingBlock,
+  validationErrors = [],
+  onPickUp,
+  onPlace,
+  onUnplace,
 }: ScheduleGridProps) {
   function getCellContent(day: string, block: number): [string, string] | null {
     return schedule[day]?.[block] || null
@@ -57,11 +72,57 @@ export function ScheduleGrid({
   }
 
   function isValidTarget(day: string, block: number): boolean {
+    if (type === "grade") {
+      return validTargets.some(t => t.grade === name && t.day === day && t.block === block)
+    }
     return validTargets.some(t => t.teacher === name && t.day === day && t.block === block)
   }
 
   function isSelectedCell(day: string, block: number): boolean {
+    if (type === "grade") {
+      return selectedCell?.grade === name && selectedCell?.day === day && selectedCell?.block === block
+    }
     return selectedCell?.teacher === name && selectedCell?.day === day && selectedCell?.block === block
+  }
+
+  function isHighlightedCell(day: string, block: number): boolean {
+    if (type === "grade") {
+      return highlightedCells.some(c => c.grade === name && c.day === day && c.block === block)
+    }
+    return highlightedCells.some(c => c.teacher === name && c.day === day && c.block === block)
+  }
+
+  // Freeform mode helpers
+  function isPickedUpCell(day: string, block: number): boolean {
+    if (type !== "teacher") return false
+    return floatingBlocks.some(b =>
+      b.sourceTeacher === name && b.sourceDay === day && b.sourceBlock === block
+    )
+  }
+
+  function hasPendingPlacement(day: string, block: number): PendingPlacement | undefined {
+    if (type !== "teacher") return undefined
+    return pendingPlacements.find(p =>
+      p.teacher === name && p.day === day && p.block === block
+    )
+  }
+
+  function hasValidationError(day: string, block: number): ValidationError | undefined {
+    if (type !== "teacher") return undefined
+    return validationErrors.find(e =>
+      e.cells.some(c => c.teacher === name && c.day === day && c.block === block)
+    )
+  }
+
+  function isValidFreeformTarget(day: string, block: number): boolean {
+    if (!freeformMode || !selectedFloatingBlock) return false
+    if (type !== "teacher") return false
+    // Picked-up cells are valid targets (they're essentially empty now)
+    if (isPickedUpCell(day, block)) return true
+    const entry = getCellContent(day, block)
+    const cellType = getCellType(entry)
+    // Can place on OPEN cells or swap with classes/study halls
+    return cellType === "open" || cellType === "empty" || cellType === "class" || cellType === "study-hall"
   }
 
   function getCellClass(entry: [string, string] | null, day: string, block: number): string {
@@ -73,6 +134,51 @@ export function ScheduleGrid({
       return "bg-green-50"
     })()
 
+    // Add highlight animation for cells that just received swapped content
+    if (isHighlightedCell(day, block)) {
+      return cn(baseClass, "ring-2 ring-inset ring-violet-500 animate-pulse-highlight")
+    }
+
+    // Freeform mode styling
+    if (freeformMode && type === "teacher") {
+      const error = hasValidationError(day, block)
+      const placement = hasPendingPlacement(day, block)
+      const pickedUp = isPickedUpCell(day, block)
+
+      // Error styling takes priority
+      if (error) {
+        return cn(baseClass, "ring-2 ring-inset ring-red-500 bg-red-100")
+      }
+
+      // Pending placement styling - use the block's natural color with a ring
+      if (placement) {
+        const placedBlock = floatingBlocks.find(b => b.id === placement.blockId)
+        const isStudyHall = placedBlock?.subject === "Study Hall"
+        const placementBg = isStudyHall ? "bg-blue-100" : "bg-green-50"
+        return cn(placementBg, "ring-2 ring-inset ring-indigo-400 cursor-pointer")
+      }
+
+      // Picked-up cell ghost styling - light indigo dashed
+      if (pickedUp) {
+        // If a block is selected, show as clickable target
+        if (selectedFloatingBlock) {
+          return cn("bg-indigo-50 border-2 border-dashed border-indigo-300 cursor-pointer hover:bg-indigo-100")
+        }
+        return cn("bg-indigo-50 border-2 border-dashed border-indigo-300")
+      }
+
+      // Clickable cells - classes, study halls, and OPEN slots (when block selected)
+      const cellType = getCellType(entry)
+      if (cellType === "class" || cellType === "study-hall") {
+        return cn(baseClass, "cursor-pointer hover:ring-2 hover:ring-inset hover:ring-indigo-300")
+      }
+      if (selectedFloatingBlock && (cellType === "open" || cellType === "empty")) {
+        return cn(baseClass, "cursor-pointer hover:ring-2 hover:ring-inset hover:ring-indigo-300")
+      }
+
+      return baseClass
+    }
+
     // Add swap mode styling
     if (swapMode) {
       if (isSelectedCell(day, block)) {
@@ -81,10 +187,18 @@ export function ScheduleGrid({
       if (isValidTarget(day, block)) {
         return cn(baseClass, "ring-2 ring-inset ring-emerald-500 bg-emerald-100 cursor-pointer hover:bg-emerald-200")
       }
-      // Clickable study halls and open blocks
+      // Clickable cells depend on view type
       const cellType = getCellType(entry)
-      if (cellType === "study-hall" || cellType === "open") {
-        return cn(baseClass, "cursor-pointer hover:ring-2 hover:ring-inset hover:ring-slate-300")
+      if (type === "teacher") {
+        // Teacher view: can click study halls, open blocks, and classes
+        if (cellType === "study-hall" || cellType === "open" || cellType === "class") {
+          return cn(baseClass, "cursor-pointer hover:ring-2 hover:ring-inset hover:ring-slate-300")
+        }
+      } else if (type === "grade") {
+        // Grade view: can click classes and study halls
+        if (cellType === "class" || cellType === "study-hall") {
+          return cn(baseClass, "cursor-pointer hover:ring-2 hover:ring-inset hover:ring-slate-300")
+        }
       }
     }
 
@@ -92,14 +206,73 @@ export function ScheduleGrid({
   }
 
   function handleCellClick(day: string, block: number) {
-    if (!swapMode || !onCellClick || type !== "teacher") return
+    // Handle freeform mode
+    if (freeformMode && type === "teacher") {
+      const entry = getCellContent(day, block)
+      const cellType = getCellType(entry)
+      const [grade, subject] = entry || ["", ""]
+      const placement = hasPendingPlacement(day, block)
+
+      // If clicking on a placed block (and no floating block selected), unplace it
+      if (placement && !selectedFloatingBlock && onUnplace) {
+        onUnplace(placement.blockId)
+        return
+      }
+
+      // If a floating block is selected
+      if (selectedFloatingBlock) {
+        // Clicking a placed block - unplace it first, then place selected there
+        if (placement && onUnplace && onPlace) {
+          onUnplace(placement.blockId)
+          onPlace({ teacher: name, day, block, grade, subject })
+          return
+        }
+
+        // Clicking a picked-up cell or OPEN slot - place the block there
+        if (isPickedUpCell(day, block) || cellType === "open" || cellType === "empty") {
+          if (onPlace) {
+            onPlace({ teacher: name, day, block, grade, subject })
+          }
+          return
+        }
+
+        // Clicking a class or study hall - place selected block there, pick up what's there
+        if ((cellType === "class" || cellType === "study-hall") && onPlace && onPickUp) {
+          // First place the floating block here
+          onPlace({ teacher: name, day, block, grade, subject })
+          // Then pick up what was there (this will be handled by the parent)
+          return
+        }
+
+        return
+      }
+
+      // No block selected - clicking a class or study hall picks it up
+      if ((cellType === "class" || cellType === "study-hall") && onPickUp) {
+        onPickUp({ teacher: name, day, block, grade, subject })
+        return
+      }
+
+      return
+    }
+
+    if (!swapMode || !onCellClick) return
 
     const entry = getCellContent(day, block)
     const cellType = getCellType(entry)
 
-    // Only allow clicking on study halls, open blocks, or valid targets
-    if (cellType === "study-hall" || cellType === "open" || isValidTarget(day, block)) {
-      onCellClick({ teacher: name, day, block }, cellType === "empty" ? "open" : cellType)
+    if (type === "teacher") {
+      // Teacher view: can click study halls, open blocks, classes, or valid targets
+      if (cellType === "study-hall" || cellType === "open" || cellType === "class" || isValidTarget(day, block)) {
+        const [grade, subject] = entry || ["", ""]
+        onCellClick({ teacher: name, day, block, grade, subject }, cellType === "empty" ? "open" : cellType)
+      }
+    } else if (type === "grade") {
+      // Grade view: can click classes, study halls, or valid targets
+      if (cellType === "class" || cellType === "study-hall" || isValidTarget(day, block)) {
+        const [teacher, subject] = entry || ["", ""]
+        onCellClick({ grade: name, day, block, teacher, subject }, cellType === "empty" ? "open" : cellType)
+      }
     }
   }
 
@@ -135,7 +308,7 @@ export function ScheduleGrid({
         {showCheckbox && type === "teacher" && (
           <label className="flex items-center gap-1.5 cursor-pointer no-print">
             <RefreshCw className={cn("h-3 w-3", isSelected ? "text-sky-600" : "text-muted-foreground")} />
-            <span className={cn("text-xs", isSelected ? "text-sky-600" : "text-muted-foreground")}>Regen</span>
+            <span className={cn("text-xs", isSelected ? "text-sky-600" : "text-muted-foreground")}>Regenerate</span>
             <Checkbox
               checked={isSelected}
               onCheckedChange={onToggleSelect}
@@ -164,6 +337,26 @@ export function ScheduleGrid({
               {DAYS.map((day) => {
                 const entry = getCellContent(day, block)
                 const [primary, secondary] = entry || ["", ""]
+
+                // In freeform mode, check for pending placements or picked-up state
+                const placement = freeformMode && type === "teacher" ? hasPendingPlacement(day, block) : undefined
+                const pickedUp = freeformMode && type === "teacher" && isPickedUpCell(day, block)
+                const error = freeformMode && type === "teacher" ? hasValidationError(day, block) : undefined
+
+                // Get display content - show placed block's content if there's a placement
+                let displayPrimary = primary
+                let displaySecondary = secondary
+                let hasContent = !!entry
+
+                if (placement) {
+                  const placedBlock = floatingBlocks.find(b => b.id === placement.blockId)
+                  if (placedBlock) {
+                    displayPrimary = placedBlock.grade
+                    displaySecondary = placedBlock.subject
+                    hasContent = true
+                  }
+                }
+
                 return (
                   <td
                     key={day}
@@ -172,14 +365,32 @@ export function ScheduleGrid({
                       "p-1 text-center border-l overflow-hidden transition-all",
                       getCellClass(entry, day, block)
                     )}
+                    title={error ? error.message : undefined}
                   >
-                    {entry ? (
+                    {placement ? (
+                      // Show the placed block's content
                       <div className="max-w-full overflow-hidden">
-                        <div className="font-medium text-xs leading-tight truncate" title={type === "teacher" ? primary : secondary}>
-                          {type === "teacher" ? primary.replace(' Grade', '').replace('Kindergarten', 'K') : secondary}
+                        <div className="font-medium text-xs leading-tight truncate" title={displayPrimary}>
+                          {displayPrimary.replace(' Grade', '').replace('Kindergarten', 'K')}
                         </div>
-                        <div className="text-[10px] leading-tight text-muted-foreground truncate" title={type === "teacher" ? secondary : primary}>
-                          {type === "teacher" ? secondary : primary}
+                        <div className="text-[10px] leading-tight text-muted-foreground truncate" title={displaySecondary}>
+                          {displaySecondary}
+                        </div>
+                      </div>
+                    ) : pickedUp ? (
+                      <div className="text-[10px] text-indigo-400 italic">
+                        moved
+                      </div>
+                    ) : displaySecondary === "OPEN" ? (
+                      // OPEN cells just show "OPEN" without grade
+                      <span className="text-xs text-muted-foreground">OPEN</span>
+                    ) : hasContent ? (
+                      <div className="max-w-full overflow-hidden">
+                        <div className="font-medium text-xs leading-tight truncate" title={type === "teacher" ? displayPrimary : displaySecondary}>
+                          {type === "teacher" ? displayPrimary.replace(' Grade', '').replace('Kindergarten', 'K') : displaySecondary}
+                        </div>
+                        <div className="text-[10px] leading-tight text-muted-foreground truncate" title={type === "teacher" ? displaySecondary : displayPrimary}>
+                          {type === "teacher" ? displaySecondary : displayPrimary}
                         </div>
                       </div>
                     ) : (

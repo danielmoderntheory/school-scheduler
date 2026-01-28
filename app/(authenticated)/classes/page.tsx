@@ -13,7 +13,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog"
-import { ChevronDown, ChevronUp, Loader2, Plus, X, Clock, Users, Upload, Download } from "lucide-react"
+import { ChevronDown, ChevronUp, Loader2, Plus, X, Clock, Users, Upload, Download, Check } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { GradeSelector, formatGradeDisplay } from "@/components/GradeSelector"
 import toast from "react-hot-toast"
@@ -232,12 +232,12 @@ export default function ClassesPage() {
                   setClasses((prev) => prev.map((c) => (c.id === id ? reverted : c)))
                 }
               }}
-              className="text-sm font-medium text-sky-600 hover:text-sky-700"
+              className="px-2 py-1 text-sm font-medium text-violet-600 hover:text-violet-800 hover:bg-violet-50 rounded transition-colors"
             >
               Undo
             </button>
           </div>
-        ), { duration: 5000 })
+        ), { duration: 10000, icon: <Check className="h-4 w-4 text-emerald-600" /> })
       } else {
         // Revert on error
         setClasses(previousClasses)
@@ -290,12 +290,12 @@ export default function ClassesPage() {
                   )
                 }
               }}
-              className="text-sm font-medium text-sky-600 hover:text-sky-700"
+              className="px-2 py-1 text-sm font-medium text-violet-600 hover:text-violet-800 hover:bg-violet-50 rounded transition-colors"
             >
               Undo
             </button>
           </div>
-        ), { duration: 5000 })
+        ), { duration: 10000, icon: <Check className="h-4 w-4 text-emerald-600" /> })
       }
     } catch (error) {
       toast.error("Failed to save restrictions")
@@ -371,12 +371,12 @@ export default function ClassesPage() {
             })
             toast.dismiss(t.id)
           }}
-          className="px-2 py-1 text-xs font-medium bg-slate-100 hover:bg-slate-200 rounded"
+          className="px-2 py-1 text-sm font-medium text-violet-600 hover:text-violet-800 hover:bg-violet-50 rounded transition-colors"
         >
           Undo
         </button>
       </div>
-    ), { duration: 5000 })
+    ), { duration: 10000, icon: <Check className="h-4 w-4 text-emerald-600" /> })
 
     // Schedule actual deletion after 5 seconds
     const timeout = setTimeout(async () => {
@@ -754,12 +754,12 @@ export default function ClassesPage() {
               toast.dismiss(t.id)
               handleUndoImport(oldClasses)
             }}
-            className="px-2 py-1 text-xs font-medium bg-slate-100 hover:bg-slate-200 rounded"
+            className="px-2 py-1 text-sm font-medium text-violet-600 hover:text-violet-800 hover:bg-violet-50 rounded transition-colors"
           >
             Undo
           </button>
         </div>
-      ), { duration: 10000 })
+      ), { duration: 10000, icon: <Check className="h-4 w-4 text-emerald-600" /> })
     } else if (errors > 0) {
       toast.error(`Import failed with ${errors} errors`)
     }

@@ -137,3 +137,36 @@ export const ALL_GRADES = [
 export type Day = typeof DAYS[number];
 export type Block = typeof BLOCKS[number];
 export type Grade = typeof ALL_GRADES[number];
+
+// Freeform Mode Types
+export interface CellLocation {
+  teacher: string;
+  day: string;
+  block: number;
+  grade?: string;
+  subject?: string;
+}
+
+export interface FloatingBlock {
+  id: string;
+  sourceTeacher: string;
+  sourceDay: string;
+  sourceBlock: number;
+  grade: string;
+  subject: string;
+  entry: [string, string];
+}
+
+export interface PendingPlacement {
+  blockId: string;
+  teacher: string;
+  day: string;
+  block: number;
+}
+
+export interface ValidationError {
+  type: 'teacher_conflict' | 'grade_conflict' | 'subject_conflict' | 'unplaced';
+  message: string;
+  cells: CellLocation[];
+  blockId?: string;
+}

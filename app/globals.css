@@ -156,3 +156,19 @@
   margin: 0.75in 0.65in;
   size: letter;
 }
+
+/* Highlight animation for swap destinations */
+@keyframes pulse-highlight {
+  0%, 100% {
+    background-color: rgb(237 233 254); /* violet-100 */
+    box-shadow: 0 0 0 0 rgb(139 92 246 / 0.4);
+  }
+  50% {
+    background-color: rgb(221 214 254); /* violet-200 */
+    box-shadow: 0 0 0 4px rgb(139 92 246 / 0.2);
+  }
+}
+
+.animate-pulse-highlight {
+  animation: pulse-highlight 1s ease-in-out infinite;
+}

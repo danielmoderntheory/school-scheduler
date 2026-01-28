@@ -143,10 +143,22 @@ function getValidSlots(availDays: string[], availBlocks: number[]): number[] {
   return slots.length > 0 ? slots : Array.from({ length: 25 }, (_, i) => i);
 }
 
-function shuffle<T>(array: T[]): T[] {
+// Seeded random number generator (mulberry32)
+function seededRandom(seed: number): () => number {
+  return function() {
+    seed |= 0;
+    seed = seed + 0x6D2B79F5 | 0;
+    let t = Math.imul(seed ^ seed >>> 15, 1 | seed);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+}
+
+function shuffle<T>(array: T[], randomFn?: () => number): T[] {
+  const random = randomFn || Math.random;
   const result = [...array];
   for (let i = result.length - 1; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1));
+    const j = Math.floor(random() * (i + 1));
     [result[i], result[j]] = [result[j], result[i]];
   }
   return result;
@@ -414,14 +426,19 @@ function addStudyHalls(
     alreadyCoveredGroups?: Set<string>; // Groups already covered by locked teachers
     existingGradeStudyHallDays?: Map<string, Set<string>>; // Days each grade already has study halls
     shuffleAssignments?: boolean; // Randomize teacher/slot order for variety
+    seed?: number; // Seed for reproducible randomization
   }
 ): StudyHallAssignment[] {
   const {
     requiredTeachers = [],
     alreadyCoveredGroups = new Set<string>(),
     existingGradeStudyHallDays = new Map<string, Set<string>>(),
-    shuffleAssignments = false
+    shuffleAssignments = false,
+    seed
   } = options || {};
+
+  // Create random function - seeded if seed provided, otherwise use Math.random
+  const randomFn = seed !== undefined ? seededRandom(seed) : undefined;
 
   // Filter out groups already covered by locked teachers
   // Also check for combined groups (e.g., if "6th-7th Grade" is covered, skip both "6th Grade" and "7th Grade")
@@ -482,8 +499,8 @@ function addStudyHalls(
     teachers: string[]
   ): boolean {
     // Optionally shuffle the order we try days and blocks
-    const daysToTry = shuffleAssignments ? shuffle(DAYS) : DAYS;
-    const blocksToTry = shuffleAssignments ? shuffle(BLOCKS) : BLOCKS;
+    const daysToTry = shuffleAssignments ? shuffle(DAYS, randomFn) : DAYS;
+    const blocksToTry = shuffleAssignments ? shuffle(BLOCKS, randomFn) : BLOCKS;
 
     for (const teacher of teachers) {
       for (const day of daysToTry) {
@@ -514,11 +531,49 @@ function addStudyHalls(
   }
 
   // Sort teachers by teaching load (fewer classes = more availability)
-  // When shuffling, randomize among teachers with similar loads
+  // When shuffling, use progressively more aggressive strategies based on attempt number
+  // The shuffleAttempt is encoded in the seed: attempt = seed % 10
   let sortedTeachers = [...eligibleTeachers].sort((a, b) => countTeaching(a) - countTeaching(b));
 
-  if (shuffleAssignments) {
-    // Group by teaching load, shuffle within each group, then flatten
+  if (shuffleAssignments && randomFn && seed !== undefined) {
+    const attempt = seed % 10;
+
+    if (attempt < 3) {
+      // Attempts 0-2: Normal load order, shuffle within groups
+      const byLoad = new Map<number, string[]>();
+      for (const t of sortedTeachers) {
+        const load = countTeaching(t);
+        if (!byLoad.has(load)) byLoad.set(load, []);
+        byLoad.get(load)!.push(t);
+      }
+      sortedTeachers = [];
+      const loads = [...byLoad.keys()].sort((a, b) => a - b);
+      for (const load of loads) {
+        sortedTeachers.push(...shuffle(byLoad.get(load)!, randomFn));
+      }
+    } else if (attempt < 5) {
+      // Attempts 3-4: Reverse load order (more classes first)
+      sortedTeachers = [...eligibleTeachers].sort((a, b) => countTeaching(b) - countTeaching(a));
+      const byLoad = new Map<number, string[]>();
+      for (const t of sortedTeachers) {
+        const load = countTeaching(t);
+        if (!byLoad.has(load)) byLoad.set(load, []);
+        byLoad.get(load)!.push(t);
+      }
+      sortedTeachers = [];
+      const loads = [...byLoad.keys()].sort((a, b) => b - a);
+      for (const load of loads) {
+        sortedTeachers.push(...shuffle(byLoad.get(load)!, randomFn));
+      }
+    } else if (attempt < 7) {
+      // Attempts 5-6: Completely random order (ignores load)
+      sortedTeachers = shuffle([...eligibleTeachers], randomFn);
+    } else {
+      // Attempts 7-9: Random order, but also shuffle groups order more aggressively
+      sortedTeachers = shuffle([...eligibleTeachers], randomFn);
+    }
+  } else if (shuffleAssignments) {
+    // Fallback: shuffle within load groups
     const byLoad = new Map<number, string[]>();
     for (const t of sortedTeachers) {
       const load = countTeaching(t);
@@ -538,7 +593,7 @@ function addStudyHalls(
 
   for (const teacher of requiredSorted) {
     // Find any group this teacher can take
-    const groupOrder = shuffleAssignments ? shuffle([...groupsToPlace]) : groupsToPlace;
+    const groupOrder = shuffleAssignments ? shuffle([...groupsToPlace], randomFn) : groupsToPlace;
     for (const group of groupOrder) {
       if (placedGrades.has(group.grades[0])) continue; // Already placed
       if (tryPlaceGroup(group, [teacher])) break;
@@ -546,7 +601,7 @@ function addStudyHalls(
   }
 
   // Phase 2: Place remaining individual groups
-  const groupOrder = shuffleAssignments ? shuffle([...groupsToPlace]) : groupsToPlace;
+  const groupOrder = shuffleAssignments ? shuffle([...groupsToPlace], randomFn) : groupsToPlace;
   for (const group of groupOrder) {
     if (group.grades.some(g => placedGrades.has(g))) continue; // Already placed
 
@@ -1105,7 +1160,8 @@ export async function generateSchedules(
  */
 export function reassignStudyHalls(
   option: ScheduleOption,
-  teachers: Teacher[]
+  teachers: Teacher[],
+  seed?: number
 ): { success: boolean; newOption?: ScheduleOption; message?: string; noChanges?: boolean } {
   // Track old study hall assignments for comparison
   const oldAssignments = new Set<string>();
@@ -1113,35 +1169,6 @@ export function reassignStudyHalls(
     for (const sh of option.studyHallAssignments) {
       if (sh.teacher && sh.day && sh.block) {
         oldAssignments.add(`${sh.group}|${sh.teacher}|${sh.day}|${sh.block}`);
-      }
-    }
-  }
-
-  // Deep copy the schedules
-  const teacherSchedules: Record<string, TeacherSchedule> = JSON.parse(JSON.stringify(option.teacherSchedules));
-  const gradeSchedules: Record<string, GradeSchedule> = JSON.parse(JSON.stringify(option.gradeSchedules));
-
-  // Clear all existing study halls and OPEN blocks from teacher schedules
-  // Set to null so addStudyHalls sees them as available
-  for (const teacher of Object.keys(teacherSchedules)) {
-    for (const day of DAYS) {
-      for (const block of BLOCKS) {
-        const entry = teacherSchedules[teacher]?.[day]?.[block];
-        if (entry && (entry[1] === 'Study Hall' || entry[1] === 'OPEN')) {
-          teacherSchedules[teacher][day][block] = null;
-        }
-      }
-    }
-  }
-
-  // Clear study halls from grade schedules (OPEN slots don't exist in grade schedules)
-  for (const grade of Object.keys(gradeSchedules)) {
-    for (const day of DAYS) {
-      for (const block of BLOCKS) {
-        const entry = gradeSchedules[grade]?.[day]?.[block];
-        if (entry && entry[1] === 'Study Hall') {
-          gradeSchedules[grade][day][block] = null;
-        }
       }
     }
   }
@@ -1156,76 +1183,115 @@ export function reassignStudyHalls(
     };
   }
 
-  // Reassign study halls with shuffling enabled for variety
-  const shAssignments = addStudyHalls(teacherSchedules, gradeSchedules, eligible, {
-    shuffleAssignments: true
-  });
-  const shPlaced = shAssignments.filter(sh => sh.teacher !== null).length;
-  const shTotal = shAssignments.length;
+  // Try multiple seeds to find a different arrangement
+  const maxAttempts = 10;
+  const baseSeed = seed ?? Math.floor(Math.random() * 2147483647);
 
-  if (shPlaced === 0) {
-    return {
-      success: false,
-      message: 'Could not place any study halls with the current schedule',
-    };
-  }
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    const currentSeed = baseSeed + attempt;
 
-  if (shPlaced < shTotal) {
-    // Partial success - some study halls couldn't be placed
-    const failed = shAssignments.filter(sh => sh.teacher === null).map(sh => sh.group);
-    return {
-      success: false,
-      message: `Could only place ${shPlaced}/${shTotal} study halls. Failed: ${failed.join(', ')}`,
-    };
-  }
+    // Deep copy the schedules for each attempt
+    const teacherSchedules: Record<string, TeacherSchedule> = JSON.parse(JSON.stringify(option.teacherSchedules));
+    const gradeSchedules: Record<string, GradeSchedule> = JSON.parse(JSON.stringify(option.gradeSchedules));
 
-  // Fill any remaining null slots with OPEN
-  for (const teacher of Object.keys(teacherSchedules)) {
-    for (const day of DAYS) {
-      for (const block of BLOCKS) {
-        if (teacherSchedules[teacher][day][block] === null) {
-          teacherSchedules[teacher][day][block] = ['', 'OPEN'];
+    // Clear all existing study halls and OPEN blocks from teacher schedules
+    for (const teacher of Object.keys(teacherSchedules)) {
+      for (const day of DAYS) {
+        for (const block of BLOCKS) {
+          const entry = teacherSchedules[teacher]?.[day]?.[block];
+          if (entry && (entry[1] === 'Study Hall' || entry[1] === 'OPEN')) {
+            teacherSchedules[teacher][day][block] = null;
+          }
         }
       }
     }
-  }
 
-  // Calculate stats
-  const fullTime = teachers.filter(t => t.status === 'full-time').map(t => t.name);
-  const totalBtb = fullTime.reduce((sum, t) => sum + countBackToBack(teacherSchedules, t), 0);
-
-  // Check if assignments changed
-  const newAssignments = new Set<string>();
-  for (const sh of shAssignments) {
-    if (sh.teacher && sh.day && sh.block) {
-      newAssignments.add(`${sh.group}|${sh.teacher}|${sh.day}|${sh.block}`);
+    // Clear study halls from grade schedules
+    for (const grade of Object.keys(gradeSchedules)) {
+      for (const day of DAYS) {
+        for (const block of BLOCKS) {
+          const entry = gradeSchedules[grade]?.[day]?.[block];
+          if (entry && entry[1] === 'Study Hall') {
+            gradeSchedules[grade][day][block] = null;
+          }
+        }
+      }
     }
-  }
 
-  const assignmentsChanged = oldAssignments.size !== newAssignments.size ||
-    [...oldAssignments].some(a => !newAssignments.has(a));
+    // Reassign study halls with shuffling
+    const shAssignments = addStudyHalls(teacherSchedules, gradeSchedules, eligible, {
+      shuffleAssignments: true,
+      seed: currentSeed
+    });
+    const shPlaced = shAssignments.filter(sh => sh.teacher !== null).length;
+    const shTotal = shAssignments.length;
 
-  if (!assignmentsChanged) {
+    if (shPlaced === 0) {
+      continue; // Try next seed
+    }
+
+    if (shPlaced < shTotal) {
+      continue; // Try next seed for better result
+    }
+
+    // Fill any remaining null slots with OPEN
+    for (const teacher of Object.keys(teacherSchedules)) {
+      for (const day of DAYS) {
+        for (const block of BLOCKS) {
+          if (teacherSchedules[teacher][day][block] === null) {
+            teacherSchedules[teacher][day][block] = ['', 'OPEN'];
+          }
+        }
+      }
+    }
+
+    // Check if assignments changed
+    const newAssignments = new Set<string>();
+    for (const sh of shAssignments) {
+      if (sh.teacher && sh.day && sh.block) {
+        newAssignments.add(`${sh.group}|${sh.teacher}|${sh.day}|${sh.block}`);
+      }
+    }
+
+    const assignmentsChanged = oldAssignments.size !== newAssignments.size ||
+      [...oldAssignments].some(a => !newAssignments.has(a));
+
+    if (!assignmentsChanged && attempt < maxAttempts - 1) {
+      continue; // Try next seed
+    }
+
+    if (!assignmentsChanged) {
+      return {
+        success: true,
+        noChanges: true,
+        message: 'Study hall assignments unchanged (tried multiple arrangements)',
+      };
+    }
+
+    // Calculate stats
+    const fullTime = teachers.filter(t => t.status === 'full-time').map(t => t.name);
+    const totalBtb = fullTime.reduce((sum, t) => sum + countBackToBack(teacherSchedules, t), 0);
+
+    const newOption: ScheduleOption = {
+      optionNumber: option.optionNumber,
+      seed: option.seed,
+      backToBackIssues: totalBtb,
+      studyHallsPlaced: shPlaced,
+      teacherSchedules,
+      gradeSchedules,
+      studyHallAssignments: shAssignments,
+      teacherStats: calculateStats(teacherSchedules, teachers, fullTime),
+    };
+
     return {
       success: true,
-      noChanges: true,
-      message: 'Study hall assignments unchanged',
+      newOption,
     };
   }
 
-  const newOption: ScheduleOption = {
-    optionNumber: option.optionNumber,
-    seed: option.seed,
-    backToBackIssues: totalBtb,
-    studyHallsPlaced: shPlaced,
-    teacherSchedules,
-    gradeSchedules,
-    studyHallAssignments: shAssignments,
-    teacherStats: calculateStats(teacherSchedules, teachers, fullTime),
-  };
-
+  // All attempts failed
   return {
-    success: true,
-    newOption,
+    success: false,
+    message: 'Could not find a valid study hall arrangement',
   };
 }
