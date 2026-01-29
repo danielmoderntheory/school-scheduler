@@ -33,7 +33,7 @@ export async function PUT(
   const updates: Record<string, unknown> = {}
   if (body.selected_option !== undefined) updates.selected_option = body.selected_option
   if (body.notes !== undefined) updates.notes = body.notes
-  if (body.is_saved !== undefined) updates.is_saved = body.is_saved
+  if (body.is_starred !== undefined) updates.is_starred = body.is_starred
   if (body.options !== undefined) updates.options = body.options
 
   const { data, error } = await supabase

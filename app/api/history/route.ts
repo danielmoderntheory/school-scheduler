@@ -4,7 +4,7 @@ import { supabase } from "@/lib/supabase"
 export async function GET(request: NextRequest) {
   const searchParams = request.nextUrl.searchParams
   const quarterId = searchParams.get("quarter_id")
-  const includeUnsaved = searchParams.get("include_unsaved") === "true"
+  const starredOnly = searchParams.get("starred_only") === "true"
   const limit = searchParams.get("limit")
 
   let query = supabase
@@ -15,19 +15,21 @@ export async function GET(request: NextRequest) {
       generated_at,
       selected_option,
       notes,
-      is_saved,
+      is_starred,
       options,
       quarter:quarters(id, name)
     `)
+    // Order by starred first, then by date
+    .order("is_starred", { ascending: false })
     .order("generated_at", { ascending: false })
 
   if (quarterId) {
     query = query.eq("quarter_id", quarterId)
   }
 
-  // By default, only return saved schedules
-  if (!includeUnsaved) {
-    query = query.eq("is_saved", true)
+  // Optionally filter to starred only
+  if (starredOnly) {
+    query = query.eq("is_starred", true)
   }
 
   if (limit) {
@@ -56,7 +58,11 @@ export async function POST(request: NextRequest) {
       stats: {
         backToBackIssues: body.options[0]?.backToBackIssues || 0,
         studyHallsPlaced: body.options[0]?.studyHallsPlaced || 0,
+        quarter_name: body.quarter_name || null,
         classes_snapshot: body.classes_snapshot || [],
+        rules_snapshot: body.rules_snapshot || [],
+        teachers_snapshot: body.teachers_snapshot || [],
+        grades_snapshot: body.grades_snapshot || [],
         allSolutions: body.allSolutions || [], // Store all solutions for alternative browsing
       },
     })

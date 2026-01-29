@@ -5,9 +5,16 @@ import { Switch } from "@/components/ui/switch"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Checkbox } from "@/components/ui/checkbox"
-import { Loader2, ChevronDown, ChevronRight } from "lucide-react"
+import { Loader2, ChevronDown, ChevronRight, Lock } from "lucide-react"
 import { cn } from "@/lib/utils"
 import toast from "react-hot-toast"
+
+// Rules that are always enforced and cannot be toggled
+const LOCKED_RULES = new Set([
+  'no_teacher_conflicts',  // Teacher can't be in two places
+  'no_grade_conflicts',    // Grade can't have two classes at once
+  'teacher_availability',  // Must respect day/block availability
+])
 
 const ALL_GRADES = [
   "Kindergarten", "1st Grade", "2nd Grade", "3rd Grade", "4th Grade", "5th Grade",
@@ -193,23 +200,36 @@ interface CompactRuleCardProps {
 }
 
 function CompactRuleCard({ rule, onToggle, saving }: CompactRuleCardProps) {
+  const isLocked = LOCKED_RULES.has(rule.rule_key)
+
   return (
     <div className={cn(
       "flex items-center justify-between p-3 rounded-lg border bg-white",
-      !rule.enabled && "opacity-50"
+      !rule.enabled && !isLocked && "opacity-50"
     )}>
       <div className="min-w-0 flex-1 mr-3">
-        <div className="font-medium text-sm">{rule.name}</div>
+        <div className="font-medium text-sm flex items-center gap-2">
+          {rule.name}
+          {isLocked && (
+            <span title="Always enforced">
+              <Lock className="h-3.5 w-3.5 text-slate-400" />
+            </span>
+          )}
+        </div>
         <div className="text-xs text-muted-foreground truncate">{rule.description}</div>
       </div>
       <div className="flex items-center gap-2 flex-shrink-0">
         {saving && <Loader2 className="h-3 w-3 animate-spin" />}
-        <Switch
-          checked={rule.enabled}
-          onCheckedChange={onToggle}
-          disabled={saving}
-          className="scale-90"
-        />
+        {isLocked ? (
+          <span className="text-xs text-slate-400 italic">Always on</span>
+        ) : (
+          <Switch
+            checked={rule.enabled}
+            onCheckedChange={onToggle}
+            disabled={saving}
+            className="scale-90"
+          />
+        )}
       </div>
     </div>
   )

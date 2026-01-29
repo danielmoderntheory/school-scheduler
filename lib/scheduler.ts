@@ -239,7 +239,8 @@ function solveBacktracking(
   randomize: boolean = true,
   prefilledGradeSlots?: Map<string, Set<number>>,
   maxTimeMs: number = 5000, // 5 second timeout per attempt
-  deprioritizeTeachers?: Set<string> // Teachers to schedule last (for diversity)
+  deprioritizeTeachers?: Set<string>, // Teachers to schedule last (for diversity)
+  rules?: SchedulingRule[] // Scheduling rules to respect
 ): SolveResult {
   const assignment = new Map<number, number>();
   const startTime = Date.now();
@@ -279,20 +280,23 @@ function solveBacktracking(
   });
 
   function isValid(session: Session, slot: number): boolean {
-    // Check teacher conflict
+    // Check teacher conflict - ALWAYS enforced (teacher can't be in two places)
     if (teacherSlots.get(session.teacher)?.has(slot)) return false;
 
-    // Check grade conflicts
+    // Check grade conflicts - ALWAYS enforced (grade can't have two classes at once)
     const grades = parseGrades(session.grade);
     for (const g of grades) {
       if (gradeSlots.get(g)?.has(slot)) return false;
     }
 
-    // Check subject/day conflict (same subject can't appear twice on same day for same grade)
-    const day = slotToDay(slot);
-    for (const g of grades) {
-      const key = `${g}|${session.subject}`;
-      if (gradeSubjectDay.get(key)?.has(day)) return false;
+    // Check subject/day conflict - CAN be toggled via rules
+    // (same subject can't appear twice on same day for same grade)
+    if (isRuleEnabled(rules, 'no_duplicate_subjects')) {
+      const day = slotToDay(slot);
+      for (const g of grades) {
+        const key = `${g}|${session.subject}`;
+        if (gradeSubjectDay.get(key)?.has(day)) return false;
+      }
     }
 
     return true;
@@ -808,6 +812,12 @@ function calculateStats(
 // MAIN EXPORT
 // ============================================================================
 
+export interface SchedulingRule {
+  rule_key: string;
+  enabled: boolean;
+  config?: Record<string, unknown>;
+}
+
 export interface GeneratorOptions {
   numOptions?: number;
   numAttempts?: number;
@@ -817,12 +827,30 @@ export interface GeneratorOptions {
   lockedTeachers?: Record<string, TeacherSchedule>;
   /** Teachers who must be assigned study halls (had them in original schedule) */
   teachersNeedingStudyHalls?: string[];
+  /** Scheduling rules from database - controls which constraints are enforced */
+  rules?: SchedulingRule[];
+  /** Seed for reproducible randomization */
+  seed?: number;
 }
 
 export interface GeneratorResult {
   options: ScheduleOption[];
   status: 'success' | 'infeasible' | 'error';
   message?: string;
+}
+
+// Helper to check if a rule is enabled (defaults to true if rules not provided or rule not found)
+function isRuleEnabled(rules: SchedulingRule[] | undefined, ruleKey: string): boolean {
+  if (!rules) return true; // Default to enabled if no rules provided
+  const rule = rules.find(r => r.rule_key === ruleKey);
+  return rule ? rule.enabled : true; // Default to enabled if rule not found
+}
+
+// Helper to get rule config
+function getRuleConfig(rules: SchedulingRule[] | undefined, ruleKey: string): Record<string, unknown> | undefined {
+  if (!rules) return undefined;
+  const rule = rules.find(r => r.rule_key === ruleKey);
+  return rule?.config;
 }
 
 export async function generateSchedules(
@@ -835,8 +863,15 @@ export async function generateSchedules(
     numAttempts = 50,
     onProgress,
     lockedTeachers = {},
-    teachersNeedingStudyHalls = []
+    teachersNeedingStudyHalls = [],
+    rules = [],
+    seed
   } = options;
+
+  // Log which rules are enabled/disabled
+  if (rules.length > 0) {
+    console.log('[Scheduler] Rules:', rules.map(r => `${r.rule_key}:${r.enabled ? 'ON' : 'OFF'}`).join(', '));
+  }
 
   const lockedTeacherNames = new Set(Object.keys(lockedTeachers));
   const isRefinementMode = lockedTeacherNames.size > 0;
@@ -932,7 +967,8 @@ export async function generateSchedules(
       attempt > 0,
       isRefinementMode ? lockedGradeSlots : undefined,
       5000, // 5 second timeout
-      deprioritize.size > 0 ? deprioritize : undefined
+      deprioritize.size > 0 ? deprioritize : undefined,
+      rules
     );
 
     if (!result.assignment) {

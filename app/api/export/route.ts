@@ -29,29 +29,30 @@ export async function GET(request: NextRequest) {
   }
 
   const option = options[optionNum - 1] as Parameters<typeof generateXLSX>[0]
+  const shortId = generationId.slice(0, 8)
 
   if (format === "csv") {
     const csv = generateCSV(option, {
-      scheduleId: generationId,
+      scheduleId: `Rev ${optionNum} - ${shortId}`,
       generatedAt: generation.generated_at,
     })
     return new NextResponse(csv, {
       headers: {
         "Content-Type": "text/csv",
-        "Content-Disposition": `attachment; filename="schedule-option-${optionNum}.csv"`,
+        "Content-Disposition": `attachment; filename="schedule-rev-${optionNum}-${shortId}.csv"`,
       },
     })
   }
 
   // Default to XLSX
   const xlsx = generateXLSX(option, {
-    scheduleId: generationId,
+    scheduleId: `Rev ${optionNum} - ${shortId}`,
     generatedAt: generation.generated_at,
   })
   return new NextResponse(xlsx, {
     headers: {
       "Content-Type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-      "Content-Disposition": `attachment; filename="schedule-option-${optionNum}.xlsx"`,
+      "Content-Disposition": `attachment; filename="schedule-rev-${optionNum}-${shortId}.xlsx"`,
     },
   })
 }

@@ -44,7 +44,7 @@ function analyzeTeacherGrades(schedule: TeacherSchedule): { primaryGrade: number
           grades.push(gradeToNum(gradeStr))
         }
 
-        // Count each grade (split credit for combined grades)
+        // Count each grade (split credit for multi-grade classes)
         const creditPerGrade = 1 / grades.length
         for (const g of grades) {
           if (g < 99) {
@@ -248,7 +248,6 @@ export function generateXLSX(option: ScheduleOption, metadata?: ExportMetadata):
     ...(metadata?.scheduleId ? [["Schedule ID", metadata.scheduleId]] : []),
     ...(formattedDate ? [["Generated", formattedDate]] : []),
     [],
-    ["Option", option.optionNumber],
     ["Back-to-Back Issues", option.backToBackIssues],
     ["Study Halls Placed", `${option.studyHallsPlaced}/${option.studyHallAssignments?.length || 0}`],
     [],
@@ -447,7 +446,6 @@ export function generateCSV(option: ScheduleOption, metadata?: ExportMetadata): 
     lines.push(`Generated: ${formattedDate}`)
   }
   lines.push("")
-  lines.push(`Option: ${option.optionNumber}`)
   lines.push(`Back-to-Back Issues: ${option.backToBackIssues}`)
   lines.push(`Study Halls Placed: ${option.studyHallsPlaced}/${option.studyHallAssignments?.length || 0}`)
   lines.push("")

@@ -35,6 +35,7 @@ interface ScheduleGridProps {
   onPickUp?: (location: CellLocation) => void
   onPlace?: (location: CellLocation) => void
   onUnplace?: (blockId: string) => void
+  onDeselect?: () => void
 }
 
 export function ScheduleGrid({
@@ -58,6 +59,7 @@ export function ScheduleGrid({
   onPickUp,
   onPlace,
   onUnplace,
+  onDeselect,
 }: ScheduleGridProps) {
   function getCellContent(day: string, block: number): [string, string] | null {
     return schedule[day]?.[block] || null
@@ -155,24 +157,38 @@ export function ScheduleGrid({
         const placedBlock = floatingBlocks.find(b => b.id === placement.blockId)
         const isStudyHall = placedBlock?.subject === "Study Hall"
         const placementBg = isStudyHall ? "bg-blue-100" : "bg-green-50"
+        // If a block is selected, this is a valid target
+        if (selectedFloatingBlock) {
+          return cn(placementBg, "ring-2 ring-inset ring-emerald-400 cursor-pointer hover:ring-emerald-500")
+        }
         return cn(placementBg, "ring-2 ring-inset ring-indigo-400 cursor-pointer")
       }
 
       // Picked-up cell ghost styling - light indigo dashed
       if (pickedUp) {
-        // If a block is selected, show as clickable target
+        // If a block is selected, show as valid target
         if (selectedFloatingBlock) {
-          return cn("bg-indigo-50 border-2 border-dashed border-indigo-300 cursor-pointer hover:bg-indigo-100")
+          return cn("bg-emerald-50 border-2 border-dashed border-emerald-400 cursor-pointer hover:bg-emerald-100")
         }
         return cn("bg-indigo-50 border-2 border-dashed border-indigo-300")
       }
 
-      // Clickable cells - classes, study halls, and OPEN slots (when block selected)
       const cellType = getCellType(entry)
-      if (cellType === "class" || cellType === "study-hall") {
-        return cn(baseClass, "cursor-pointer hover:ring-2 hover:ring-inset hover:ring-indigo-300")
+
+      // When a floating block is selected, highlight valid targets and dim invalid ones
+      if (selectedFloatingBlock) {
+        // OPEN/empty cells are valid targets
+        if (cellType === "open" || cellType === "empty") {
+          return cn(baseClass, "ring-2 ring-inset ring-emerald-300 cursor-pointer hover:ring-emerald-500 hover:bg-emerald-50")
+        }
+        // Occupied cells are not valid - dim them
+        if (cellType === "class" || cellType === "study-hall") {
+          return cn(baseClass, "opacity-50 cursor-not-allowed")
+        }
       }
-      if (selectedFloatingBlock && (cellType === "open" || cellType === "empty")) {
+
+      // No block selected - classes and study halls are clickable to pick up
+      if (cellType === "class" || cellType === "study-hall") {
         return cn(baseClass, "cursor-pointer hover:ring-2 hover:ring-inset hover:ring-indigo-300")
       }
 
@@ -221,26 +237,21 @@ export function ScheduleGrid({
 
       // If a floating block is selected
       if (selectedFloatingBlock) {
-        // Clicking a placed block - unplace it first, then place selected there
-        if (placement && onUnplace && onPlace) {
-          onUnplace(placement.blockId)
-          onPlace({ teacher: name, day, block, grade, subject })
-          return
-        }
-
-        // Clicking a picked-up cell or OPEN slot - place the block there
-        if (isPickedUpCell(day, block) || cellType === "open" || cellType === "empty") {
+        // Clicking a picked-up cell (ghost), OPEN slot, or a placed block - place the block there
+        if (isPickedUpCell(day, block) || cellType === "open" || cellType === "empty" || placement) {
+          if (placement && onUnplace) {
+            // Unplace the existing block first
+            onUnplace(placement.blockId)
+          }
           if (onPlace) {
             onPlace({ teacher: name, day, block, grade, subject })
           }
           return
         }
 
-        // Clicking a class or study hall - place selected block there, pick up what's there
-        if ((cellType === "class" || cellType === "study-hall") && onPlace && onPickUp) {
-          // First place the floating block here
-          onPlace({ teacher: name, day, block, grade, subject })
-          // Then pick up what was there (this will be handled by the parent)
+        // Clicking an occupied cell (class or study hall) - deselect instead of swapping
+        if ((cellType === "class" || cellType === "study-hall") && onDeselect) {
+          onDeselect()
           return
         }
 

@@ -3,7 +3,6 @@
 import { useState, useEffect, useRef } from "react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
-import { Badge } from "@/components/ui/badge"
 import {
   Table,
   TableBody,
@@ -32,8 +31,6 @@ interface Grade {
   name: string
   display_name: string
   sort_order: number
-  is_combined: boolean
-  combined_grades: string[] | null
 }
 
 export default function GradesSettingsPage() {
@@ -127,10 +124,6 @@ export default function GradesSettingsPage() {
     }
   }
 
-  // Separate individual and combined grades
-  const individualGrades = grades.filter(g => !g.is_combined)
-  const combinedGrades = grades.filter(g => g.is_combined)
-
   if (loading) {
     return (
       <div className="flex items-center justify-center p-12">
@@ -169,7 +162,7 @@ export default function GradesSettingsPage() {
               </TableRow>
             </TableHeader>
             <TableBody>
-              {individualGrades.map((grade) => (
+              {grades.map((grade) => (
                 <TableRow key={grade.id}>
                   <TableCell className="text-muted-foreground">
                     {grade.sort_order}
@@ -242,77 +235,6 @@ export default function GradesSettingsPage() {
           </Table>
         </div>
       </div>
-
-      {/* Combined Grades (Legacy) */}
-      {combinedGrades.length > 0 && (
-        <div>
-          <h2 className="text-lg font-semibold mb-3">Combined Grades (Legacy)</h2>
-          <p className="text-sm text-muted-foreground mb-3">
-            These are pre-defined grade combinations. With the new multi-select system,
-            you can select multiple individual grades instead.
-          </p>
-          <div className="border rounded-lg">
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>Display Name</TableHead>
-                  <TableHead>Includes</TableHead>
-                  <TableHead className="w-[60px]"></TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {combinedGrades.map((grade) => (
-                  <TableRow key={grade.id}>
-                    <TableCell>
-                      <EditableText
-                        value={grade.display_name}
-                        onSave={(value) => updateGrade(grade.id, "display_name", value)}
-                        saving={savingId === grade.id}
-                      />
-                    </TableCell>
-                    <TableCell>
-                      <div className="flex flex-wrap gap-1">
-                        {grade.combined_grades?.map((g) => (
-                          <Badge key={g} variant="secondary" className="text-xs">
-                            {g}
-                          </Badge>
-                        ))}
-                      </div>
-                    </TableCell>
-                    <TableCell>
-                      <AlertDialog>
-                        <AlertDialogTrigger asChild>
-                          <Button variant="ghost" size="icon" className="h-8 w-8">
-                            <Trash2 className="h-4 w-4 text-muted-foreground hover:text-destructive" />
-                          </Button>
-                        </AlertDialogTrigger>
-                        <AlertDialogContent>
-                          <AlertDialogHeader>
-                            <AlertDialogTitle>Delete combined grade?</AlertDialogTitle>
-                            <AlertDialogDescription>
-                              This will permanently delete {grade.display_name}.
-                              Existing classes using this will need to be updated.
-                            </AlertDialogDescription>
-                          </AlertDialogHeader>
-                          <AlertDialogFooter>
-                            <AlertDialogCancel>Cancel</AlertDialogCancel>
-                            <AlertDialogAction
-                              onClick={() => deleteGrade(grade.id)}
-                              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
-                            >
-                              Delete
-                            </AlertDialogAction>
-                          </AlertDialogFooter>
-                        </AlertDialogContent>
-                      </AlertDialog>
-                    </TableCell>
-                  </TableRow>
-                ))}
-              </TableBody>
-            </Table>
-          </div>
-        </div>
-      )}
     </div>
   )
 }

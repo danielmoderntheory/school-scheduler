@@ -13,7 +13,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog"
-import { ChevronDown, ChevronUp, Loader2, Plus, X, Clock, Users, Upload, Download, Check } from "lucide-react"
+import { ChevronDown, ChevronUp, Loader2, Plus, X, Clock, Users, Upload, Download, Check, History, Star } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { GradeSelector, formatGradeDisplay } from "@/components/GradeSelector"
 import toast from "react-hot-toast"
@@ -25,7 +25,7 @@ interface LastRun {
   quarterName: string
   studyHallsPlaced: number
   backToBackIssues: number
-  saved: boolean
+  starred: boolean
 }
 
 interface Teacher {
@@ -39,8 +39,6 @@ interface Grade {
   name: string
   display_name: string
   sort_order: number
-  is_combined?: boolean
-  combined_grades?: string[] // Array of grade names like ['6th', '7th']
 }
 
 interface Subject {
@@ -104,10 +102,23 @@ export default function ClassesPage() {
   const [lastRun, setLastRun] = useState<LastRun | null>(null)
   const [showImportDialog, setShowImportDialog] = useState(false)
   const [showExportDialog, setShowExportDialog] = useState(false)
+  const [showImportFromHistoryDialog, setShowImportFromHistoryDialog] = useState(false)
+  const [historyItems, setHistoryItems] = useState<Array<{
+    id: string
+    generated_at: string
+    is_starred: boolean
+    notes: string | null
+    quarter: { id: string; name: string }
+    stats?: { classes_snapshot?: unknown[] }
+  }>>([])
+  const [loadingHistory, setLoadingHistory] = useState(false)
   const [importText, setImportText] = useState("")
   const [importing, setImporting] = useState(false)
   const [replaceAll, setReplaceAll] = useState(false)
   const [undoImportData, setUndoImportData] = useState<ClassEntry[] | null>(null)
+  const [showCotaughtDetails, setShowCotaughtDetails] = useState(false)
+  const [importWarnings, setImportWarnings] = useState<string[]>([])
+  const undoToastId = useRef<string | null>(null)
   const pendingDeletes = useRef<Map<string, NodeJS.Timeout>>(new Map())
 
   useEffect(() => {
@@ -145,9 +156,14 @@ export default function ClassesPage() {
         const classesRes = await fetch(`/api/classes?quarter_id=${active.id}`)
         const classesData = await classesRes.json()
         // Sort by teacher name on initial load to group classes by teacher
-        const sorted = [...classesData].sort((a: ClassEntry, b: ClassEntry) =>
-          a.teacher.name.localeCompare(b.teacher.name)
-        )
+        // Classes without teachers sort to the top for visibility
+        const sorted = [...classesData].sort((a: ClassEntry, b: ClassEntry) => {
+          const aName = a.teacher?.name || ''
+          const bName = b.teacher?.name || ''
+          if (!aName && bName) return -1
+          if (aName && !bName) return 1
+          return aName.localeCompare(bName)
+        })
         setClasses(sorted)
 
         // Fetch last saved generation for this quarter from the database
@@ -169,7 +185,7 @@ export default function ClassesPage() {
                   quarterName: active.name,
                   studyHallsPlaced: bestOption?.studyHallsPlaced ?? 0,
                   backToBackIssues: bestOption?.backToBackIssues ?? 0,
-                  saved: lastGen.is_saved ?? false,
+                  starred: lastGen.is_starred ?? false,
                 })
               }
             }
@@ -214,13 +230,17 @@ export default function ClassesPage() {
         const updated = await res.json()
         setClasses((prev) => prev.map((c) => (c.id === id ? updated : c)))
 
+        // Dismiss previous undo toast
+        if (undoToastId.current) toast.dismiss(undoToastId.current)
+
         // Show undo toast
-        toast((t) => (
+        const toastId = toast((t) => (
           <div className="flex items-center gap-3">
             <span className="text-sm">Row {rowNumber} updated</span>
             <button
               onClick={async () => {
                 toast.dismiss(t.id)
+                undoToastId.current = null
                 // Revert to previous value
                 const revertRes = await fetch(`/api/classes/${id}`, {
                   method: "PUT",
@@ -237,7 +257,8 @@ export default function ClassesPage() {
               Undo
             </button>
           </div>
-        ), { duration: 10000, icon: <Check className="h-4 w-4 text-emerald-600" /> })
+        ), { duration: 60000, icon: <Check className="h-4 w-4 text-emerald-600" /> })
+        undoToastId.current = toastId
       } else {
         // Revert on error
         setClasses(previousClasses)
@@ -270,13 +291,17 @@ export default function ClassesPage() {
           prev.map((c) => (c.id === classId ? { ...c, restrictions: updated } : c))
         )
 
+        // Dismiss previous undo toast
+        if (undoToastId.current) toast.dismiss(undoToastId.current)
+
         // Show undo toast
-        toast((t) => (
+        const toastId = toast((t) => (
           <div className="flex items-center gap-3">
             <span className="text-sm">Row {rowNumber} restrictions updated</span>
             <button
               onClick={async () => {
                 toast.dismiss(t.id)
+                undoToastId.current = null
                 // Revert to previous restrictions
                 const revertRes = await fetch(`/api/restrictions/${classId}`, {
                   method: "PUT",
@@ -295,7 +320,8 @@ export default function ClassesPage() {
               Undo
             </button>
           </div>
-        ), { duration: 10000, icon: <Check className="h-4 w-4 text-emerald-600" /> })
+        ), { duration: 60000, icon: <Check className="h-4 w-4 text-emerald-600" /> })
+        undoToastId.current = toastId
       }
     } catch (error) {
       toast.error("Failed to save restrictions")
@@ -339,8 +365,11 @@ export default function ClassesPage() {
     // Remove from UI immediately
     setClasses((prev) => prev.filter((c) => c.id !== id))
 
+    // Dismiss previous undo toast
+    if (undoToastId.current) toast.dismiss(undoToastId.current)
+
     // Show toast with undo
-    toast((t) => (
+    const toastId = toast((t) => (
       <div className="flex items-center gap-3">
         <span className="text-sm">Row {rowNumber} deleted</span>
         <button
@@ -370,13 +399,15 @@ export default function ClassesPage() {
               return newClasses
             })
             toast.dismiss(t.id)
+            undoToastId.current = null
           }}
           className="px-2 py-1 text-sm font-medium text-violet-600 hover:text-violet-800 hover:bg-violet-50 rounded transition-colors"
         >
           Undo
         </button>
       </div>
-    ), { duration: 10000, icon: <Check className="h-4 w-4 text-emerald-600" /> })
+    ), { duration: 60000, icon: <Check className="h-4 w-4 text-emerald-600" /> })
+    undoToastId.current = toastId
 
     // Schedule actual deletion after 5 seconds
     const timeout = setTimeout(async () => {
@@ -554,14 +585,6 @@ export default function ClassesPage() {
       startIndex = 1
     }
 
-    // Build a map from grade name to grade ID for resolving combined grades
-    const gradeNameToId = new Map<string, string>()
-    for (const g of grades) {
-      if (!g.is_combined) {
-        gradeNameToId.set(g.name, g.id)
-      }
-    }
-
     // Parse all rows first for validation
     interface ParsedRow {
       line: number
@@ -570,8 +593,7 @@ export default function ClassesPage() {
       subjectName: string
       daysPerWeek: number
       restrictionStr: string
-      grade: Grade
-      gradeIds: string[]  // Individual grade IDs (expanded from combined grades)
+      gradeIds: string[]
       isElective: boolean
     }
 
@@ -590,30 +612,77 @@ export default function ClassesPage() {
         continue
       }
 
-      // Find grade (must exist - we don't auto-create grades)
-      const grade = grades.find(g => g.display_name.toLowerCase() === gradeStr.toLowerCase())
-      if (!grade) {
+      // Parse grade string - supports:
+      // - Single: "Kindergarten", "1st Grade", "1st", "6th Grade Elective"
+      // - Range: "1st-3rd", "1st-3rd Grades", "6th-11th Elective", "K-3rd Grades"
+      const isElective = gradeStr.toLowerCase().includes('elective')
+
+      // Strip "Elective" and "Grades" suffixes for parsing
+      let gradeClean = gradeStr
+        .replace(/\s*elective\s*/gi, '')
+        .replace(/\s*grades\s*/gi, '')
+        .replace(/\s*grade\s*/gi, '')
+        .trim()
+
+      let gradeIds: string[] = []
+
+      // Helper to match grade string to grade object
+      const matchGrade = (str: string) => {
+        const s = str.toLowerCase()
+        // Check for Pre-K variants
+        if (s === 'prek' || s === 'pre-k' || s === 'pre-kindergarten' || s === 'prekindergarten') {
+          return grades.find(g =>
+            g.name.toLowerCase().includes('pre-k') ||
+            g.name.toLowerCase().includes('prek') ||
+            g.name.toLowerCase() === 'pre-kindergarten'
+          )
+        }
+        // Check for Kindergarten variants
+        if (s === 'k' || s === 'kinder') {
+          return grades.find(g => g.name.toLowerCase() === 'kindergarten')
+        }
+        // Standard matching - prefix match on name or display_name
+        return grades.find(g =>
+          g.name.toLowerCase().startsWith(s) ||
+          g.display_name.toLowerCase().startsWith(s)
+        )
+      }
+
+      // Check for range pattern like "1st-3rd" or "K-3rd"
+      const rangeMatch = gradeClean.match(/^(\S+)\s*-\s*(\S+)$/)
+      if (rangeMatch) {
+        const [, startStr, endStr] = rangeMatch
+
+        // Find start and end grades
+        const startGrade = matchGrade(startStr)
+        const endGrade = matchGrade(endStr)
+
+        if (startGrade && endGrade) {
+          // Get all grades within the sort_order range
+          const minOrder = Math.min(startGrade.sort_order, endGrade.sort_order)
+          const maxOrder = Math.max(startGrade.sort_order, endGrade.sort_order)
+          gradeIds = grades
+            .filter(g => g.sort_order >= minOrder && g.sort_order <= maxOrder)
+            .sort((a, b) => a.sort_order - b.sort_order)
+            .map(g => g.id)
+        }
+      } else {
+        // Single grade - try exact match first, then use helper
+        const exactMatch = grades.find(g =>
+          g.display_name.toLowerCase() === gradeStr.replace(/\s*elective\s*/gi, '').trim().toLowerCase()
+        )
+        const grade = exactMatch || matchGrade(gradeClean)
+        if (grade) {
+          gradeIds = [grade.id]
+        }
+      }
+
+      if (gradeIds.length === 0) {
         validationErrors.push(`Line ${lineNum}: Grade not found: "${gradeStr}"`)
         continue
       }
 
-      // Resolve grade_ids - for combined grades, get individual grade IDs
-      let gradeIds: string[] = []
-      if (grade.is_combined && grade.combined_grades) {
-        // Map combined grade names to IDs
-        for (const gradeName of grade.combined_grades) {
-          const gradeId = gradeNameToId.get(gradeName)
-          if (gradeId) {
-            gradeIds.push(gradeId)
-          }
-        }
-      } else {
-        // Single grade
-        gradeIds = [grade.id]
-      }
-
       const daysPerWeek = parseInt(daysStr) || 1
-      const isElective = gradeStr.toLowerCase().includes('elective')
 
       parsedRows.push({
         line: lineNum,
@@ -622,7 +691,6 @@ export default function ClassesPage() {
         subjectName,
         daysPerWeek,
         restrictionStr: restrictionStr || '',
-        grade,
         gradeIds,
         isElective,
       })
@@ -635,20 +703,25 @@ export default function ClassesPage() {
       return
     }
 
+    // Validation passed - close modal and show progress toast
+    setShowImportDialog(false)
+    const loadingToastId = toast.loading(`Importing ${parsedRows.length} classes...`)
+
     // If replaceAll is checked, delete all existing classes first
     if (replaceAll && classes.length > 0) {
       try {
+        toast.loading('Deleting existing classes...', { id: loadingToastId })
         const res = await fetch(`/api/classes?quarter_id=${activeQuarter.id}`, {
           method: "DELETE",
         })
         if (!res.ok) {
           setImporting(false)
-          toast.error("Failed to delete existing classes")
+          toast.error("Failed to delete existing classes", { id: loadingToastId })
           return
         }
       } catch {
         setImporting(false)
-        toast.error("Failed to delete existing classes")
+        toast.error("Failed to delete existing classes", { id: loadingToastId })
         return
       }
     }
@@ -656,12 +729,15 @@ export default function ClassesPage() {
     // Now import all validated rows
     let created = 0
     let errors = 0
+    const total = parsedRows.length
 
     // Track created teachers/subjects to avoid duplicates within import
     const createdTeachers = new Map<string, Teacher>()
     const createdSubjects = new Map<string, Subject>()
 
-    for (const row of parsedRows) {
+    for (let i = 0; i < parsedRows.length; i++) {
+      const row = parsedRows[i]
+      toast.loading(`Importing classes... ${i + 1}/${total}`, { id: loadingToastId })
       // Find or create teacher
       let teacher: Teacher | null | undefined = teachers.find(t => t.name.toLowerCase() === row.teacherName.toLowerCase())
         || createdTeachers.get(row.teacherName.toLowerCase())
@@ -688,7 +764,7 @@ export default function ClassesPage() {
         }
       }
 
-      // Create class - use gradeIds for proper combined grade support
+      // Create class - use gradeIds for multi-grade class support
       const classData = {
         quarter_id: activeQuarter.id,
         teacher_id: teacher.id,
@@ -734,32 +810,44 @@ export default function ClassesPage() {
     // Reload data
     await loadData()
 
+    // Dismiss loading toast
+    toast.dismiss(loadingToastId)
+
     setImporting(false)
-    setShowImportDialog(false)
     setImportText("")
     setReplaceAll(false)
 
     if (created > 0) {
+      // Dismiss any previous undo toast
+      if (undoToastId.current) {
+        toast.dismiss(undoToastId.current)
+      }
+
       // Store for undo
       setUndoImportData(oldClasses)
 
       // Show success toast with undo option
-      toast((t) => (
-        <div className="flex items-center gap-3">
-          <span className="text-sm">
-            Imported {created} classes{errors > 0 ? ` (${errors} errors)` : ''}
-          </span>
-          <button
-            onClick={() => {
-              toast.dismiss(t.id)
-              handleUndoImport(oldClasses)
-            }}
-            className="px-2 py-1 text-sm font-medium text-violet-600 hover:text-violet-800 hover:bg-violet-50 rounded transition-colors"
-          >
-            Undo
-          </button>
-        </div>
-      ), { duration: 10000, icon: <Check className="h-4 w-4 text-emerald-600" /> })
+      const toastId = toast(
+        (t) => (
+          <div className="flex items-center gap-3">
+            <span className="text-sm">
+              Imported {created} classes{errors > 0 ? ` (${errors} errors)` : ''}
+            </span>
+            <button
+              onClick={() => {
+                toast.dismiss(t.id)
+                undoToastId.current = null
+                handleUndoImport(oldClasses)
+              }}
+              className="px-2 py-1 text-sm font-medium text-violet-600 hover:text-violet-800 hover:bg-violet-50 rounded transition-colors"
+            >
+              Undo
+            </button>
+          </div>
+        ),
+        { duration: 60000, icon: <Check className="h-4 w-4 text-emerald-600" /> }
+      )
+      undoToastId.current = toastId
     } else if (errors > 0) {
       toast.error(`Import failed with ${errors} errors`)
     }
@@ -825,35 +913,294 @@ export default function ClassesPage() {
     }
   }
 
-  function getGradeDisplayForExport(cls: ClassEntry): string {
-    // For classes with multiple grades (electives or combined grades),
-    // find the matching combined grade display name
-    const gradeIds = cls.grade_ids?.length ? cls.grade_ids : [cls.grade_id]
+  async function loadHistoryForImport() {
+    setLoadingHistory(true)
+    try {
+      // Fetch history - already ordered by starred first, then by date
+      const res = await fetch('/api/history?limit=20')
+      if (res.ok) {
+        const data = await res.json()
+        // Filter to only items that have classes_snapshot
+        // Need to fetch full data for each to get stats
+        const starred: typeof historyItems = []
+        const unstarred: typeof historyItems = []
 
-    if (gradeIds.length > 1) {
-      // Look for a combined grade that matches these grade IDs
-      const combinedGrade = grades.find(g => {
-        if (!g.is_combined || !g.combined_grades) return false
-        // Check if this combined grade includes all the grades in gradeIds
-        const gradeNames = gradeIds.map(id => grades.find(gr => gr.id === id)?.name).filter(Boolean)
-        // Check if combined_grades matches our grade names (order doesn't matter)
-        if (g.combined_grades.length !== gradeNames.length) return false
-        return g.combined_grades.every(name => gradeNames.includes(name))
-      })
-      if (combinedGrade) {
-        return combinedGrade.display_name
+        for (const item of data) {
+          // Limit: all starred + max 3 unstarred
+          if (!item.is_starred && unstarred.length >= 3) continue
+
+          const detailRes = await fetch(`/api/history/${item.id}`)
+          if (detailRes.ok) {
+            const detail = await detailRes.json()
+            if (detail.stats?.classes_snapshot?.length > 0) {
+              const itemWithStats = { ...item, stats: detail.stats }
+              if (item.is_starred) {
+                starred.push(itemWithStats)
+              } else {
+                unstarred.push(itemWithStats)
+              }
+            }
+          }
+        }
+        setHistoryItems([...starred, ...unstarred])
       }
+    } catch (error) {
+      toast.error('Failed to load history')
+    } finally {
+      setLoadingHistory(false)
+    }
+  }
+
+  async function handleImportFromHistory(historyId: string, replace: boolean) {
+    const historyItem = historyItems.find(h => h.id === historyId)
+    if (!historyItem?.stats?.classes_snapshot) {
+      toast.error('No class data found in this schedule')
+      return
     }
 
-    // For electives without proper grade_ids, check if is_elective is set
-    if (cls.is_elective) {
-      // Try to find the elective grade
-      const electiveGrade = grades.find(g => g.display_name.includes('Elective'))
-      if (electiveGrade) return electiveGrade.display_name
+    // Close modal and show loading toast
+    setShowImportFromHistoryDialog(false)
+    setImporting(true)
+    const loadingToastId = toast.loading('Importing classes...')
+
+    const oldClasses = [...classes]
+    const snapshot = historyItem.stats.classes_snapshot as Array<{
+      teacher_id?: string
+      teacher_name?: string
+      grade_id?: string
+      grade_ids?: string[]
+      // Full grades array with id, name, display_name for fallback matching
+      grades?: Array<{ id: string; name: string; display_name: string }>
+      subject_id?: string
+      subject_name?: string
+      days_per_week: number
+      is_elective?: boolean
+      restrictions?: Array<{ restriction_type: string; value: unknown }>
+    }>
+
+    const total = snapshot.length
+
+    try {
+      // Delete existing classes if replacing (use bulk delete)
+      if (replace && classes.length > 0) {
+        toast.loading('Deleting existing classes...', { id: loadingToastId })
+        await fetch(`/api/classes?quarter_id=${activeQuarter?.id}`, { method: 'DELETE' })
+        toast.loading('Importing classes...', { id: loadingToastId })
+      }
+
+      let created = 0
+      let incomplete = 0
+
+      // Track missing items grouped by type
+      const missingTeachers = new Map<string, string[]>() // teacher name -> array of "Grade - Subject"
+      const missingGrades: string[] = []
+      const missingSubjects: string[] = []
+
+      for (let i = 0; i < snapshot.length; i++) {
+        const cls = snapshot[i]
+        // Update progress immediately
+        toast.loading(`Importing classes... ${i + 1}/${total}`, { id: loadingToastId })
+
+        // Build class context for warning messages using grades array if available
+        const snapshotGradeNames = cls.grades?.map(g => g.display_name).join(', ')
+        const gradeContext = snapshotGradeNames || 'Unknown Grade'
+        const subjectContext = cls.subject_name || 'Unknown Subject'
+        const teacherContext = cls.teacher_name || 'Unknown Teacher'
+        const classContext = `${gradeContext} - ${subjectContext}`
+
+        // Find teacher by name (null if not found)
+        const teacher = teachers.find(t => t.name === cls.teacher_name)
+        if (!teacher && cls.teacher_name) {
+          const existing = missingTeachers.get(cls.teacher_name) || []
+          existing.push(classContext)
+          missingTeachers.set(cls.teacher_name, existing)
+        }
+
+        // Find subject by name (or create it, null if fails)
+        let subject = subjects.find(s => s.name === cls.subject_name)
+        if (!subject && cls.subject_name) {
+          const subjectRes = await fetch('/api/subjects', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name: cls.subject_name })
+          })
+          if (subjectRes.ok) {
+            subject = await subjectRes.json()
+            setSubjects(prev => [...prev, subject!])
+          } else {
+            missingSubjects.push(`Subject "${cls.subject_name}" for ${teacherContext} - ${gradeContext}`)
+          }
+        }
+
+        // Find grades - try UUID first, then name-based fallback
+        let gradeId: string | null = null
+        let gradeIds: string[] | null = null
+
+        // Strategy 1: Match by UUID from grade_ids array
+        if (cls.grade_ids && cls.grade_ids.length > 0) {
+          const matchedGrades: string[] = []
+          for (const gid of cls.grade_ids) {
+            const found = grades.find(gr => gr.id === gid)
+            if (found) {
+              matchedGrades.push(found.id)
+            }
+          }
+          if (matchedGrades.length > 0) {
+            gradeId = matchedGrades[0]
+            gradeIds = matchedGrades
+          }
+        }
+
+        // Strategy 2: If UUID match failed but we have grades array with names, match by name
+        if (!gradeIds && cls.grades && cls.grades.length > 0) {
+          const matchedGrades: string[] = []
+          for (const snapshotGrade of cls.grades) {
+            // Match by display_name or name
+            const found = grades.find(gr =>
+              gr.display_name === snapshotGrade.display_name ||
+              gr.name === snapshotGrade.name
+            )
+            if (found) {
+              matchedGrades.push(found.id)
+            }
+          }
+          if (matchedGrades.length > 0) {
+            gradeId = matchedGrades[0]
+            gradeIds = matchedGrades
+          } else {
+            missingGrades.push(`Grades "${snapshotGradeNames}" for ${teacherContext} - ${subjectContext}`)
+          }
+        }
+
+        // Strategy 3: Fallback to single grade_id
+        if (!gradeIds && cls.grade_id) {
+          const found = grades.find(gr => gr.id === cls.grade_id)
+          if (found) {
+            gradeId = found.id
+            gradeIds = [found.id]
+          } else {
+            missingGrades.push(`Grade for ${teacherContext} - ${subjectContext}`)
+          }
+        }
+
+        if (!gradeId && !gradeIds) {
+          missingGrades.push(`No grade data for ${teacherContext} - ${subjectContext}`)
+        }
+
+        // Track if this class is incomplete
+        const isIncomplete = !teacher || !subject || !gradeId
+        if (isIncomplete) incomplete++
+
+        // Create the class (with null for missing fields)
+        const classRes = await fetch('/api/classes', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            teacher_id: teacher?.id || null,
+            grade_id: gradeId,
+            grade_ids: gradeIds,
+            subject_id: subject?.id || null,
+            quarter_id: activeQuarter?.id,
+            days_per_week: cls.days_per_week,
+            is_elective: cls.is_elective || false,
+            restrictions: cls.restrictions || []
+          })
+        })
+
+        if (classRes.ok) {
+          created++
+        }
+      }
+
+      // Reload data
+      await loadData()
+      setImporting(false)
+      toast.dismiss(loadingToastId)
+
+      if (created > 0) {
+        // Dismiss any previous undo toast
+        if (undoToastId.current) {
+          toast.dismiss(undoToastId.current)
+        }
+
+        setUndoImportData(oldClasses)
+
+        // Build warnings for display in notice banner
+        const warnings: string[] = []
+
+        // Add teacher warnings (one line per teacher with their classes)
+        for (const [teacherName, classList] of missingTeachers) {
+          warnings.push(`Teacher "${teacherName}": ${classList.join(', ')}`)
+        }
+
+        // Add grade warnings
+        warnings.push(...missingGrades)
+
+        // Add subject warnings
+        warnings.push(...missingSubjects)
+
+        if (warnings.length > 0) {
+          setImportWarnings(warnings)
+          console.warn('Missing data:', warnings)
+        }
+
+        const toastId = toast(
+          (t) => (
+            <div className="flex items-center gap-3">
+              <span className="text-sm">
+                Imported {created} classes{incomplete > 0 ? ` (${incomplete} need attention)` : ''}
+              </span>
+              <button
+                onClick={() => {
+                  toast.dismiss(t.id)
+                  undoToastId.current = null
+                  handleUndoImport(oldClasses)
+                }}
+                className="px-2 py-1 text-sm font-medium text-violet-600 hover:text-violet-800 hover:bg-violet-50 rounded transition-colors"
+              >
+                Undo
+              </button>
+            </div>
+          ),
+          {
+            duration: 60000,
+            icon: <Check className="h-4 w-4 text-emerald-600" />,
+          }
+        )
+        undoToastId.current = toastId
+      } else {
+        toast.error('Import failed - no classes created')
+      }
+    } catch (error) {
+      console.error('Import from history error:', error)
+      toast.dismiss(loadingToastId)
+      toast.error('Failed to import from history')
+      setImporting(false)
+    }
+  }
+
+  function getGradeDisplayForExport(cls: ClassEntry): string {
+    const gradeIds = cls.grade_ids?.length ? cls.grade_ids : (cls.grade_id ? [cls.grade_id] : [])
+    const gradeObjects = gradeIds
+      .map(id => grades.find(g => g.id === id))
+      .filter((g): g is Grade => Boolean(g))
+      .sort((a, b) => a.sort_order - b.sort_order)
+
+    let display = ''
+
+    if (gradeObjects.length === 0) {
+      display = cls.grade?.display_name || ''
+    } else if (gradeObjects.length === 1) {
+      display = gradeObjects[0].display_name
+    } else {
+      // Multi-grade: show range like "1st-3rd Grades"
+      const first = gradeObjects[0].name.replace(' Grade', '')
+      const last = gradeObjects[gradeObjects.length - 1].name.replace(' Grade', '')
+      display = `${first}-${last} Grades`
     }
 
-    // Single grade or fallback
-    return cls.grade?.display_name || ''
+    // Append "Elective" suffix if applicable
+    return cls.is_elective ? `${display} Elective` : display
   }
 
   function generateExportData(): string[] {
@@ -862,17 +1209,21 @@ export default function ClassesPage() {
     // Header
     lines.push(['Teacher', 'Grade', 'Subject', 'Days per Week', 'Restrictions'].join('\t'))
 
-    // Sort classes by teacher name, then grade
+    // Sort classes by teacher name, then grade (incomplete classes first)
     const sortedClasses = [...classes].sort((a, b) => {
-      const teacherCompare = a.teacher.name.localeCompare(b.teacher.name)
+      const aName = a.teacher?.name || ''
+      const bName = b.teacher?.name || ''
+      if (!aName && bName) return -1
+      if (aName && !bName) return 1
+      const teacherCompare = aName.localeCompare(bName)
       if (teacherCompare !== 0) return teacherCompare
       return (a.grade?.sort_order || 0) - (b.grade?.sort_order || 0)
     })
 
     for (const cls of sortedClasses) {
-      const teacher = cls.teacher.name
-      const grade = getGradeDisplayForExport(cls)
-      const subject = cls.subject.name
+      const teacher = cls.teacher?.name || '(no teacher)'
+      const grade = getGradeDisplayForExport(cls) || '(no grade)'
+      const subject = cls.subject?.name || '(no subject)'
       const daysPerWeek = cls.days_per_week.toString()
       const restrictions = formatRestrictionsForExport(cls.restrictions || [])
 
@@ -965,49 +1316,95 @@ export default function ClassesPage() {
   // Check if lastRun is for the current quarter
   const showLastRunNotice = lastRun && activeQuarter && lastRun.quarterId === activeQuarter.id
 
-  // Detect co-taught classes (same grade+subject, different teachers)
+  // Count incomplete classes (missing teacher, grade, or subject)
+  const incompleteCount = classes.filter(c => !c.teacher_id || !c.grade_id || !c.subject_id).length
+
+  // Detect co-taught classes (same grade-set + subject, different teachers)
   // These must be scheduled at the same time slot
   const cotaughtClassIds = new Set<string>()
-  const gradeSubjectTeachers = new Map<string, { classIds: string[], teachers: Set<string> }>()
+
+  // Group by full grade set + subject (not per individual grade)
+  const gradeSetSubjectTeachers = new Map<string, {
+    classIds: string[],
+    teachers: Set<string>,
+    gradeIds: string[],
+    subjectId: string
+  }>()
 
   for (const cls of classes) {
+    // Skip incomplete classes (missing grade or subject)
+    if (!cls.grade_id && !cls.grade_ids?.length) continue
+    if (!cls.subject_id) continue
+
     // Get grade IDs - use grades array if available, otherwise single grade_id
-    const gradeIds = cls.grade_ids?.length ? cls.grade_ids : [cls.grade_id]
-    for (const gradeId of gradeIds) {
-      const key = `${gradeId}:${cls.subject_id}`
-      if (!gradeSubjectTeachers.has(key)) {
-        gradeSubjectTeachers.set(key, { classIds: [], teachers: new Set() })
-      }
-      const entry = gradeSubjectTeachers.get(key)!
-      entry.classIds.push(cls.id)
-      entry.teachers.add(cls.teacher_id)
+    const gradeIds = cls.grade_ids?.length ? [...cls.grade_ids].sort() : [cls.grade_id]
+    const key = `${gradeIds.join(',')}:${cls.subject_id}`
+
+    if (!gradeSetSubjectTeachers.has(key)) {
+      gradeSetSubjectTeachers.set(key, {
+        classIds: [],
+        teachers: new Set(),
+        gradeIds: gradeIds.filter((id): id is string => Boolean(id)),
+        subjectId: cls.subject_id
+      })
     }
+    const entry = gradeSetSubjectTeachers.get(key)!
+    entry.classIds.push(cls.id)
+    if (cls.teacher_id) entry.teachers.add(cls.teacher_id)
   }
 
-  // Mark classes as co-taught if multiple teachers for same grade+subject
-  for (const { classIds, teachers } of gradeSubjectTeachers.values()) {
-    if (teachers.size > 1) {
+  // Mark classes as co-taught if multiple teachers for same grade-set + subject
+  // Also build summary for alert
+  const cotaughtGroups: Array<{ gradeDisplay: string, subjectName: string, teacherNames: string[] }> = []
+  for (const { classIds, teachers: teacherIds, gradeIds, subjectId } of gradeSetSubjectTeachers.values()) {
+    if (teacherIds.size > 1) {
       classIds.forEach(id => cotaughtClassIds.add(id))
+      // Build display info - format as range (e.g., "6th-11th") if multiple grades
+      const gradeObjects = gradeIds
+        .map(gid => grades.find(g => g.id === gid))
+        .filter((g): g is Grade => Boolean(g))
+        .sort((a, b) => a.sort_order - b.sort_order)
+
+      let gradeDisplay = ''
+      if (gradeObjects.length === 1) {
+        gradeDisplay = gradeObjects[0].display_name
+      } else if (gradeObjects.length > 1) {
+        const first = gradeObjects[0].display_name.replace(' Grade', '')
+        const last = gradeObjects[gradeObjects.length - 1].display_name.replace(' Grade', '')
+        gradeDisplay = `${first}-${last} Grades`
+      }
+
+      const subject = subjects.find(s => s.id === subjectId)
+      const teacherNamesList = Array.from(teacherIds).map(tid => {
+        const teacher = teachers.find((t: Teacher) => t.id === tid)
+        return teacher?.name || 'Unknown'
+      })
+      if (gradeDisplay && subject) {
+        cotaughtGroups.push({
+          gradeDisplay,
+          subjectName: subject.name,
+          teacherNames: teacherNamesList
+        })
+      }
     }
   }
 
   // Build maps for grade lookups
   const gradeNameToDisplay = new Map<string, string>()
-  const individualGrades = grades.filter(g => !g.is_combined)
-  for (const g of individualGrades) {
+  for (const g of grades) {
     gradeNameToDisplay.set(g.name, g.display_name)
   }
 
   // Calculate grade capacity (sessions per grade)
   // Co-taught classes only count once, study hall adds 1 for grades 6-11
-  // Combined grades (6th-7th, 10th-11th, 6th-11th) expand to individual grades
+  // Multi-grade classes (via grade_ids array) are counted for each individual grade
   // Electives: count each unique time slot once per grade (students pick one elective per slot)
   const gradeCapacity = new Map<string, number>()
   const seenGradeSubject = new Set<string>() // For co-taught dedup
   const seenElectiveSlots = new Set<string>() // For elective slot dedup: "gradeName:day:block"
 
   for (const cls of classes) {
-    // Use cls.grades if available (already expanded), otherwise look up
+    // Use cls.grades if available (already contains individual Grade objects), otherwise look up single grade
     const classGrades = cls.grades?.length
       ? cls.grades
       : [cls.grade].filter(Boolean)
@@ -1015,46 +1412,31 @@ export default function ClassesPage() {
     for (const grade of classGrades) {
       if (!grade) continue
 
-      // If this is a combined grade, expand to individual grades
-      // Otherwise just use this grade directly
-      const targetDisplayNames: string[] = []
+      const displayName = grade.display_name
 
-      if (grade.is_combined && grade.combined_grades?.length) {
-        // Expand combined grade to individual grades
-        for (const gradeName of grade.combined_grades) {
-          const displayName = gradeNameToDisplay.get(gradeName)
-          if (displayName) targetDisplayNames.push(displayName)
-        }
-      } else if (!grade.is_combined) {
-        // Individual grade - use directly
-        targetDisplayNames.push(grade.display_name)
-      }
+      if (cls.is_elective) {
+        // For electives, count each unique time slot once per grade
+        // Get fixed slots from restrictions
+        const fixedSlots = cls.restrictions
+          ?.filter(r => r.restriction_type === 'fixed_slot')
+          .map(r => r.value as { day: string; block: number }) || []
 
-      for (const displayName of targetDisplayNames) {
-        if (cls.is_elective) {
-          // For electives, count each unique time slot once per grade
-          // Get fixed slots from restrictions
-          const fixedSlots = cls.restrictions
-            ?.filter(r => r.restriction_type === 'fixed_slot')
-            .map(r => r.value as { day: string; block: number }) || []
-
-          for (const slot of fixedSlots) {
-            const slotKey = `${displayName}:${slot.day}:${slot.block}`
-            if (seenElectiveSlots.has(slotKey)) continue
-            seenElectiveSlots.add(slotKey)
-
-            const current = gradeCapacity.get(displayName) || 0
-            gradeCapacity.set(displayName, current + 1)
-          }
-        } else {
-          // Regular class - skip if we've already counted this grade+subject (co-taught)
-          const key = `${displayName}:${cls.subject_id}`
-          if (seenGradeSubject.has(key)) continue
-          seenGradeSubject.add(key)
+        for (const slot of fixedSlots) {
+          const slotKey = `${displayName}:${slot.day}:${slot.block}`
+          if (seenElectiveSlots.has(slotKey)) continue
+          seenElectiveSlots.add(slotKey)
 
           const current = gradeCapacity.get(displayName) || 0
-          gradeCapacity.set(displayName, current + cls.days_per_week)
+          gradeCapacity.set(displayName, current + 1)
         }
+      } else {
+        // Regular class - skip if we've already counted this grade+subject (co-taught)
+        const key = `${displayName}:${cls.subject_id}`
+        if (seenGradeSubject.has(key)) continue
+        seenGradeSubject.add(key)
+
+        const current = gradeCapacity.get(displayName) || 0
+        gradeCapacity.set(displayName, current + cls.days_per_week)
       }
     }
   }
@@ -1065,18 +1447,35 @@ export default function ClassesPage() {
     gradeCapacity.set(gradeName, current + 1)
   }
 
-  // Sort grades for display (show only individual grades, not combined)
+  // Sort grades for display (exclude electives from capacity display)
   const sortedGrades = grades
-    .filter(g => !g.is_combined && !g.display_name.includes('Elective'))
+    .filter(g => !g.display_name.includes('Elective'))
     .sort((a, b) => a.sort_order - b.sort_order)
 
   return (
     <div className="p-6 max-w-6xl mx-auto">
       <div className="flex items-center justify-between mb-4">
-        <div className="text-sm text-muted-foreground">
-          {activeQuarter.name} &middot; {classes.length} classes
+        <div className="text-sm text-muted-foreground flex items-center gap-2">
+          <span>{activeQuarter.name} &middot; {classes.length} classes</span>
+          {incompleteCount > 0 && (
+            <span className="text-amber-600 font-medium">
+              ({incompleteCount} incomplete)
+            </span>
+          )}
         </div>
         <div className="flex items-center gap-2">
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() => {
+              setShowImportFromHistoryDialog(true)
+              loadHistoryForImport()
+            }}
+            className="h-7 text-xs gap-1"
+          >
+            <History className="h-3 w-3" />
+            Import from Schedule
+          </Button>
           <Button
             size="sm"
             variant="outline"
@@ -1144,6 +1543,83 @@ export default function ClassesPage() {
         </DialogContent>
       </Dialog>
 
+      {/* Import from History Dialog */}
+      <Dialog open={showImportFromHistoryDialog} onOpenChange={setShowImportFromHistoryDialog}>
+        <DialogContent className="max-w-lg">
+          <DialogHeader>
+            <DialogTitle>Import Classes from Schedule</DialogTitle>
+            <DialogDescription>
+              Select a previously generated schedule to import its class configuration
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-2 max-h-80 overflow-y-auto">
+            {loadingHistory ? (
+              <div className="flex items-center justify-center py-8">
+                <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
+              </div>
+            ) : historyItems.length === 0 ? (
+              <p className="text-sm text-muted-foreground py-4 text-center">
+                No schedules with class data found
+              </p>
+            ) : (
+              historyItems.map((item) => (
+                <div
+                  key={item.id}
+                  className="flex items-center justify-between p-3 rounded-lg border hover:bg-slate-50 transition-colors"
+                >
+                  <div className="flex items-center gap-2 min-w-0">
+                    {item.is_starred && <Star className="h-3.5 w-3.5 text-amber-500 fill-amber-500 flex-shrink-0" />}
+                    <div className="min-w-0">
+                      <div className="text-sm font-medium truncate">
+                        {item.quarter?.name}
+                        <span className="text-muted-foreground font-normal ml-2">
+                          {new Date(item.generated_at).toLocaleDateString()}
+                        </span>
+                      </div>
+                      <div className="text-xs text-muted-foreground">
+                        {(item.stats?.classes_snapshot as unknown[])?.length || 0} classes
+                        {item.notes && <span className="ml-1">· {item.notes}</span>}
+                      </div>
+                    </div>
+                  </div>
+                  <div className="flex gap-1 flex-shrink-0">
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="h-7 text-xs"
+                      disabled={importing}
+                      onClick={() => handleImportFromHistory(item.id, false)}
+                    >
+                      Add
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="h-7 text-xs text-amber-600 hover:text-amber-700 hover:bg-amber-50"
+                      disabled={importing}
+                      onClick={() => handleImportFromHistory(item.id, true)}
+                    >
+                      Replace
+                    </Button>
+                  </div>
+                </div>
+              ))
+            )}
+          </div>
+          {importing && (
+            <div className="flex items-center justify-center gap-2 py-2 text-sm text-muted-foreground">
+              <Loader2 className="h-4 w-4 animate-spin" />
+              Importing classes...
+            </div>
+          )}
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setShowImportFromHistoryDialog(false)}>
+              Cancel
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
       {/* Import Dialog */}
       <Dialog open={showImportDialog} onOpenChange={setShowImportDialog}>
         <DialogContent className="max-w-2xl">
@@ -1159,7 +1635,8 @@ export default function ClassesPage() {
               placeholder={`Teacher\tGrade\tSubject\tDays per Week\tRestrictions
 New Teacher\tKindergarten\tEnglish\t4\t
 Carolina\t1st Grade\tMath\t4\t
-Phil\t6th-11th Elective\tSpanish 101\t1\tMon Block 5`}
+Phil\t6th-8th\tScience\t3\t
+Maria\t6th-11th Elective\tSpanish 101\t1\tMon Block 5`}
               value={importText}
               onChange={(e) => setImportText(e.target.value)}
             />
@@ -1202,39 +1679,78 @@ Phil\t6th-11th Elective\tSpanish 101\t1\tMon Block 5`}
         </DialogContent>
       </Dialog>
 
-      {/* Grade Capacity Indicator */}
-      <div className="mb-4 flex items-center gap-1.5 px-3 py-2 rounded-lg bg-slate-50 border border-slate-200 overflow-x-auto">
-        <span className="text-xs text-slate-500 mr-2 flex-shrink-0">Blocks:</span>
-        {sortedGrades.map(grade => {
-          const count = gradeCapacity.get(grade.display_name) || 0
-          const isFull = count === 25
-          const isOver = count > 25
-          const isUnder = count < 25
-          const shortName = grade.display_name.replace(' Grade', '').replace('Kindergarten', 'K')
+      {/* Grade Capacity & Status Indicator */}
+      <div className="mb-4 rounded-lg bg-slate-50 border border-slate-200">
+        <div className="flex items-center gap-1.5 px-3 py-2 overflow-x-auto">
+          <span className="text-xs text-slate-500 mr-2 flex-shrink-0">Blocks:</span>
+          {sortedGrades.map(grade => {
+            const count = gradeCapacity.get(grade.display_name) || 0
+            const isFull = count === 25
+            const isOver = count > 25
+            const isUnder = count < 25
+            const shortName = grade.display_name.replace(' Grade', '').replace('Kindergarten', 'K')
 
-          return (
-            <div
-              key={grade.id}
-              title={`${grade.display_name}: ${count}/25 blocks${STUDY_HALL_GRADES.includes(grade.display_name) ? ' (includes study hall)' : ''}`}
-              className={cn(
-                "flex items-center gap-1 px-2 py-0.5 rounded text-xs font-medium flex-shrink-0",
-                isOver && "bg-red-100 text-red-700",
-                isFull && "bg-emerald-100 text-emerald-700",
-                isUnder && "bg-amber-50 text-amber-600"
+            return (
+              <div
+                key={grade.id}
+                title={`${grade.display_name}: ${count}/25 blocks${STUDY_HALL_GRADES.includes(grade.display_name) ? ' (includes study hall)' : ''}`}
+                className={cn(
+                  "flex items-center gap-1 px-2 py-0.5 rounded text-xs font-medium flex-shrink-0",
+                  isOver && "bg-red-100 text-red-700",
+                  isFull && "bg-emerald-100 text-emerald-700",
+                  isUnder && "bg-amber-50 text-amber-600"
+                )}
+              >
+                <span>{shortName}</span>
+                <span className={cn(
+                  "text-[10px]",
+                  isOver && "text-red-500",
+                  isFull && "text-emerald-500",
+                  isUnder && "text-amber-400"
+                )}>
+                  {count}
+                </span>
+              </div>
+            )
+          })}
+
+          {/* Co-taught indicator */}
+          {cotaughtGroups.length > 0 && (
+            <>
+              <div className="w-px h-4 bg-slate-300 mx-2 flex-shrink-0" />
+              <button
+                onClick={() => setShowCotaughtDetails(!showCotaughtDetails)}
+                className="flex items-center gap-1.5 px-2 py-0.5 rounded text-xs font-medium bg-purple-100 text-purple-700 hover:bg-purple-200 transition-colors flex-shrink-0"
+                title="Co-taught classes will be scheduled at the same time"
+              >
+                <Users className="h-3 w-3" />
+                <span>{cotaughtGroups.length} co-taught</span>
+                {showCotaughtDetails ? <ChevronUp className="h-3 w-3" /> : <ChevronDown className="h-3 w-3" />}
+              </button>
+            </>
+          )}
+        </div>
+
+        {/* Expanded co-taught details */}
+        {showCotaughtDetails && cotaughtGroups.length > 0 && (
+          <div className="px-3 py-2 border-t border-slate-200 bg-purple-50 text-sm text-purple-700">
+            <p className="text-xs font-medium mb-1">Co-taught classes (scheduled at same time):</p>
+            <ul className="space-y-0.5 text-xs">
+              {cotaughtGroups.slice(0, 3).map((group, i) => (
+                <li key={i}>
+                  <span className="font-medium">{group.gradeDisplay} - {group.subjectName}:</span>{" "}
+                  {group.teacherNames.join(", ")}
+                </li>
+              ))}
+              {cotaughtGroups.length > 3 && (
+                <li className="text-purple-500">...and {cotaughtGroups.length - 3} more</li>
               )}
-            >
-              <span>{shortName}</span>
-              <span className={cn(
-                "text-[10px]",
-                isOver && "text-red-500",
-                isFull && "text-emerald-500",
-                isUnder && "text-amber-400"
-              )}>
-                {count}
-              </span>
-            </div>
-          )
-        })}
+            </ul>
+            <p className="mt-2 text-purple-500 text-xs">
+              If these should be separate classes, add a subject variant (e.g., &ldquo;Math A&rdquo; / &ldquo;Math B&rdquo;).
+            </p>
+          </div>
+        )}
       </div>
 
       {showLastRunNotice && (
@@ -1247,6 +1763,31 @@ Phil\t6th-11th Elective\tSpanish 101\t1\tMon Block 5`}
           <Link href={`/history/${lastRun.historyId}`} className="ml-auto text-sky-600 hover:text-sky-800 font-medium">
             View results →
           </Link>
+        </div>
+      )}
+
+
+      {/* Import warnings notice */}
+      {importWarnings.length > 0 && (
+        <div className="mb-4 bg-amber-50 border border-amber-200 rounded-lg p-3">
+          <div className="flex items-start justify-between gap-3">
+            <div className="flex-1">
+              <div className="text-sm font-medium text-amber-800 mb-1">
+                Some data wasn&apos;t found during import
+              </div>
+              <div className="text-xs text-amber-700 space-y-0.5">
+                {importWarnings.map((warning, i) => (
+                  <div key={i}>• {warning}</div>
+                ))}
+              </div>
+            </div>
+            <button
+              onClick={() => setImportWarnings([])}
+              className="text-amber-600 hover:text-amber-800 p-1"
+            >
+              <X className="h-4 w-4" />
+            </button>
+          </div>
         </div>
       )}
 
@@ -1325,9 +1866,17 @@ function ClassRow({
   onCreateSubject,
   onCreateTeacher,
 }: ClassRowProps) {
+  const isIncomplete = !cls.teacher_id || !cls.grade_id || !cls.subject_id
   return (
-    <tr className="border-b border-slate-100 hover:bg-blue-50/50 group">
-      <td className="px-3 py-1 text-slate-400 text-xs w-10">{index}</td>
+    <tr className={cn(
+      "border-b border-slate-100 hover:bg-blue-50/50 group",
+      isIncomplete && "bg-amber-50/50"
+    )}>
+      <td className="px-3 py-1 text-slate-400 text-xs w-10">
+        {isIncomplete ? (
+          <span className="text-amber-500" title="Missing required fields">!</span>
+        ) : index}
+      </td>
       <td className="px-1 py-1">
         <SelectCell
           value={cls.teacher_id}

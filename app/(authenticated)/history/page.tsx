@@ -3,14 +3,6 @@
 import { useState, useEffect } from "react"
 import Link from "next/link"
 import { Button } from "@/components/ui/button"
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from "@/components/ui/table"
 import { Badge } from "@/components/ui/badge"
 import {
   AlertDialog,
@@ -23,7 +15,7 @@ import {
   AlertDialogTitle,
   AlertDialogTrigger,
 } from "@/components/ui/alert-dialog"
-import { Loader2, Trash2, Download, Check } from "lucide-react"
+import { Loader2, Trash2, Download, Star, ChevronRight } from "lucide-react"
 import { Checkbox } from "@/components/ui/checkbox"
 import toast from "react-hot-toast"
 
@@ -33,23 +25,23 @@ interface Generation {
   generated_at: string
   selected_option: number | null
   notes: string | null
-  is_saved: boolean
+  is_starred: boolean
+  options?: unknown[]
   quarter: { id: string; name: string }
 }
 
 export default function HistoryPage() {
   const [generations, setGenerations] = useState<Generation[]>([])
   const [loading, setLoading] = useState(true)
-  const [showUnsaved, setShowUnsaved] = useState(false)
+  const [showAll, setShowAll] = useState(false)
 
   useEffect(() => {
     loadGenerations()
-  }, [showUnsaved])
+  }, [showAll])
 
   async function loadGenerations() {
     try {
-      const url = showUnsaved ? "/api/history?include_unsaved=true" : "/api/history"
-      const res = await fetch(url)
+      const res = await fetch("/api/history")
       if (res.ok) {
         const data = await res.json()
         setGenerations(data)
@@ -75,32 +67,38 @@ export default function HistoryPage() {
     }
   }
 
-  async function unsaveGeneration(id: string) {
+  async function unstarGeneration(id: string) {
     try {
       const res = await fetch(`/api/history/${id}`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ is_saved: false, notes: null }),
+        body: JSON.stringify({ is_starred: false }),
       })
       if (res.ok) {
-        // If not showing unsaved, remove from list; otherwise update it
-        if (!showUnsaved) {
-          setGenerations((prev) => prev.filter((g) => g.id !== id))
-        } else {
-          setGenerations((prev) => prev.map((g) => g.id === id ? { ...g, is_saved: false, notes: null } : g))
-        }
-        toast.success("Schedule unsaved")
+        setGenerations((prev) => prev.map((g) => g.id === id ? { ...g, is_starred: false } : g))
+        toast.success("Schedule unstarred")
       } else {
-        toast.error("Failed to unsave schedule")
+        toast.error("Failed to unstar schedule")
       }
     } catch (error) {
-      toast.error("Failed to unsave schedule")
+      toast.error("Failed to unstar schedule")
     }
   }
 
   function formatDate(dateString: string) {
     return new Date(dateString).toLocaleString()
   }
+
+  function getOptionLabel(gen: Generation) {
+    if (!gen.selected_option) return null
+    const optionsCount = Array.isArray(gen.options) ? gen.options.length : 1
+    if (gen.selected_option === 1 && optionsCount === 1) return "Primary"
+    if (gen.selected_option === 1) return "Primary"
+    return `Revision ${gen.selected_option}`
+  }
+
+  const starredGenerations = generations.filter(g => g.is_starred)
+  const nonStarredGenerations = generations.filter(g => !g.is_starred)
 
   if (loading) {
     return (
@@ -121,15 +119,15 @@ export default function HistoryPage() {
         </div>
         <div className="flex items-center gap-2">
           <Checkbox
-            id="show-unsaved"
-            checked={showUnsaved}
-            onCheckedChange={(checked) => setShowUnsaved(checked === true)}
+            id="show-all"
+            checked={showAll}
+            onCheckedChange={(checked) => setShowAll(checked === true)}
           />
           <label
-            htmlFor="show-unsaved"
+            htmlFor="show-all"
             className="text-sm text-muted-foreground cursor-pointer"
           >
-            Show all (including unsaved)
+            Show non-starred schedules
           </label>
         </div>
       </div>
@@ -138,55 +136,112 @@ export default function HistoryPage() {
         <div className="text-center py-12 text-muted-foreground">
           <p>No schedules generated yet.</p>
           <Link href="/generate">
-            <Button className="mt-4">Go to Schedules</Button>
+            <Button className="mt-4">Generate Schedule</Button>
           </Link>
         </div>
       ) : (
-        <div className="border rounded-lg">
-          <Table>
-            <TableHeader>
-              <TableRow>
-                <TableHead>Schedule</TableHead>
-                <TableHead className="w-[100px]">Status</TableHead>
-                <TableHead className="w-[100px]">Actions</TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {generations.map((gen) => (
-                <TableRow key={gen.id} className="group">
-                  <TableCell className="py-3">
-                    <Link href={`/history/${gen.id}`} className="block hover:bg-slate-50 -m-3 p-3 rounded-lg transition-colors">
-                      <div className="flex items-center gap-3">
-                        <div className="flex items-center gap-2">
-                          <Badge variant="outline">{gen.quarter?.name}</Badge>
-                          {gen.selected_option && (
-                            <span className="text-xs text-muted-foreground">Option {gen.selected_option}</span>
-                          )}
-                        </div>
-                        <span className="text-xs text-muted-foreground">
+        <div className="space-y-8">
+          {/* Starred Schedules Section */}
+          {starredGenerations.length > 0 && (
+            <div>
+              <h2 className="text-lg font-semibold mb-3 flex items-center gap-2">
+                <Star className="h-5 w-5 text-amber-500 fill-amber-500" />
+                Starred Schedules
+              </h2>
+              <div className="space-y-2">
+                {starredGenerations.map((gen) => (
+                  <div
+                    key={gen.id}
+                    className="flex items-center gap-3 p-4 rounded-lg border border-amber-200 bg-amber-50 hover:bg-amber-100 transition-colors"
+                  >
+                    <Star className="h-5 w-5 text-amber-500 fill-amber-500 flex-shrink-0" />
+                    <Link href={`/history/${gen.id}`} className="flex-1 min-w-0">
+                      <div className="flex items-center gap-3 flex-wrap">
+                        <Badge variant="outline" className="bg-white">{gen.quarter?.name}</Badge>
+                        {getOptionLabel(gen) && (
+                          <span className="text-xs font-medium text-amber-700">{getOptionLabel(gen)}</span>
+                        )}
+                        <span className="text-xs text-amber-600">
                           {formatDate(gen.generated_at)}
                         </span>
-                        <span className="text-xs text-slate-300">{gen.id.slice(0, 8)}</span>
                         {gen.notes && (
-                          <span className="text-xs text-slate-500 truncate max-w-[300px]" title={gen.notes}>
+                          <span className="text-sm text-amber-800 truncate max-w-[300px]" title={gen.notes}>
                             — {gen.notes}
                           </span>
                         )}
                       </div>
                     </Link>
-                  </TableCell>
-                  <TableCell>
-                    {gen.is_saved ? (
-                      <span className="inline-flex items-center gap-1 text-emerald-600 text-sm font-medium">
-                        <Check className="h-3.5 w-3.5" />
-                        Saved
-                      </span>
-                    ) : (
-                      <span className="text-xs text-muted-foreground">—</span>
-                    )}
-                  </TableCell>
-                  <TableCell>
-                    <div className="flex gap-1">
+                    <div className="flex gap-1 flex-shrink-0">
+                      <a
+                        href={`/api/export?generation_id=${gen.id}&option=${gen.selected_option || 1}&format=xlsx`}
+                        download
+                      >
+                        <Button variant="ghost" size="icon" className="h-8 w-8 hover:bg-amber-200">
+                          <Download className="h-4 w-4" />
+                        </Button>
+                      </a>
+                      <AlertDialog>
+                        <AlertDialogTrigger asChild>
+                          <Button variant="ghost" size="icon" className="h-8 w-8 hover:bg-amber-200">
+                            <Trash2 className="h-4 w-4 text-amber-600 hover:text-amber-800" />
+                          </Button>
+                        </AlertDialogTrigger>
+                        <AlertDialogContent>
+                          <AlertDialogHeader>
+                            <AlertDialogTitle>Unstar this schedule?</AlertDialogTitle>
+                            <AlertDialogDescription>
+                              This will remove the star from this schedule. The schedule will still be accessible.
+                            </AlertDialogDescription>
+                          </AlertDialogHeader>
+                          <AlertDialogFooter>
+                            <AlertDialogCancel>Cancel</AlertDialogCancel>
+                            <AlertDialogAction onClick={() => unstarGeneration(gen.id)}>
+                              Unstar
+                            </AlertDialogAction>
+                          </AlertDialogFooter>
+                        </AlertDialogContent>
+                      </AlertDialog>
+                    </div>
+                    <Link href={`/history/${gen.id}`}>
+                      <ChevronRight className="h-5 w-5 text-amber-400" />
+                    </Link>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Non-starred Schedules Section */}
+          {showAll && nonStarredGenerations.length > 0 && (
+            <div>
+              <h2 className="text-lg font-semibold mb-3 text-slate-600">
+                Recent Schedules
+              </h2>
+              <div className="space-y-2">
+                {nonStarredGenerations.map((gen) => (
+                  <div
+                    key={gen.id}
+                    className="flex items-center gap-3 p-4 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 transition-colors"
+                  >
+                    <Star className="h-5 w-5 text-slate-300 flex-shrink-0" />
+                    <Link href={`/history/${gen.id}`} className="flex-1 min-w-0">
+                      <div className="flex items-center gap-3 flex-wrap">
+                        <Badge variant="outline">{gen.quarter?.name}</Badge>
+                        {getOptionLabel(gen) && (
+                          <span className="text-xs font-medium text-slate-500">{getOptionLabel(gen)}</span>
+                        )}
+                        <span className="text-xs text-muted-foreground">
+                          {formatDate(gen.generated_at)}
+                        </span>
+                        <span className="text-xs text-slate-300">{gen.id.slice(0, 8)}</span>
+                        {gen.notes && (
+                          <span className="text-sm text-slate-500 truncate max-w-[300px]" title={gen.notes}>
+                            — {gen.notes}
+                          </span>
+                        )}
+                      </div>
+                    </Link>
+                    <div className="flex gap-1 flex-shrink-0">
                       <a
                         href={`/api/export?generation_id=${gen.id}&option=${gen.selected_option || 1}&format=xlsx`}
                         download
@@ -203,32 +258,46 @@ export default function HistoryPage() {
                         </AlertDialogTrigger>
                         <AlertDialogContent>
                           <AlertDialogHeader>
-                            <AlertDialogTitle>
-                              {gen.is_saved ? "Unsave schedule?" : "Delete schedule?"}
-                            </AlertDialogTitle>
+                            <AlertDialogTitle>Delete this schedule?</AlertDialogTitle>
                             <AlertDialogDescription>
-                              {gen.is_saved
-                                ? "This will remove the schedule from your saved list. You can still find it by enabling 'Show all'."
-                                : "This will permanently delete this generated schedule."}
+                              This will permanently delete this generated schedule.
                             </AlertDialogDescription>
                           </AlertDialogHeader>
                           <AlertDialogFooter>
                             <AlertDialogCancel>Cancel</AlertDialogCancel>
                             <AlertDialogAction
-                              onClick={() => gen.is_saved ? unsaveGeneration(gen.id) : deleteGeneration(gen.id)}
-                              className={gen.is_saved ? "" : "bg-destructive text-destructive-foreground hover:bg-destructive/90"}
+                              onClick={() => deleteGeneration(gen.id)}
+                              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
                             >
-                              {gen.is_saved ? "Unsave" : "Delete"}
+                              Delete
                             </AlertDialogAction>
                           </AlertDialogFooter>
                         </AlertDialogContent>
                       </AlertDialog>
                     </div>
-                  </TableCell>
-                </TableRow>
-              ))}
-            </TableBody>
-          </Table>
+                    <Link href={`/history/${gen.id}`}>
+                      <ChevronRight className="h-5 w-5 text-slate-400" />
+                    </Link>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Empty states */}
+          {starredGenerations.length === 0 && (
+            <div className="text-center py-8 text-muted-foreground border border-dashed rounded-lg">
+              <Star className="h-8 w-8 mx-auto mb-2 text-slate-300" />
+              <p>No starred schedules yet.</p>
+              <p className="text-sm mt-1">Star a schedule to keep it easily accessible.</p>
+            </div>
+          )}
+
+          {showAll && nonStarredGenerations.length === 0 && starredGenerations.length > 0 && (
+            <div className="text-center py-6 text-muted-foreground">
+              <p className="text-sm">All schedules are starred!</p>
+            </div>
+          )}
         </div>
       )}
     </div>
