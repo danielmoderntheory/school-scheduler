@@ -185,8 +185,8 @@ export function ScheduleStats({
           </div>
         </div>
 
-        {/* Summary Stats - Shown when expanded on screen, hidden on print */}
-        <div className={`grid grid-cols-2 md:grid-cols-4 gap-4 no-print ${!expanded ? 'hidden' : ''}`}>
+        {/* Summary Stats - Shown when expanded on screen and print */}
+        <div className={`grid grid-cols-2 md:grid-cols-4 gap-4 ${expanded ? 'print-stats' : 'hidden'}`}>
           {/* Classes Scheduled */}
           <div className={`border rounded-lg p-4 ${unscheduledClasses > 0 ? 'border-red-300 bg-red-50' : 'border-emerald-200 bg-emerald-50'}`}>
             <div className="text-sm text-slate-600">

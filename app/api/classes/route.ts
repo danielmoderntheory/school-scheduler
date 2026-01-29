@@ -64,18 +64,19 @@ export async function POST(request: NextRequest) {
   const body = await request.json()
 
   // Support both grade_id (single, legacy) and grade_ids (array, new)
+  // All FKs are nullable to support draft/incomplete classes
   const insertData: {
     quarter_id: string
-    teacher_id: string
-    subject_id: string
+    teacher_id?: string | null
+    subject_id?: string | null
     days_per_week: number
-    grade_id?: string
-    grade_ids?: string[]
+    grade_id?: string | null
+    grade_ids?: string[] | null
     is_elective?: boolean
   } = {
     quarter_id: body.quarter_id,
-    teacher_id: body.teacher_id,
-    subject_id: body.subject_id,
+    teacher_id: body.teacher_id || null,
+    subject_id: body.subject_id || null,
     days_per_week: body.days_per_week || 1,
     is_elective: body.is_elective || false,
   }
@@ -87,6 +88,9 @@ export async function POST(request: NextRequest) {
   } else if (body.grade_id) {
     insertData.grade_id = body.grade_id
     insertData.grade_ids = [body.grade_id]
+  } else {
+    insertData.grade_id = null
+    insertData.grade_ids = null
   }
 
   const { data, error } = await supabase
@@ -109,6 +113,24 @@ export async function POST(request: NextRequest) {
       )
     }
     return NextResponse.json({ error: error.message }, { status: 500 })
+  }
+
+  // Create restrictions if provided
+  if (body.restrictions && Array.isArray(body.restrictions) && body.restrictions.length > 0) {
+    const restrictionsToInsert = body.restrictions.map((r: { restriction_type: string; value: unknown }) => ({
+      class_id: data.id,
+      restriction_type: r.restriction_type,
+      value: r.value,
+    }))
+
+    const { data: restrictionsData, error: restrictionsError } = await supabase
+      .from("restrictions")
+      .insert(restrictionsToInsert)
+      .select()
+
+    if (!restrictionsError && restrictionsData) {
+      data.restrictions = restrictionsData
+    }
   }
 
   // Fetch grades for the grade_ids

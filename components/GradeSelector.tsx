@@ -2,7 +2,7 @@
 
 import { useState, useRef, useEffect } from "react"
 import { cn } from "@/lib/utils"
-import { ChevronDown, AlertTriangle } from "lucide-react"
+import { ChevronDown, AlertTriangle, Check } from "lucide-react"
 
 interface Grade {
   id: string
@@ -10,8 +10,6 @@ interface Grade {
   display_name: string
   sort_order: number
 }
-
-type GradeType = "single" | "merged" | "elective"
 
 interface GradeSelectorProps {
   grades: Grade[]
@@ -33,15 +31,13 @@ export function GradeSelector({
   compact = false,
 }: GradeSelectorProps) {
   const [open, setOpen] = useState(false)
+  const [multiSelect, setMultiSelect] = useState(selectedIds.length > 1)
   const containerRef = useRef<HTMLDivElement>(null)
 
   // Filter to only individual grades (K-11)
   const individualGrades = grades
     .filter(g => g.sort_order >= 0 && g.sort_order <= 11)
     .sort((a, b) => a.sort_order - b.sort_order)
-
-  // Upper grades for electives (6th-11th)
-  const upperGrades = individualGrades.filter(g => g.sort_order >= 6)
 
   useEffect(() => {
     function handleClickOutside(e: MouseEvent) {
@@ -53,72 +49,67 @@ export function GradeSelector({
     return () => document.removeEventListener("mousedown", handleClickOutside)
   }, [])
 
+  // Sync multiSelect state with selectedIds
+  useEffect(() => {
+    if (selectedIds.length > 1 && !multiSelect) {
+      setMultiSelect(true)
+    }
+  }, [selectedIds.length, multiSelect])
+
   const selectedGrades = individualGrades
     .filter(g => selectedIds.includes(g.id))
     .sort((a, b) => a.sort_order - b.sort_order)
 
-  // Determine current type based on selection
-  function getCurrentType(): GradeType {
-    if (isElective) return "elective"
-    if (selectedGrades.length <= 1) return "single"
-    return "merged"
-  }
-
-  const currentType = getCurrentType()
-
-  // Format display string - always show actual grades
+  // Format display string
   function formatDisplay(): string {
     if (selectedGrades.length === 0) return placeholder
 
-    if (isElective) {
-      return "6th-11th Elective"
-    }
-
     if (selectedGrades.length === 1) {
-      return selectedGrades[0].display_name
+      const base = selectedGrades[0].display_name
+      return isElective ? `${base} Elective` : base
     }
 
-    // For merged grades, show range like "6th-7th"
-    const first = selectedGrades[0].name.replace(' Grade', '')
-    const last = selectedGrades[selectedGrades.length - 1].name.replace(' Grade', '')
-    return `${first}-${last}`
-  }
+    // For multiple grades, show range like "1st-3rd Grades"
+    const first = selectedGrades[0].display_name.replace(' Grade', '')
+    const last = selectedGrades[selectedGrades.length - 1].display_name.replace(' Grade', '')
+    const range = `${first}-${last} Grades`
 
-  function handleTypeChange(type: GradeType) {
-    if (type === "single") {
-      // Keep first selected grade or pick first available
-      const firstId = selectedIds[0] || individualGrades[0]?.id
-      onChange(firstId ? [firstId] : [], false)
-    } else if (type === "merged") {
-      // Default to first two grades if not enough selected
-      if (selectedIds.length < 2) {
-        const first = individualGrades[0]?.id
-        const second = individualGrades[1]?.id
-        onChange([first, second].filter(Boolean), false)
-      } else {
-        onChange(selectedIds, false)
-      }
-    } else if (type === "elective") {
-      // Auto-select 6th-11th
-      const upperIds = upperGrades.map(g => g.id)
-      onChange(upperIds, true)
-    }
+    return isElective ? `${range} Elective` : range
   }
 
   function handleSingleGradeChange(gradeId: string) {
-    onChange([gradeId], false)
-    setOpen(false)
+    onChange([gradeId], isElective)
   }
 
-  function toggleMergedGrade(gradeId: string) {
+  function toggleGrade(gradeId: string) {
     if (selectedIds.includes(gradeId)) {
-      // Don't allow less than 2 for merged
-      if (selectedIds.length > 2) {
-        onChange(selectedIds.filter(id => id !== gradeId), false)
+      // Don't allow less than 1 grade
+      if (selectedIds.length > 1) {
+        onChange(selectedIds.filter(id => id !== gradeId), isElective)
       }
     } else {
-      onChange([...selectedIds, gradeId], false)
+      onChange([...selectedIds, gradeId], isElective)
     }
+  }
+
+  function handleMultiSelectToggle(enabled: boolean) {
+    setMultiSelect(enabled)
+    if (enabled) {
+      // Switch to multi-select: keep current or default to first two
+      if (selectedIds.length < 2) {
+        const first = individualGrades[0]?.id
+        const second = individualGrades[1]?.id
+        onChange([first, second].filter(Boolean), isElective)
+      }
+    } else {
+      // Switch to single: keep first selected
+      const firstId = selectedIds[0] || individualGrades[0]?.id
+      onChange(firstId ? [firstId] : [], isElective)
+    }
+  }
+
+  function handleElectiveToggle(enabled: boolean) {
+    onChange(selectedIds, enabled)
   }
 
   const showElectiveWarning = isElective && !hasRestrictions
@@ -146,21 +137,21 @@ export function GradeSelector({
       </button>
 
       {open && (
-        <div className="absolute z-50 top-full left-0 mt-1 bg-popover border rounded-md shadow-lg p-3 min-w-[260px]">
-          {/* Grade Type Selection */}
-          <div className="space-y-2">
+        <div className="absolute z-50 top-full left-0 mt-1 bg-popover border rounded-md shadow-lg p-3 min-w-[280px]">
+          {/* Grade Selection Mode */}
+          <div className="space-y-3">
             {/* Single Grade */}
             <label className="flex items-start gap-2 cursor-pointer">
               <input
                 type="radio"
                 name="gradeType"
-                checked={currentType === "single"}
-                onChange={() => handleTypeChange("single")}
+                checked={!multiSelect}
+                onChange={() => handleMultiSelectToggle(false)}
                 className="mt-1"
               />
               <div className="flex-1">
                 <div className="text-sm font-medium">Single Grade</div>
-                {currentType === "single" && (
+                {!multiSelect && (
                   <select
                     value={selectedIds[0] || ""}
                     onChange={(e) => handleSingleGradeChange(e.target.value)}
@@ -176,28 +167,28 @@ export function GradeSelector({
               </div>
             </label>
 
-            {/* Merged Grades */}
+            {/* Multiple Grades */}
             <label className="flex items-start gap-2 cursor-pointer">
               <input
                 type="radio"
                 name="gradeType"
-                checked={currentType === "merged"}
-                onChange={() => handleTypeChange("merged")}
+                checked={multiSelect}
+                onChange={() => handleMultiSelectToggle(true)}
                 className="mt-1"
               />
               <div className="flex-1">
-                <div className="text-sm font-medium">Merged Grades</div>
+                <div className="text-sm font-medium">Multiple Grades</div>
                 <div className="text-xs text-muted-foreground">For combined small classes</div>
-                {currentType === "merged" && (
+                {multiSelect && (
                   <div className="mt-2 flex flex-wrap gap-1">
                     {individualGrades.map(g => {
                       const isSelected = selectedIds.includes(g.id)
-                      const canDeselect = selectedIds.length > 2
+                      const canDeselect = selectedIds.length > 1
                       return (
                         <button
                           key={g.id}
                           type="button"
-                          onClick={() => toggleMergedGrade(g.id)}
+                          onClick={() => toggleGrade(g.id)}
                           className={cn(
                             "px-2 py-0.5 rounded text-xs border transition-colors",
                             isSelected
@@ -206,7 +197,7 @@ export function GradeSelector({
                             isSelected && !canDeselect && "opacity-60"
                           )}
                         >
-                          {g.name.replace(' Grade', '')}
+                          {g.display_name.replace(' Grade', '')}
                         </button>
                       )
                     })}
@@ -215,31 +206,42 @@ export function GradeSelector({
               </div>
             </label>
 
-            {/* Elective */}
-            <label className="flex items-start gap-2 cursor-pointer">
-              <input
-                type="radio"
-                name="gradeType"
-                checked={currentType === "elective"}
-                onChange={() => handleTypeChange("elective")}
-                className="mt-1"
-              />
-              <div className="flex-1">
-                <div className="text-sm font-medium">Elective (6th-11th)</div>
-                <div className="text-xs text-muted-foreground">Optional class, students pick one</div>
-                {currentType === "elective" && !hasRestrictions && (
-                  <div className="mt-2 flex items-start gap-1.5 p-2 bg-amber-50 border border-amber-200 rounded text-xs text-amber-700">
-                    <AlertTriangle className="h-3.5 w-3.5 mt-0.5 flex-shrink-0" />
-                    <span>Electives require restricted availability (fixed day/block)</span>
+            {/* Elective Checkbox */}
+            <div className="border-t pt-3">
+              <label className="flex items-start gap-2 cursor-pointer">
+                <div
+                  onClick={() => handleElectiveToggle(!isElective)}
+                  className={cn(
+                    "w-4 h-4 rounded border flex items-center justify-center mt-0.5 transition-colors",
+                    isElective
+                      ? "bg-violet-600 border-violet-600"
+                      : "border-slate-300 hover:border-slate-400"
+                  )}
+                >
+                  {isElective && <Check className="h-3 w-3 text-white" />}
+                </div>
+                <div className="flex-1">
+                  <div className="text-sm font-medium">Elective</div>
+                  <div className="text-xs text-muted-foreground">
+                    Students choose from options, counts once per slot
                   </div>
-                )}
-                {currentType === "elective" && hasRestrictions && (
-                  <div className="mt-2 text-xs text-emerald-600">
-                    Restrictions set
-                  </div>
-                )}
-              </div>
-            </label>
+                </div>
+              </label>
+
+              {/* Elective warnings/status */}
+              {isElective && !hasRestrictions && (
+                <div className="mt-2 flex items-start gap-1.5 p-2 bg-amber-50 border border-amber-200 rounded text-xs text-amber-700">
+                  <AlertTriangle className="h-3.5 w-3.5 mt-0.5 flex-shrink-0" />
+                  <span>Select restricted blocks so all elective options align</span>
+                </div>
+              )}
+              {isElective && hasRestrictions && (
+                <div className="mt-2 text-xs text-emerald-600">
+                  ✓ Time slot set
+                </div>
+              )}
+            </div>
+
           </div>
         </div>
       )}
@@ -254,18 +256,17 @@ export function formatGradeDisplay(
 ): string {
   if (!grades || grades.length === 0) return "—"
 
-  if (isElective) {
-    return "6th-11th Elective"
-  }
-
   const sorted = [...grades].sort((a, b) => a.sort_order - b.sort_order)
 
   if (sorted.length === 1) {
-    return sorted[0].display_name
+    const base = sorted[0].display_name
+    return isElective ? `${base} Elective` : base
   }
 
-  // Show range for merged grades
+  // Show range for multiple grades like "1st-3rd Grades"
   const first = sorted[0].name.replace(' Grade', '')
   const last = sorted[sorted.length - 1].name.replace(' Grade', '')
-  return `${first}-${last}`
+  const range = `${first}-${last} Grades`
+
+  return isElective ? `${range} Elective` : range
 }

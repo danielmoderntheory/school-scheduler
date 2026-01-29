@@ -17,7 +17,7 @@ import {
 } from "@/components/ui/dialog"
 import { ScheduleGrid } from "@/components/ScheduleGrid"
 import { ScheduleStats } from "@/components/ScheduleStats"
-import { Loader2, Play, Download, Coffee, History, AlertTriangle, X, Server, Eye } from "lucide-react"
+import { Loader2, Play, Download, Coffee, History, AlertTriangle, X, Server, Eye, Star, Users, CheckCircle2, Info, ChevronDown, ChevronRight } from "lucide-react"
 import { generateSchedulesRemote, type ScheduleDiagnostics } from "@/lib/scheduler-remote"
 import type { Teacher, ClassEntry, ScheduleOption } from "@/lib/types"
 import toast from "react-hot-toast"
@@ -61,7 +61,7 @@ function analyzeTeacherGrades(schedule: Record<string, Record<number, [string, s
           grades.push(gradeToNum(gradeStr))
         }
 
-        // Count each grade (split credit for combined grades)
+        // Count each grade (split credit for multi-grade classes)
         const creditPerGrade = 1 / grades.length
         for (const g of grades) {
           if (g < 99) {
@@ -105,7 +105,7 @@ interface HistoryItem {
   generated_at: string
   selected_option: number | null
   studyHallsPlaced?: number
-  is_saved: boolean
+  is_starred: boolean
   notes: string | null
   quarter: { id: string; name: string }
 }
@@ -114,6 +114,7 @@ interface Grade {
   id: string
   name: string
   display_name: string
+  sort_order: number
 }
 
 interface DBClass {
@@ -148,6 +149,8 @@ export default function GeneratePage() {
   const [scheduleError, setScheduleError] = useState<{ type: 'infeasible' | 'error'; message: string; diagnostics?: ScheduleDiagnostics } | null>(null)
   const [solverStatus, setSolverStatus] = useState<{ isLocal: boolean; url: string } | null>(null)
   const [lastRequestPayload, setLastRequestPayload] = useState<{ teachers: unknown[]; classes: unknown[] } | null>(null)
+  const [rules, setRules] = useState<Array<{ rule_key: string; enabled: boolean; config?: Record<string, unknown> }>>([])
+  const [showCotaughtDetails, setShowCotaughtDetails] = useState(false)
   const generationIdRef = useRef<string | null>(null)
 
   useEffect(() => {
@@ -167,20 +170,27 @@ export default function GeneratePage() {
         // Ignore - will just not show indicator
       }
 
-      const [teachersRes, gradesRes, quartersRes] = await Promise.all([
+      const [teachersRes, gradesRes, quartersRes, rulesRes] = await Promise.all([
         fetch("/api/teachers"),
         fetch("/api/grades"),
         fetch("/api/quarters"),
+        fetch("/api/rules"),
       ])
 
-      const [teachersData, gradesData, quartersData] = await Promise.all([
+      const [teachersData, gradesData, quartersData, rulesData] = await Promise.all([
         teachersRes.json(),
         gradesRes.json(),
         quartersRes.json(),
+        rulesRes.json(),
       ])
 
       setTeachers(teachersData)
       setGrades(gradesData)
+      setRules(rulesData.map((r: { rule_key: string; enabled: boolean; config?: Record<string, unknown> }) => ({
+        rule_key: r.rule_key,
+        enabled: r.enabled,
+        config: r.config
+      })))
 
       const active = quartersData.find((q: Quarter) => q.is_active)
       setActiveQuarter(active || null)
@@ -273,6 +283,13 @@ export default function GeneratePage() {
       return
     }
 
+    // Check for incomplete classes (missing teacher, grade, or subject)
+    const incompleteClasses = classes.filter(c => !c.teacher || !c.grade || !c.subject)
+    if (incompleteClasses.length > 0) {
+      toast.error(`${incompleteClasses.length} class${incompleteClasses.length > 1 ? 'es are' : ' is'} incomplete (missing teacher, grade, or subject)`)
+      return
+    }
+
     // Generate unique ID for this run to prevent stale results
     const generationId = `gen-${Date.now()}-${Math.random().toString(36).slice(2)}`
     generationIdRef.current = generationId
@@ -292,6 +309,7 @@ export default function GeneratePage() {
         numOptions: 1,
         numAttempts: 150,
         maxTimeSeconds: 280,
+        rules, // Pass scheduling rules to remote solver
         onProgress: (current, total, message) => {
           setProgress({ current, total, message })
         },
@@ -331,16 +349,53 @@ export default function GeneratePage() {
 
         // Auto-save to database for shareable URL
         try {
-          const classesSnapshot = classes.map((c) => ({
-            teacher_id: c.teacher.id,
-            teacher_name: c.teacher.name,
-            grade_id: c.grade.id,
-            grade_name: c.grade.name,
-            grade_display_name: c.grade.display_name,
-            subject_id: c.subject.id,
-            subject_name: c.subject.name,
-            days_per_week: c.days_per_week,
-            restrictions: c.restrictions,
+          // Save complete class data for reliable import later
+          // Include both UUIDs (for same-DB import) and names (for display/fallback)
+          const classesSnapshot = classes.map((c) => {
+            // Ensure grade_ids is populated - fall back to grade_id if needed
+            const gradeIds = c.grade_ids?.length ? c.grade_ids : (c.grade?.id ? [c.grade.id] : [])
+            // Get grades array with full info for display
+            const gradesArray = c.grades?.length ? c.grades : (c.grade ? [c.grade] : [])
+
+            return {
+              teacher_id: c.teacher?.id || null,
+              teacher_name: c.teacher?.name || null,
+              grade_id: c.grade?.id || null,
+              grade_ids: gradeIds,
+              // Store full grade objects for display and fallback matching
+              grades: gradesArray.map(g => ({
+                id: g.id,
+                name: g.name,
+                display_name: g.display_name,
+              })),
+              is_elective: c.is_elective || false,
+              subject_id: c.subject?.id || null,
+              subject_name: c.subject?.name || null,
+              days_per_week: c.days_per_week,
+              restrictions: c.restrictions || [],
+            }
+          })
+
+          // Save rules configuration for reference
+          const rulesSnapshot = rules.map(r => ({
+            rule_key: r.rule_key,
+            enabled: r.enabled,
+            config: r.config || null,
+          }))
+
+          // Save teacher data for reference (status, study hall eligibility)
+          const teachersSnapshot = teachers.map(t => ({
+            id: t.id,
+            name: t.name,
+            status: t.status,
+            canSuperviseStudyHall: t.canSuperviseStudyHall,
+          }))
+
+          // Save grades list for reference (in case grades are renamed/reordered)
+          const gradesSnapshot = grades.map(g => ({
+            id: g.id,
+            name: g.name,
+            display_name: g.display_name,
           }))
 
           const saveRes = await fetch("/api/history", {
@@ -348,10 +403,14 @@ export default function GeneratePage() {
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
               quarter_id: activeQuarter?.id,
+              quarter_name: activeQuarter?.name,
               options: result.options,
               allSolutions: result.allSolutions || [],
               selected_option: 1,
               classes_snapshot: classesSnapshot,
+              rules_snapshot: rulesSnapshot,
+              teachers_snapshot: teachersSnapshot,
+              grades_snapshot: gradesSnapshot,
             }),
           })
 
@@ -420,6 +479,117 @@ export default function GeneratePage() {
 
   const selectedResult = results?.[parseInt(selectedOption) - 1]
 
+  // Calculate block capacity (grade-sessions: each grade in a class needs a slot)
+  // Co-taught classes only count once, electives count per fixed slot
+  const seenGradeSubject = new Set<string>() // For co-taught dedup
+  const seenElectiveSlots = new Set<string>() // For elective slot dedup
+  let totalGradeSessions = 0
+  const uniqueGrades = new Set<string>()
+
+  for (const c of classes) {
+    const classGrades = c.grades && c.grades.length > 0 ? c.grades : (c.grade ? [c.grade] : [])
+
+    // Track unique grades
+    classGrades.forEach(g => uniqueGrades.add(g.id))
+
+    for (const grade of classGrades) {
+      if (c.is_elective) {
+        // Electives: count each unique time slot once per grade
+        const fixedSlots = c.restrictions
+          ?.filter(r => r.restriction_type === 'fixed_slot')
+          .map(r => r.value as { day: string; block: number }) || []
+
+        for (const slot of fixedSlots) {
+          const slotKey = `${grade.id}:${slot.day}:${slot.block}`
+          if (!seenElectiveSlots.has(slotKey)) {
+            seenElectiveSlots.add(slotKey)
+            totalGradeSessions++
+          }
+        }
+      } else {
+        // Regular class - skip if we've already counted this grade+subject (co-taught)
+        const key = `${grade.id}:${c.subject?.id}`
+        if (seenGradeSubject.has(key)) continue
+        seenGradeSubject.add(key)
+
+        totalGradeSessions += c.days_per_week
+      }
+    }
+  }
+
+  // Add 1 study hall session for grades 6-11 (sort_order 6-11)
+  for (const g of grades) {
+    if (g.sort_order >= 6 && g.sort_order <= 11 && uniqueGrades.has(g.id)) {
+      totalGradeSessions++
+    }
+  }
+
+  // Total grade slots = unique grades × 25 blocks
+  const availableGradeSlots = uniqueGrades.size * 25
+  const capacityPercent = availableGradeSlots > 0 ? Math.round((totalGradeSessions / availableGradeSlots) * 100) : 0
+  const isOverCapacity = totalGradeSessions > availableGradeSlots
+  const isAtCapacity = totalGradeSessions === availableGradeSlots
+  const isNearCapacity = capacityPercent >= 85 && !isOverCapacity && !isAtCapacity
+
+  // Count incomplete classes
+  const incompleteClasses = classes.filter(c => !c.teacher || !c.grade || !c.subject)
+
+  // Detect co-taught classes (same grade + subject with different teachers)
+  const cotaughtGroups: Array<{ gradeDisplay: string; subjectName: string; teacherNames: string[] }> = []
+  const gradeSubjectMap = new Map<string, { teachers: Set<string>; gradeDisplay: string; subjectName: string }>()
+
+  for (const c of classes) {
+    // Use the grade display name from the class
+    const gradeKey = c.grades && c.grades.length > 0
+      ? c.grades.map(g => g.name).sort().join(',')
+      : c.grade?.name || ''
+    const subjectKey = c.subject?.name || ''
+    const key = `${gradeKey}|${subjectKey}`
+
+    if (!gradeSubjectMap.has(key)) {
+      // Format grade display as range (e.g., "6th-11th") if multiple grades
+      let gradeDisplay = ''
+      if (c.grades && c.grades.length > 0) {
+        if (c.grades.length === 1) {
+          gradeDisplay = c.grades[0].display_name
+        } else {
+          const sorted = [...c.grades].sort((a, b) => a.sort_order - b.sort_order)
+          const first = sorted[0].display_name.replace(' Grade', '')
+          const last = sorted[sorted.length - 1].display_name.replace(' Grade', '')
+          gradeDisplay = `${first}-${last}`
+        }
+      } else if (c.grade) {
+        gradeDisplay = c.grade.display_name
+      }
+      gradeSubjectMap.set(key, {
+        teachers: new Set([c.teacher.name]),
+        gradeDisplay,
+        subjectName: c.subject?.name || ''
+      })
+    } else {
+      gradeSubjectMap.get(key)!.teachers.add(c.teacher.name)
+    }
+  }
+
+  for (const { teachers: teacherSet, gradeDisplay, subjectName } of gradeSubjectMap.values()) {
+    if (teacherSet.size > 1) {
+      cotaughtGroups.push({
+        gradeDisplay,
+        subjectName,
+        teacherNames: Array.from(teacherSet)
+      })
+    }
+  }
+
+  // Detect electives without fixed slot restrictions
+  const electivesWithoutRestrictions = classes.filter(c => {
+    if (!c.is_elective) return false
+    const hasFixedSlot = c.restrictions?.some(r => r.restriction_type === 'fixed_slot')
+    const hasAvailableDays = c.restrictions?.some(r => r.restriction_type === 'available_days')
+    const hasAvailableBlocks = c.restrictions?.some(r => r.restriction_type === 'available_blocks')
+    return !hasFixedSlot && !hasAvailableDays && !hasAvailableBlocks
+  })
+
   return (
     <div className="max-w-7xl mx-auto p-8">
       {/* Solver Status Banner - only show when using local solver */}
@@ -452,10 +622,14 @@ export default function GeneratePage() {
               toast.error("No classes configured for this quarter. Add classes first.")
               return
             }
+            if (incompleteClasses.length > 0) {
+              toast.error(`${incompleteClasses.length} class${incompleteClasses.length > 1 ? 'es are' : ' is'} incomplete`)
+              return
+            }
             setShowConfirmDialog(true)
           }}
-          disabled={generating}
-          className="gap-2 bg-emerald-500 hover:bg-emerald-600 text-white"
+          disabled={generating || incompleteClasses.length > 0}
+          className="gap-2 bg-emerald-500 hover:bg-emerald-600 text-white disabled:bg-slate-300"
         >
           {generating ? (
             <>
@@ -476,15 +650,15 @@ export default function GeneratePage() {
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2">
               <Coffee className="h-5 w-5 text-amber-600" />
-              heads up emily
+              Heads Up
             </DialogTitle>
             <DialogDescription asChild>
               <div className="pt-2 space-y-3 text-sm text-muted-foreground">
                 <p>
-                  The OR-Tools solver will run up to 150 attempts to find the best schedules. This typically takes 1-2 minutes.
+                  This uses <strong className="text-foreground">Google OR-Tools CP-SAT</strong> to explore schedule combinations, then post-processes for back-to-back gaps and study hall distribution.
                 </p>
                 <p className="text-slate-500">
-                  (Perfect time for a coffee break!)
+                  Typically takes 1-2 minutes — perfect for a coffee break ☕
                 </p>
               </div>
             </DialogDescription>
@@ -840,9 +1014,15 @@ export default function GeneratePage() {
       {!generating && !results && (
         <Card className="bg-white shadow-sm mb-4">
           <CardHeader className="pb-3">
-            <CardTitle className="text-slate-700 text-lg">Ready to Generate</CardTitle>
+            <CardTitle className="text-slate-700 text-lg flex items-center gap-2">
+              Ready to Generate
+              {!isOverCapacity && !electivesWithoutRestrictions.length && (
+                <CheckCircle2 className="h-4 w-4 text-emerald-500" />
+              )}
+            </CardTitle>
           </CardHeader>
-          <CardContent>
+          <CardContent className="space-y-4">
+            {/* Stats row */}
             <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-sm">
               <div className="border border-slate-200 rounded-lg p-3 bg-slate-50">
                 <div className="font-semibold text-slate-700">{teachers.length}</div>
@@ -852,54 +1032,213 @@ export default function GeneratePage() {
                 <div className="font-semibold text-slate-700">{classes.length}</div>
                 <div className="text-slate-500 text-xs">Classes</div>
               </div>
-              <div className="border border-sky-200 rounded-lg p-3 bg-sky-50">
-                <div className="font-semibold text-sky-700">
-                  {classes.reduce((sum, c) => sum + c.days_per_week, 0)}
+              <div className={`border rounded-lg p-3 ${
+                isOverCapacity
+                  ? 'border-red-300 bg-red-50'
+                  : isAtCapacity
+                    ? 'border-emerald-200 bg-emerald-50'
+                    : isNearCapacity
+                      ? 'border-amber-200 bg-amber-50'
+                      : 'border-sky-200 bg-sky-50'
+              }`}>
+                <div className={`font-semibold ${
+                  isOverCapacity
+                    ? 'text-red-700'
+                    : isAtCapacity
+                      ? 'text-emerald-700'
+                      : isNearCapacity
+                        ? 'text-amber-700'
+                        : 'text-sky-700'
+                }`}>
+                  {totalGradeSessions} / {availableGradeSlots}
                 </div>
-                <div className="text-sky-600 text-xs">Sessions/Week</div>
+                <div className={`text-xs ${
+                  isOverCapacity
+                    ? 'text-red-600'
+                    : isAtCapacity
+                      ? 'text-emerald-600'
+                      : isNearCapacity
+                        ? 'text-amber-600'
+                        : 'text-sky-600'
+                }`}>
+                  Grade-sessions ({capacityPercent}%)
+                </div>
               </div>
-              <div className="border border-emerald-200 rounded-lg p-3 bg-emerald-50">
-                <div className="font-semibold text-emerald-700">
-                  {teachers.length * 25}
+              <div className={`border rounded-lg p-3 ${
+                isOverCapacity
+                  ? 'border-red-300 bg-red-50'
+                  : 'border-emerald-200 bg-emerald-50'
+              }`}>
+                <div className={`font-semibold ${isOverCapacity ? 'text-red-700' : 'text-emerald-700'}`}>
+                  {isOverCapacity ? `-${totalGradeSessions - availableGradeSlots}` : availableGradeSlots - totalGradeSessions}
                 </div>
-                <div className="text-emerald-600 text-xs">Available Slots</div>
+                <div className={`text-xs ${isOverCapacity ? 'text-red-600' : 'text-emerald-600'}`}>
+                  {isOverCapacity ? 'Over capacity' : 'Unused blocks'}
+                </div>
               </div>
             </div>
+
+            {/* Co-taught classes indicator (collapsed) */}
+            {cotaughtGroups.length > 0 && (
+              <div className="text-sm">
+                <button
+                  onClick={() => setShowCotaughtDetails(!showCotaughtDetails)}
+                  className="flex items-center gap-2 text-slate-600 hover:text-slate-800"
+                >
+                  {showCotaughtDetails ? (
+                    <ChevronDown className="h-4 w-4" />
+                  ) : (
+                    <ChevronRight className="h-4 w-4" />
+                  )}
+                  <Users className="h-4 w-4 text-violet-500" />
+                  <span>{cotaughtGroups.length} co-taught class{cotaughtGroups.length !== 1 ? 'es' : ''}</span>
+                  <span className="text-xs text-slate-400">(scheduled together)</span>
+                </button>
+                {showCotaughtDetails && (
+                  <div className="mt-2 ml-6 pl-4 border-l-2 border-violet-200 space-y-1">
+                    {cotaughtGroups.map((group, i) => (
+                      <div key={i} className="text-xs text-slate-600">
+                        <span className="font-medium">{group.gradeDisplay} - {group.subjectName}:</span>{' '}
+                        {group.teacherNames.join(', ')}
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Electives without restrictions warning */}
+            {electivesWithoutRestrictions.length > 0 && (
+              <div className="bg-amber-50 border border-amber-200 rounded-lg p-3">
+                <div className="flex items-start gap-2">
+                  <AlertTriangle className="h-4 w-4 text-amber-600 mt-0.5 flex-shrink-0" />
+                  <div>
+                    <div className="text-sm font-medium text-amber-800">
+                      {electivesWithoutRestrictions.length} elective{electivesWithoutRestrictions.length !== 1 ? 's' : ''} without restrictions
+                    </div>
+                    <p className="text-xs text-amber-700 mt-1">
+                      Electives need fixed time slots so all options align. Without restrictions, elective scheduling may conflict with other classes.
+                    </p>
+                    <ul className="text-xs text-amber-600 mt-1 space-y-0.5">
+                      {electivesWithoutRestrictions.slice(0, 3).map((c, i) => {
+                        let gradeDisplay = c.grade?.display_name || ''
+                        if (c.grades && c.grades.length > 1) {
+                          const sorted = [...c.grades].sort((a, b) => a.sort_order - b.sort_order)
+                          const first = sorted[0].display_name.replace(' Grade', '')
+                          const last = sorted[sorted.length - 1].display_name.replace(' Grade', '')
+                          gradeDisplay = `${first}-${last}`
+                        } else if (c.grades?.length === 1) {
+                          gradeDisplay = c.grades[0].display_name
+                        }
+                        return <li key={i}>• {c.teacher.name} - {c.subject.name} ({gradeDisplay})</li>
+                      })}
+                      {electivesWithoutRestrictions.length > 3 && (
+                        <li className="text-amber-500">...and {electivesWithoutRestrictions.length - 3} more</li>
+                      )}
+                    </ul>
+                    <Link href="/classes" className="text-xs text-amber-700 hover:text-amber-900 underline mt-2 inline-block">
+                      Edit class restrictions →
+                    </Link>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* Incomplete classes error */}
+            {incompleteClasses.length > 0 && (
+              <div className="bg-red-50 border border-red-200 rounded-lg p-3">
+                <div className="flex items-start gap-2">
+                  <AlertTriangle className="h-4 w-4 text-red-600 mt-0.5 flex-shrink-0" />
+                  <div>
+                    <div className="text-sm font-medium text-red-800">
+                      {incompleteClasses.length} incomplete class{incompleteClasses.length > 1 ? 'es' : ''}
+                    </div>
+                    <p className="text-xs text-red-700 mt-1">
+                      Some classes are missing teacher, grade, or subject. Fix them on the{' '}
+                      <Link href="/classes" className="underline hover:text-red-800">Classes page</Link>
+                      {' '}before generating.
+                    </p>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* Over capacity error */}
+            {isOverCapacity && (
+              <div className="bg-red-50 border border-red-200 rounded-lg p-3">
+                <div className="flex items-start gap-2">
+                  <AlertTriangle className="h-4 w-4 text-red-600 mt-0.5 flex-shrink-0" />
+                  <div>
+                    <div className="text-sm font-medium text-red-800">
+                      Over capacity by {totalGradeSessions - availableGradeSlots} grade-sessions
+                    </div>
+                    <p className="text-xs text-red-700 mt-1">
+                      Grade schedules have more sessions than available slots. The scheduler may fail or produce suboptimal results.
+                      Consider reducing class frequency or removing some classes.
+                    </p>
+                  </div>
+                </div>
+              </div>
+            )}
           </CardContent>
         </Card>
       )}
 
-      {/* Recent History - only in ready state (not generating, not showing results) */}
+      {/* Schedule History - only in ready state (not generating, not showing results) */}
       {!generating && !results && (
         <div className="space-y-4 mb-6">
-          {/* Recent History */}
-          <Card className="bg-white shadow-sm">
-            <CardHeader className="pb-2">
-              <div className="flex items-center justify-between">
-                <CardTitle className="text-slate-600 text-sm font-medium flex items-center gap-2">
-                  <History className="h-4 w-4" />
-                  Recent Saved Schedules
-                </CardTitle>
-                {recentHistory.length > 0 && (
-                  <Link href="/history" className="text-xs text-sky-600 hover:text-sky-700">
-                    View all →
-                  </Link>
-                )}
-              </div>
-            </CardHeader>
-            <CardContent className="px-3">
-              {recentHistory.length > 0 ? (
-                <div className="divide-y divide-slate-100">
-                  {recentHistory.map((item) => (
+          <div className="flex items-center justify-between">
+            <h2 className="text-2xl font-bold">Schedule History</h2>
+            {recentHistory.length > 0 && (
+              <Link href="/history" className="text-sm text-sky-600 hover:text-sky-700">
+                View all →
+              </Link>
+            )}
+          </div>
+
+          {recentHistory.length > 0 ? (
+            <div className="space-y-3">
+              {/* Starred schedules */}
+              {recentHistory.filter(h => h.is_starred).length > 0 && (
+                <div className="space-y-2">
+                  {recentHistory.filter(h => h.is_starred).map((item) => (
                     <Link
                       key={item.id}
                       href={`/history/${item.id}`}
-                      className="flex items-center gap-3 py-2.5 px-2 -mx-2 rounded-lg hover:bg-slate-50 transition-colors group"
+                      className="flex items-center gap-3 py-3 px-4 rounded-lg bg-amber-50 border border-amber-200 hover:bg-amber-100 transition-colors group"
+                    >
+                      <Star className="h-4 w-4 text-amber-500 fill-amber-500 flex-shrink-0" />
+                      <Badge variant="outline" className="text-xs border-amber-300">{item.quarter?.name}</Badge>
+                      <span className="text-xs text-muted-foreground">
+                        {new Date(item.generated_at).toLocaleString(undefined, {
+                          month: 'short',
+                          day: 'numeric',
+                          hour: 'numeric',
+                          minute: '2-digit',
+                        })}
+                      </span>
+                      {item.notes && (
+                        <span className="text-sm text-slate-600 truncate flex-1" title={item.notes}>
+                          — {item.notes}
+                        </span>
+                      )}
+                      <Eye className="h-3.5 w-3.5 text-amber-400 group-hover:text-amber-600 ml-auto flex-shrink-0" />
+                    </Link>
+                  ))}
+                </div>
+              )}
+
+              {/* Recent non-starred schedules */}
+              {recentHistory.filter(h => !h.is_starred).length > 0 && (
+                <div className="space-y-1">
+                  <div className="text-xs text-muted-foreground px-1 pt-2">Recent</div>
+                  {recentHistory.filter(h => !h.is_starred).slice(0, 5).map((item) => (
+                    <Link
+                      key={item.id}
+                      href={`/history/${item.id}`}
+                      className="flex items-center gap-3 py-2.5 px-3 rounded-lg hover:bg-slate-50 transition-colors group"
                     >
                       <Badge variant="outline" className="text-xs">{item.quarter?.name}</Badge>
-                      {item.selected_option && (
-                        <span className="text-xs text-muted-foreground">Option {item.selected_option}</span>
-                      )}
                       <span className="text-xs text-muted-foreground">
                         {new Date(item.generated_at).toLocaleString(undefined, {
                           month: 'short',
@@ -917,11 +1256,11 @@ export default function GeneratePage() {
                     </Link>
                   ))}
                 </div>
-              ) : (
-                <p className="text-sm text-slate-400">No saved schedules yet. Generate and save a schedule to see it here.</p>
               )}
-            </CardContent>
-          </Card>
+            </div>
+          ) : (
+            <p className="text-sm text-slate-400 py-4">No schedules yet. Generate a schedule to see it here.</p>
+          )}
         </div>
       )}
     </div>

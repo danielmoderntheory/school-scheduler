@@ -9,11 +9,18 @@ import type {
   Teacher, ClassEntry, ScheduleOption
 } from './types';
 
+export interface SchedulingRule {
+  rule_key: string;
+  enabled: boolean;
+  config?: Record<string, unknown>;
+}
+
 export interface RemoteGeneratorOptions {
   numOptions?: number;
   numAttempts?: number;
   maxTimeSeconds?: number;
   onProgress?: (current: number, total: number, message: string) => void;
+  rules?: SchedulingRule[];
 }
 
 export interface ScheduleDiagnostics {
@@ -91,7 +98,8 @@ export async function generateSchedulesRemote(
     numOptions = 3,
     numAttempts = 150,
     maxTimeSeconds = 280,
-    onProgress
+    onProgress,
+    rules = []
   } = options;
 
   // Allow UI to render before starting
@@ -130,6 +138,11 @@ export async function generateSchedulesRemote(
         availableDays: c.availableDays,
         availableBlocks: c.availableBlocks,
         fixedSlots: c.fixedSlots,
+      })),
+      rules: rules.map(r => ({
+        rule_key: r.rule_key,
+        enabled: r.enabled,
+        config: r.config,
       })),
       numOptions,
       numAttempts,

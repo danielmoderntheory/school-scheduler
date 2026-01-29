@@ -42,8 +42,6 @@ export async function POST(request: Request) {
       name: name.toLowerCase().replace(/\s+/g, "-"),
       display_name,
       sort_order: order,
-      is_combined: false,
-      combined_grades: null,
     })
     .select()
     .single()

@@ -1,11 +1,11 @@
 "use client"
 
-import { useState, useEffect } from "react"
+import { useState, useEffect, useRef } from "react"
 import { useParams, useSearchParams } from "next/navigation"
 import { Button } from "@/components/ui/button"
 import { ScheduleGrid } from "@/components/ScheduleGrid"
 import { ScheduleStats } from "@/components/ScheduleStats"
-import { Loader2, Download, ArrowLeft, Save, Check, RefreshCw, Shuffle, Trash2, Star, MoreVertical, Users, GraduationCap, Printer, ArrowLeftRight, X, Hand } from "lucide-react"
+import { Loader2, Download, ArrowLeft, Check, RefreshCw, Shuffle, Trash2, Star, MoreVertical, Users, GraduationCap, Printer, ArrowLeftRight, X, Hand, Pencil, Copy } from "lucide-react"
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -77,7 +77,7 @@ function analyzeTeacherGrades(schedule: TeacherSchedule): { primaryGrade: number
           grades.push(gradeToNum(gradeStr))
         }
 
-        // Count each grade (split credit for combined grades)
+        // Count each grade (split credit for multi-grade classes)
         const creditPerGrade = 1 / grades.length
         for (const g of grades) {
           if (g < 99) {
@@ -121,7 +121,7 @@ interface Generation {
   generated_at: string
   selected_option: number | null
   notes: string | null
-  is_saved: boolean
+  is_starred: boolean
   options: ScheduleOption[]
   stats?: {
     classes_snapshot?: ClassSnapshot[]
@@ -145,6 +145,7 @@ export default function HistoryDetailPage() {
   const [selectedForRegen, setSelectedForRegen] = useState<Set<string>>(new Set())
   const [isGenerating, setIsGenerating] = useState(false)
   const [generationProgress, setGenerationProgress] = useState({ current: 0, total: 0, message: "" })
+  const [regenSeed, setRegenSeed] = useState(0) // Increment to get different results on each regenerate
 
   // Preview state - holds unsaved regenerated option for review
   const [previewOption, setPreviewOption] = useState<ScheduleOption | null>(null)
@@ -154,9 +155,6 @@ export default function HistoryDetailPage() {
   const [studyHallMode, setStudyHallMode] = useState(false) // Whether we're in study hall reassignment mode
   const [studyHallSeed, setStudyHallSeed] = useState<number | null>(null) // Seed for study hall shuffling
 
-  // Confirmation dialog state for "update option" actions
-  const [showUpdateConfirm, setShowUpdateConfirm] = useState(false)
-  const [pendingUpdateAction, setPendingUpdateAction] = useState<(() => void) | null>(null)
 
   // Swap mode state
   const [swapMode, setSwapMode] = useState(false)
@@ -170,6 +168,7 @@ export default function HistoryDetailPage() {
     studyHallAssignments: Array<{ group: string; teacher: string | null; day: string | null; block: number | null }>
   } | null>(null)
   const [swapCount, setSwapCount] = useState(0)
+  const undoToastId = useRef<string | null>(null)
 
   // Freeform mode state
   const [freeformMode, setFreeformMode] = useState(false)
@@ -192,9 +191,10 @@ export default function HistoryDetailPage() {
   }> | null>(null)
 
 
-  // Save dialog state
-  const [showSaveDialog, setShowSaveDialog] = useState(false)
-  const [saveNote, setSaveNote] = useState("")
+  // Star dialog state
+  const [showStarDialog, setShowStarDialog] = useState(false)
+  const [starNote, setStarNote] = useState("")
+  const [isEditingNote, setIsEditingNote] = useState(false)
 
   useEffect(() => {
     loadGeneration()
@@ -242,33 +242,86 @@ export default function HistoryDetailPage() {
     }
   }
 
-  function openSaveDialog() {
-    setSaveNote("")
-    setShowSaveDialog(true)
+  // Update document title for better PDF naming
+  useEffect(() => {
+    if (generation) {
+      const shortId = generation.id.slice(0, 8)
+      document.title = `${generation.quarter?.name || 'Schedule'} Rev ${selectedOption} - ${shortId}`
+    }
+  }, [generation, selectedOption])
+
+  function openStarDialog(editMode: boolean = false) {
+    setStarNote(generation?.notes || "")
+    setIsEditingNote(editMode)
+    setShowStarDialog(true)
   }
 
-  async function handleSave() {
-    if (!generation || generation.is_saved) return
-    if (!saveNote.trim()) {
-      toast.error("Please add a note explaining why you're saving this schedule")
-      return
-    }
+  async function handleStar() {
+    if (!generation) return
     setSaving(true)
     try {
       const res = await fetch(`/api/history/${id}`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ is_saved: true, notes: saveNote.trim() }),
+        body: JSON.stringify({
+          is_starred: true,
+          notes: starNote.trim() || null
+        }),
       })
       if (res.ok) {
-        setGeneration({ ...generation, is_saved: true, notes: saveNote.trim() })
-        setShowSaveDialog(false)
-        toast.success("Schedule saved")
+        setGeneration({ ...generation, is_starred: true, notes: starNote.trim() || null })
+        setShowStarDialog(false)
+        toast.success("Schedule starred")
       } else {
-        toast.error("Failed to save schedule")
+        toast.error("Failed to star schedule")
       }
     } catch (error) {
-      toast.error("Failed to save schedule")
+      toast.error("Failed to star schedule")
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  async function handleUnstar() {
+    if (!generation) return
+    setSaving(true)
+    try {
+      const res = await fetch(`/api/history/${id}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ is_starred: false }),
+      })
+      if (res.ok) {
+        setGeneration({ ...generation, is_starred: false })
+        toast.success("Schedule unstarred")
+      } else {
+        toast.error("Failed to unstar schedule")
+      }
+    } catch (error) {
+      toast.error("Failed to unstar schedule")
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  async function handleUpdateNote() {
+    if (!generation) return
+    setSaving(true)
+    try {
+      const res = await fetch(`/api/history/${id}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ notes: starNote.trim() || null }),
+      })
+      if (res.ok) {
+        setGeneration({ ...generation, notes: starNote.trim() || null })
+        setShowStarDialog(false)
+        toast.success("Note updated")
+      } else {
+        toast.error("Failed to update note")
+      }
+    } catch (error) {
+      toast.error("Failed to update note")
     } finally {
       setSaving(false)
     }
@@ -277,6 +330,7 @@ export default function HistoryDetailPage() {
   function enterRegenMode() {
     setRegenMode(true)
     setSelectedForRegen(new Set())
+    setRegenSeed(0) // Reset seed for fresh regeneration session
   }
 
   function exitRegenMode() {
@@ -313,14 +367,23 @@ export default function HistoryDetailPage() {
     setIsGenerating(true)
 
     try {
-      // Fetch current teachers and classes for the quarter
-      const [teachersRes, classesRes] = await Promise.all([
+      // Fetch current teachers, classes, and rules for the quarter
+      const [teachersRes, classesRes, rulesRes] = await Promise.all([
         fetch('/api/teachers'),
-        fetch(`/api/classes?quarter_id=${generation.quarter_id}`)
+        fetch(`/api/classes?quarter_id=${generation.quarter_id}`),
+        fetch('/api/rules')
       ])
 
       const teachers = await teachersRes.json()
       const classesRaw = await classesRes.json()
+      const rulesRaw = await rulesRes.json()
+
+      // Transform rules to scheduler format
+      const rules = rulesRaw.map((r: { rule_key: string; enabled: boolean; config?: Record<string, unknown> }) => ({
+        rule_key: r.rule_key,
+        enabled: r.enabled,
+        config: r.config
+      }))
 
       // Transform classes to the format expected by the scheduler
       const classes = classesRaw.map((c: {
@@ -376,12 +439,18 @@ export default function HistoryDetailPage() {
 
       // Generate new schedule with locked teachers
       // Use more attempts for refinement mode since constraints are tighter
+      // Increment seed to get different results on subsequent regenerations
+      const currentSeed = regenSeed + 1
+      setRegenSeed(currentSeed)
+
       setGenerationProgress({ current: 0, total: 100, message: "Starting..." })
       const result = await generateSchedules(teachers, classes, {
         numOptions: 1,
         numAttempts: 100,
         lockedTeachers: lockedSchedules,
         teachersNeedingStudyHalls,
+        seed: currentSeed * 12345, // Multiply to spread seeds apart
+        rules, // Pass scheduling rules
         onProgress: (current, total, message) => {
           setGenerationProgress({ current, total, message })
         }
@@ -428,8 +497,8 @@ export default function HistoryDetailPage() {
           optionNumber: optionIndex + 1,
         }
         successMessage = previewType === "study-hall"
-          ? `Study halls reassigned for Option ${optionIndex + 1}`
-          : `Option ${optionIndex + 1} updated`
+          ? `Study halls reassigned for Rev ${optionIndex + 1}`
+          : `Rev ${optionIndex + 1} updated`
       } else {
         // Save as new option
         const newOptionNumber = generation.options.length + 1
@@ -437,19 +506,27 @@ export default function HistoryDetailPage() {
           ...previewOption,
           optionNumber: newOptionNumber,
         }]
-        successMessage = `Saved as Option ${newOptionNumber}`
+        successMessage = `Saved as Rev ${newOptionNumber}`
       }
 
+      const newOptionNumber = saveAsNew ? generation.options.length + 1 : null
       const updateRes = await fetch(`/api/history/${id}`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ options: updatedOptions }),
+        body: JSON.stringify({
+          options: updatedOptions,
+          ...(newOptionNumber && { selected_option: newOptionNumber }),
+        }),
       })
 
       if (updateRes.ok) {
-        setGeneration({ ...generation, options: updatedOptions })
+        setGeneration({
+          ...generation,
+          options: updatedOptions,
+          ...(newOptionNumber && { selected_option: newOptionNumber }),
+        })
         if (saveAsNew) {
-          setSelectedOption((generation.options.length + 1).toString())
+          setSelectedOption(newOptionNumber!.toString())
         }
         setPreviewOption(null)
         setPreviewType(null)
@@ -541,7 +618,7 @@ export default function HistoryDetailPage() {
     }
 
     const optionNum = optionIndex + 1
-    if (!confirm(`Delete Option ${optionNum}? This cannot be undone.`)) {
+    if (!confirm(`Delete Revision ${optionNum}? This cannot be undone.`)) {
       return
     }
 
@@ -567,13 +644,43 @@ export default function HistoryDetailPage() {
           // Adjust selection if we deleted an earlier option
           setSelectedOption((parseInt(selectedOption) - 1).toString())
         }
-        toast.success(`Deleted Option ${optionNum}`)
+        toast.success(`Deleted Revision ${optionNum}`)
       } else {
         toast.error("Failed to delete option")
       }
     } catch (error) {
       console.error('Delete option error:', error)
       toast.error("Failed to delete option")
+    }
+  }
+
+  async function handleDuplicateRevision() {
+    if (!generation || !selectedResult) return
+
+    try {
+      // Deep copy the current revision
+      const duplicatedOption = JSON.parse(JSON.stringify(selectedResult))
+      duplicatedOption.optionNumber = generation.options.length + 1
+
+      const updatedOptions = [...generation.options, duplicatedOption]
+
+      const updateRes = await fetch(`/api/history/${id}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ options: updatedOptions }),
+      })
+
+      if (updateRes.ok) {
+        setGeneration({ ...generation, options: updatedOptions })
+        // Switch to the new revision
+        setSelectedOption(updatedOptions.length.toString())
+        toast.success(`Created Revision ${updatedOptions.length}`)
+      } else {
+        toast.error("Failed to duplicate revision")
+      }
+    } catch (error) {
+      console.error('Duplicate revision error:', error)
+      toast.error("Failed to duplicate revision")
     }
   }
 
@@ -591,7 +698,7 @@ export default function HistoryDetailPage() {
 
       if (updateRes.ok) {
         setGeneration({ ...generation, selected_option: optionNum })
-        toast.success(`Option ${optionNum} marked as selected`)
+        toast.success(`Rev ${optionNum} set as Primary`)
       } else {
         toast.error("Failed to update selection")
       }
@@ -1261,35 +1368,47 @@ export default function HistoryDetailPage() {
 
     if (createNew) {
       updatedOptions = [...generation.options, updatedOption]
-      successMessage = `Saved ${swapCount} swap${swapCount !== 1 ? 's' : ''} as Option ${generation.options.length + 1}`
+      successMessage = `Saved ${swapCount} swap${swapCount !== 1 ? 's' : ''} as Rev ${generation.options.length + 1}`
       newOptionNumber = (generation.options.length + 1).toString()
     } else {
       updatedOptions = [...generation.options]
       updatedOptions[optionIndex] = updatedOption
-      successMessage = `Applied ${swapCount} swap${swapCount !== 1 ? 's' : ''} to Option ${selectedOption}`
+      successMessage = `Applied ${swapCount} swap${swapCount !== 1 ? 's' : ''} to Rev ${selectedOption}`
     }
 
     try {
+      const newOptionNum = newOptionNumber ? parseInt(newOptionNumber) : null
       const updateRes = await fetch(`/api/history/${id}`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ options: updatedOptions }),
+        body: JSON.stringify({
+          options: updatedOptions,
+          ...(newOptionNum && { selected_option: newOptionNum }),
+        }),
       })
 
       if (updateRes.ok) {
-        setGeneration({ ...generation, options: updatedOptions })
+        setGeneration({
+          ...generation,
+          options: updatedOptions,
+          ...(newOptionNum && { selected_option: newOptionNum }),
+        })
         if (newOptionNumber) {
           setSelectedOption(newOptionNumber)
         }
         exitSwapMode()
 
-        toast(
+        // Dismiss previous undo toast
+        if (undoToastId.current) toast.dismiss(undoToastId.current)
+
+        const toastId = toast(
           (t) => (
             <div className="flex items-center gap-3">
               <span className="text-sm">{successMessage}</span>
               <button
                 onClick={async () => {
                   toast.dismiss(t.id)
+                  undoToastId.current = null
                   try {
                     const undoRes = await fetch(`/api/history/${id}`, {
                       method: "PUT",
@@ -1314,10 +1433,11 @@ export default function HistoryDetailPage() {
             </div>
           ),
           {
-            duration: 10000,
+            duration: 60000,
             icon: <Check className="h-4 w-4 text-emerald-600" />,
           }
         )
+        undoToastId.current = toastId
       } else {
         toast.error("Failed to save swaps")
       }
@@ -1346,13 +1466,17 @@ export default function HistoryDetailPage() {
   function showSwapSuccessToast(message: string, destinationCells: CellLocation[], previousOptions: ScheduleOption[]) {
     highlightCells(destinationCells)
 
-    toast(
+    // Dismiss previous undo toast
+    if (undoToastId.current) toast.dismiss(undoToastId.current)
+
+    const toastId = toast(
       (t) => (
         <div className="flex items-center gap-3">
           <span className="text-sm">{message}</span>
           <button
             onClick={async () => {
               toast.dismiss(t.id)
+              undoToastId.current = null
               // Undo inline using the captured previousOptions
               try {
                 const updateRes = await fetch(`/api/history/${id}`, {
@@ -1380,10 +1504,11 @@ export default function HistoryDetailPage() {
         </div>
       ),
       {
-        duration: 10000,
+        duration: 60000,
         icon: <Check className="h-4 w-4 text-emerald-600" />,
       }
     )
+    undoToastId.current = toastId
   }
 
   // Freeform mode functions
@@ -1622,6 +1747,24 @@ export default function HistoryDetailPage() {
       setPendingPlacements(prev => prev.filter(p => p.blockId !== blockId))
     }
 
+    // Check if the original location is now occupied by another placed block
+    const occupyingPlacement = pendingPlacements.find(
+      p => p.teacher === block.sourceTeacher && p.day === block.sourceDay && p.block === block.sourceBlock
+    )
+
+    if (occupyingPlacement) {
+      // Find the floating block that was placed there
+      const occupyingBlock = floatingBlocks.find(b => b.id === occupyingPlacement.blockId)
+      if (occupyingBlock) {
+        // Clear this block from grade schedules at current location
+        if (newGradeSchedules[occupyingBlock.grade]?.[block.sourceDay]?.[block.sourceBlock]) {
+          newGradeSchedules[occupyingBlock.grade][block.sourceDay][block.sourceBlock] = null
+        }
+        // Remove its placement - it becomes unplaced again (stays in floatingBlocks)
+        setPendingPlacements(prev => prev.filter(p => p.blockId !== occupyingPlacement.blockId))
+      }
+    }
+
     // Restore to original location
     newTeacherSchedules[block.sourceTeacher][block.sourceDay][block.sourceBlock] = block.entry
     if (!newGradeSchedules[block.grade]) {
@@ -1633,8 +1776,11 @@ export default function HistoryDetailPage() {
     newGradeSchedules[block.grade][block.sourceDay][block.sourceBlock] = [block.sourceTeacher, block.subject]
 
     setWorkingSchedules({ teacherSchedules: newTeacherSchedules, gradeSchedules: newGradeSchedules })
+
+    // Remove the returned block from floating blocks (displaced block stays with its original source info)
     setFloatingBlocks(prev => prev.filter(b => b.id !== blockId))
 
+    // Clear selection if we were selecting the returned block
     if (selectedFloatingBlock === blockId) {
       setSelectedFloatingBlock(null)
     }
@@ -1738,8 +1884,9 @@ export default function HistoryDetailPage() {
       }
     }
 
-    // 4. Check grade conflicts - each placement must not collide with existing grade classes
+    // 4. Check grade conflicts - multiple placements at same grade/day/block
     // (Skip Study Halls - they don't conflict with regular classes)
+    // Note: We check the working schedule for actual conflicts, not the original
     for (const placement of pendingPlacements) {
       const placedBlock = floatingBlocks.find(b => b.id === placement.blockId)
       if (!placedBlock) continue
@@ -1750,22 +1897,7 @@ export default function HistoryDetailPage() {
       const grade = placedBlock.grade
       const { day, block } = placement
 
-      // Check if the original schedule has a class for this grade at this slot
-      // that wasn't picked up
-      const originalEntry = selectedResult.gradeSchedules[grade]?.[day]?.[block]
-      if (originalEntry && originalEntry[1] !== "OPEN" && originalEntry[1] !== "Study Hall") {
-        // There's an existing class - is it one we picked up?
-        const isPickedUp = pickedUpLocations.has(`${grade}|${day}|${block}`)
-        if (!isPickedUp) {
-          errors.push({
-            type: 'grade_conflict',
-            message: `[No Grade Conflicts] ${grade} already has ${originalEntry[1]} at ${day} B${block}`,
-            cells: [{ teacher: placement.teacher, day, block, grade }]
-          })
-        }
-      }
-
-      // Also check for multiple placements at same grade/slot (excluding Study Halls)
+      // Check for multiple placements at same grade/slot (excluding Study Halls)
       const otherPlacementsAtSlot = pendingPlacements.filter(p => {
         if (p === placement) return false
         const otherBlock = floatingBlocks.find(b => b.id === p.blockId)
@@ -2032,11 +2164,18 @@ export default function HistoryDetailPage() {
       const updateRes = await fetch(`/api/history/${id}`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ options: updatedOptions }),
+        body: JSON.stringify({
+          options: updatedOptions,
+          ...(createNew && { selected_option: newOptionIndex }),
+        }),
       })
 
       if (updateRes.ok) {
-        setGeneration({ ...generation, options: updatedOptions })
+        setGeneration({
+          ...generation,
+          options: updatedOptions,
+          ...(createNew && { selected_option: newOptionIndex }),
+        })
         exitFreeformMode()
 
         // Switch to the new option if created
@@ -2047,16 +2186,20 @@ export default function HistoryDetailPage() {
         // Show success toast with undo
         const moveCount = floatingBlocks.length
         const message = createNew
-          ? `Created Option ${newOptionIndex} with ${moveCount} change${moveCount !== 1 ? 's' : ''}`
-          : `Applied ${moveCount} change${moveCount !== 1 ? 's' : ''} to Option ${selectedOption}`
+          ? `Created Rev ${newOptionIndex} with ${moveCount} change${moveCount !== 1 ? 's' : ''}`
+          : `Applied ${moveCount} change${moveCount !== 1 ? 's' : ''} to Rev ${selectedOption}`
 
-        toast(
+        // Dismiss any existing undo toast
+        if (undoToastId.current) toast.dismiss(undoToastId.current)
+
+        const toastId = toast(
           (t) => (
             <div className="flex items-center gap-3">
               <span className="text-sm">{message}</span>
               <button
                 onClick={async () => {
                   toast.dismiss(t.id)
+                  undoToastId.current = null
                   try {
                     const undoRes = await fetch(`/api/history/${id}`, {
                       method: "PUT",
@@ -2084,10 +2227,11 @@ export default function HistoryDetailPage() {
             </div>
           ),
           {
-            duration: 10000,
+            duration: 60000,
             icon: <Check className="h-4 w-4 text-emerald-600" />,
           }
         )
+        undoToastId.current = toastId
       } else {
         toast.error("Failed to save changes")
       }
@@ -2137,34 +2281,46 @@ export default function HistoryDetailPage() {
               <ArrowLeft className="h-4 w-4 mr-1" />
               Back
             </Link>
-            <h1 className="text-2xl font-bold">
+            <h1 className="text-2xl font-bold flex items-center gap-2">
               {generation.quarter?.name} Schedule
+              {/* Star toggle */}
+              <button
+                onClick={() => generation.is_starred ? handleUnstar() : openStarDialog()}
+                disabled={saving}
+                className={`p-1.5 rounded-md transition-colors no-print ${
+                  generation.is_starred
+                    ? 'text-amber-500 hover:text-amber-600 hover:bg-amber-50'
+                    : 'text-slate-300 hover:text-amber-500 hover:bg-amber-50'
+                }`}
+                title={generation.is_starred ? "Unstar schedule" : "Star schedule"}
+              >
+                <Star className={`h-5 w-5 ${generation.is_starred ? 'fill-amber-500' : ''}`} />
+              </button>
             </h1>
           </div>
-          {/* Save button or saved indicator */}
-          {!generation.is_saved ? (
-            <Button
-              onClick={openSaveDialog}
-              size="sm"
-              className="gap-1 bg-emerald-500 hover:bg-emerald-600 text-white no-print"
-            >
-              <Save className="h-4 w-4" />
-              Save Schedule
-            </Button>
-          ) : (
-            <div className="flex items-center gap-1.5 text-emerald-600 no-print">
-              <Check className="h-4 w-4" />
-              <span className="text-sm font-medium">Saved</span>
-            </div>
-          )}
         </div>
         <div className="flex items-center gap-3 text-sm text-muted-foreground">
           <span>{new Date(generation.generated_at).toLocaleString()}</span>
           <span className="text-slate-300">{generation.id.slice(0, 8)}</span>
-          {generation.notes && (
-            <span className="text-slate-600 italic no-print">
+          {generation.notes ? (
+            <span className="text-slate-600 italic no-print group">
               — &ldquo;{generation.notes}&rdquo;
+              <button
+                onClick={() => openStarDialog(true)}
+                className="ml-1 opacity-0 group-hover:opacity-100 text-slate-400 hover:text-slate-600 transition-opacity"
+                title="Edit note"
+              >
+                <Pencil className="h-3 w-3 inline" />
+              </button>
             </span>
+          ) : (
+            <button
+              onClick={() => openStarDialog(true)}
+              className="text-slate-400 hover:text-slate-600 no-print"
+              title="Add note"
+            >
+              <span className="text-xs">+ Add note</span>
+            </button>
           )}
         </div>
       </div>
@@ -2179,9 +2335,12 @@ export default function HistoryDetailPage() {
                   const isActive = isThisOption && (!previewOption || !showingPreview)
                   const shPlaced = opt?.studyHallsPlaced ?? 0
                   const shTotal = opt?.studyHallAssignments?.length || 6
+                  const allStudyHallsPlaced = shPlaced >= shTotal
                   const isSelected = generation.selected_option === i + 1
+                  // Disable switching options while in an edit mode
+                  const inEditMode = swapMode || freeformMode || studyHallMode || regenMode
                   // During preview, allow clicking current option to toggle to original view
-                  const isClickable = !isGenerating && (!previewOption || isThisOption)
+                  const isClickable = !isGenerating && !inEditMode && (!previewOption || isThisOption)
                   return (
                     <button
                       key={i}
@@ -2193,30 +2352,28 @@ export default function HistoryDetailPage() {
                         }
                       }}
                       disabled={!isClickable}
+                      title={inEditMode ? "Exit current mode before switching options" : undefined}
                       className={`
-                        px-3 py-1.5 rounded-md text-sm font-medium transition-all flex items-center gap-1.5
+                        px-3 py-1.5 rounded-md text-sm transition-all flex items-center gap-1.5
                         ${isActive
-                          ? 'bg-white text-gray-900 shadow-sm'
-                          : 'text-gray-600 hover:text-gray-900'
+                          ? 'bg-white text-gray-900 shadow-sm font-medium'
+                          : isSelected
+                            ? 'text-gray-600 hover:text-gray-900 font-medium'
+                            : 'text-gray-400 hover:text-gray-600 font-normal'
                         }
                         disabled:opacity-50 disabled:cursor-not-allowed
                       `}
                     >
-                      Option {i + 1}
-                      {opt && (
-                        <span className={`text-xs ${shPlaced >= shTotal ? 'text-emerald-600' : 'text-amber-600'}`}>
-                          {shPlaced}/{shTotal}
-                        </span>
-                      )}
                       {isSelected && (
-                        <Star className="h-3 w-3 text-sky-500 fill-sky-500" />
+                        <Check className="h-3.5 w-3.5 text-emerald-600" />
+                      )}
+                      Revision {i + 1}
+                      {allStudyHallsPlaced && (
+                        <span className="w-2 h-2 rounded-full bg-emerald-500" title="All study halls placed" />
                       )}
                     </button>
                   )
                 })}
-              </div>
-              <div className="text-xs text-muted-foreground pl-1">
-                <span className="text-emerald-600">3/6</span> = study halls placed • <Star className="h-3 w-3 text-sky-500 fill-sky-500 inline" /> = selected option
               </div>
             </div>
 
@@ -2278,6 +2435,11 @@ export default function HistoryDetailPage() {
                     <Shuffle className="h-4 w-4 mr-2" />
                     Reassign Study Halls
                   </DropdownMenuItem>
+                  <DropdownMenuSeparator />
+                  <DropdownMenuItem onClick={handleDuplicateRevision} disabled={regenMode || swapMode || freeformMode || studyHallMode}>
+                    <Copy className="h-4 w-4 mr-2" />
+                    Duplicate Revision
+                  </DropdownMenuItem>
                   {generation.selected_option !== parseInt(selectedOption) && !previewOption && (
                     <DropdownMenuItem onClick={handleMarkAsSelected}>
                       <Star className="h-4 w-4 mr-2" />
@@ -2292,7 +2454,7 @@ export default function HistoryDetailPage() {
                         className="text-red-600 focus:text-red-600"
                       >
                         <Trash2 className="h-4 w-4 mr-2" />
-                        Delete Option {selectedOption}
+                        Delete Revision {selectedOption}
                       </DropdownMenuItem>
                     </>
                   )}
@@ -2303,8 +2465,8 @@ export default function HistoryDetailPage() {
 
           {selectedResult && (
             <div className="space-y-6">
-              {/* Stats Summary */}
-              {!isGenerating && (
+              {/* Stats Summary - hidden during edit modes */}
+              {!isGenerating && !swapMode && !freeformMode && !studyHallMode && !regenMode && (
                 <div>
                   <ScheduleStats
                     stats={selectedResult.teacherStats}
@@ -2361,12 +2523,12 @@ export default function HistoryDetailPage() {
                       </Button>
                       <Button
                         size="sm"
-                        onClick={() => handleApplySwap(true)}
+                        onClick={() => handleApplySwap(generation.options.length === 1)}
                         className="bg-amber-600 hover:bg-amber-700 text-white"
                         disabled={swapCount === 0}
                       >
                         <Check className="h-4 w-4 mr-1" />
-                        Save as New
+                        Save
                       </Button>
                     </div>
                   </div>
@@ -2403,17 +2565,9 @@ export default function HistoryDetailPage() {
                         </span>
                       )}
                     </div>
-                    {swapCount > 0 && (
-                      <button
-                        onClick={() => {
-                          setPendingUpdateAction(() => () => handleApplySwap(false))
-                          setShowUpdateConfirm(true)
-                        }}
-                        className="text-amber-500 hover:text-amber-700 hover:underline"
-                      >
-                        or update Option {selectedOption}
-                      </button>
-                    )}
+                    <span className="text-amber-600/70">
+                      {generation.options.length === 1 ? "Will create Revision 2" : `Will update Revision ${selectedOption}`}
+                    </span>
                   </div>
                 </div>
               )}
@@ -2456,12 +2610,12 @@ export default function HistoryDetailPage() {
                       </Button>
                       <Button
                         size="sm"
-                        onClick={() => handleApplyFreeform(true)}
+                        onClick={() => handleApplyFreeform(generation.options.length === 1)}
                         className="bg-indigo-600 hover:bg-indigo-700 text-white"
                         disabled={floatingBlocks.length === 0}
                       >
                         <Check className="h-4 w-4 mr-1" />
-                        Save as New
+                        Save
                       </Button>
                     </div>
                   </div>
@@ -2501,26 +2655,18 @@ export default function HistoryDetailPage() {
                         </span>
                       )}
                     </div>
-                    {floatingBlocks.length > 0 && (
-                      <button
-                        onClick={() => {
-                          setPendingUpdateAction(() => () => handleApplyFreeform(false))
-                          setShowUpdateConfirm(true)
-                        }}
-                        className="text-indigo-500 hover:text-indigo-700 hover:underline"
-                      >
-                        or update Option {selectedOption}
-                      </button>
-                    )}
+                    <span className="text-indigo-600/70">
+                      {generation.options.length === 1 ? "Will create Revision 2" : `Will update Revision ${selectedOption}`}
+                    </span>
                   </div>
                   {/* Validation errors list */}
                   {validationErrors.length > 0 && (
                     <div className="mt-3 pt-3 border-t border-indigo-200">
-                      <div className="text-xs font-medium text-indigo-700 mb-1">Validation Issues:</div>
-                      <ul className="text-xs text-indigo-600 space-y-0.5">
+                      <div className="text-xs font-medium text-red-600 mb-1">Validation Issues:</div>
+                      <ul className="text-xs text-red-600 space-y-0.5">
                         {validationErrors.map((error, idx) => (
                           <li key={idx} className="flex items-start gap-1">
-                            <span className="text-indigo-400 mt-0.5">•</span>
+                            <span className="text-red-400 mt-0.5">•</span>
                             <span>{error.message}</span>
                           </li>
                         ))}
@@ -2566,12 +2712,12 @@ export default function HistoryDetailPage() {
                       </Button>
                       <Button
                         size="sm"
-                        onClick={() => handleKeepPreview(true)}
+                        onClick={() => handleKeepPreview(generation.options.length === 1)}
                         className="bg-violet-600 hover:bg-violet-700 text-white"
                         disabled={!previewOption}
                       >
                         <Check className="h-4 w-4 mr-1" />
-                        Save as New
+                        Save
                       </Button>
                     </div>
                   </div>
@@ -2603,15 +2749,9 @@ export default function HistoryDetailPage() {
                       )}
                     </div>
                     {previewOption && (
-                      <button
-                        onClick={() => {
-                          setPendingUpdateAction(() => () => handleKeepPreview(false))
-                          setShowUpdateConfirm(true)
-                        }}
-                        className="text-violet-500 hover:text-violet-700 hover:underline"
-                      >
-                        or update Option {selectedOption}
-                      </button>
+                      <span className="text-violet-600/70">
+                        {generation.options.length === 1 ? "Will create Revision 2" : `Will update Revision ${selectedOption}`}
+                      </span>
                     )}
                   </div>
                 </div>
@@ -2682,12 +2822,12 @@ export default function HistoryDetailPage() {
                           </Button>
                           <Button
                             size="sm"
-                            onClick={() => handleKeepPreview(true)}
+                            onClick={() => handleKeepPreview(generation.options.length === 1)}
                             className="bg-sky-600 hover:bg-sky-700 text-white"
                             disabled={!previewOption}
                           >
                             <Check className="h-4 w-4 mr-1" />
-                            Save as New
+                            Save
                           </Button>
                         </div>
                       </div>
@@ -2730,15 +2870,9 @@ export default function HistoryDetailPage() {
                           )}
                         </div>
                         {previewOption && (
-                          <button
-                            onClick={() => {
-                              setPendingUpdateAction(() => () => handleKeepPreview(false))
-                              setShowUpdateConfirm(true)
-                            }}
-                            className="text-sky-500 hover:text-sky-700 hover:underline"
-                          >
-                            or update Option {selectedOption}
-                          </button>
+                          <span className="text-sky-600/70">
+                            {generation.options.length === 1 ? "Will create Revision 2" : `Will update Revision ${selectedOption}`}
+                          </span>
                         )}
                       </div>
                     </>
@@ -2851,6 +2985,7 @@ export default function HistoryDetailPage() {
                                 onPickUp={handlePickUpBlock}
                                 onPlace={handlePlaceBlock}
                                 onUnplace={handleUnplaceBlock}
+                                onDeselect={() => setSelectedFloatingBlock(null)}
                               />
                               {/* Unplaced floating blocks from this teacher */}
                               {freeformMode && teacherFloatingBlocks.length > 0 && (
@@ -2926,45 +3061,51 @@ export default function HistoryDetailPage() {
         </div>
       )}
 
-      {/* Save Schedule Dialog */}
-      <Dialog open={showSaveDialog} onOpenChange={setShowSaveDialog}>
+      {/* Star/Note Dialog */}
+      <Dialog open={showStarDialog} onOpenChange={setShowStarDialog}>
         <DialogContent className="sm:max-w-[425px]">
           <DialogHeader>
-            <DialogTitle>Save Schedule</DialogTitle>
+            <DialogTitle>{isEditingNote ? "Edit Note" : "Star Schedule"}</DialogTitle>
             <DialogDescription>
-              Add a note explaining why this schedule is being saved. This helps you remember what makes this version special compared to others.
+              {isEditingNote
+                ? "Update the note for this schedule."
+                : "Star this schedule to pin it at the top of your history. Add an optional note to remember why this version is special."}
             </DialogDescription>
           </DialogHeader>
           <div className="grid gap-4 py-4">
             <div className="grid gap-2">
-              <Label htmlFor="save-note">Note (required)</Label>
+              <Label htmlFor="star-note">Note {!isEditingNote && "(optional)"}</Label>
               <Textarea
-                id="save-note"
+                id="star-note"
                 placeholder="e.g., Best balance of study halls, minimal back-to-back issues for Randy..."
-                value={saveNote}
-                onChange={(e) => setSaveNote(e.target.value)}
+                value={starNote}
+                onChange={(e) => setStarNote(e.target.value)}
                 className="min-h-[100px]"
               />
             </div>
           </div>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setShowSaveDialog(false)}>
+            <Button variant="outline" onClick={() => setShowStarDialog(false)}>
               Cancel
             </Button>
             <Button
-              onClick={handleSave}
-              disabled={saving || !saveNote.trim()}
-              className="bg-emerald-500 hover:bg-emerald-600"
+              onClick={isEditingNote ? handleUpdateNote : handleStar}
+              disabled={saving}
+              className="bg-amber-500 hover:bg-amber-600"
             >
               {saving ? (
                 <>
                   <Loader2 className="h-4 w-4 animate-spin mr-2" />
-                  Saving...
+                  {isEditingNote ? "Saving..." : "Starring..."}
                 </>
               ) : (
                 <>
-                  <Save className="h-4 w-4 mr-2" />
-                  Save Schedule
+                  {isEditingNote ? (
+                    <Check className="h-4 w-4 mr-2" />
+                  ) : (
+                    <Star className="h-4 w-4 mr-2" />
+                  )}
+                  {isEditingNote ? "Save Note" : "Star Schedule"}
                 </>
               )}
             </Button>
@@ -2972,35 +3113,6 @@ export default function HistoryDetailPage() {
         </DialogContent>
       </Dialog>
 
-      {/* Confirmation dialog for updating existing option */}
-      <AlertDialog open={showUpdateConfirm} onOpenChange={setShowUpdateConfirm}>
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle>Update Option {selectedOption}?</AlertDialogTitle>
-            <AlertDialogDescription>
-              This will overwrite the current Option {selectedOption} with your changes.
-              This action cannot be undone. Consider using "Save as New" instead to preserve the original.
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogCancel onClick={() => setPendingUpdateAction(null)}>
-              Cancel
-            </AlertDialogCancel>
-            <AlertDialogAction
-              onClick={() => {
-                if (pendingUpdateAction) {
-                  pendingUpdateAction()
-                }
-                setPendingUpdateAction(null)
-                setShowUpdateConfirm(false)
-              }}
-              className="bg-amber-600 hover:bg-amber-700"
-            >
-              Update Option {selectedOption}
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
     </div>
   )
 }

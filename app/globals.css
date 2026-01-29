@@ -70,6 +70,19 @@
     visibility: hidden !important;
   }
 
+  /* Keep details elements open when printing if they were open */
+  details[open] {
+    display: block !important;
+  }
+
+  details[open] > summary {
+    display: list-item !important;
+  }
+
+  details[open] > *:not(summary) {
+    display: block !important;
+  }
+
   /* Reset background for print */
   body {
     background: white !important;
@@ -81,7 +94,6 @@
   .schedule-card {
     break-inside: avoid;
     page-break-inside: avoid;
-    margin-bottom: 0.75rem;
   }
 
 
@@ -95,7 +107,24 @@
   .print-grid {
     display: grid;
     grid-template-columns: repeat(2, 1fr);
-    gap: 0.75rem;
+    gap: 1rem;
+    background: white !important;
+  }
+
+  /* Remove gray page backgrounds on print, but preserve card header backgrounds */
+  .print-grid {
+    background: white !important;
+  }
+
+  main > div {
+    background: white !important;
+  }
+
+  /* Center the block number column (B1, B2, etc) */
+  .schedule-card th:first-child,
+  .schedule-card td:first-child {
+    text-align: center !important;
+    width: 1.5rem !important;
   }
 
   /* Ensure colors print correctly */
@@ -104,26 +133,89 @@
     print-color-adjust: exact;
   }
 
-  /* Slightly smaller fonts for stats summary cards */
+  /* Smaller fonts for schedule cards on print */
+  .schedule-card {
+    font-size: 0.6rem !important;
+    box-shadow: none !important;
+    border: 1px solid #e2e8f0 !important;
+  }
+
+  .schedule-card table {
+    font-size: 0.6rem !important;
+  }
+
+  .schedule-card th,
+  .schedule-card td {
+    padding: 0.1rem 0.15rem !important;
+    font-size: 0.6rem !important;
+    line-height: 1.3 !important;
+  }
+
+  .schedule-card td {
+    height: 1.75rem !important;
+    min-height: 1.75rem !important;
+  }
+
+  /* Cell content (grade + subject) */
+  .schedule-card td div {
+    font-size: 0.55rem !important;
+    line-height: 1.3 !important;
+  }
+
+  .schedule-card td .font-medium {
+    font-size: 0.6rem !important;
+  }
+
+  .schedule-card td .text-xs {
+    font-size: 0.45rem !important;
+  }
+
+  /* Subject text (uses text-[10px] class) */
+  .schedule-card td .text-\[10px\] {
+    font-size: 0.45rem !important;
+  }
+
+  /* Teacher name header */
+  .schedule-card > div:first-child {
+    padding: 0.35rem 0.5rem !important;
+    font-size: 0.7rem !important;
+  }
+
+  .schedule-card > div:first-child span {
+    font-size: 0.7rem !important;
+  }
+
+  /* Badge (full-time/part-time) smaller */
+  .schedule-card .rounded-full {
+    font-size: 0.45rem !important;
+    padding: 0.05rem 0.3rem !important;
+    line-height: 1.2 !important;
+    display: inline-flex !important;
+    align-items: center !important;
+  }
+
+  /* Smaller fonts for stats summary cards */
   .print-stats {
-    gap: 0.75rem !important;
+    display: grid !important;
+    grid-template-columns: repeat(4, 1fr) !important;
+    gap: 0.5rem !important;
   }
 
   .print-stats > div {
-    padding: 0.875rem !important;
+    padding: 0.5rem !important;
   }
 
   .print-stats .text-sm {
-    font-size: 0.8rem !important;
+    font-size: 0.6rem !important;
   }
 
   .print-stats .text-2xl {
-    font-size: 1.4rem !important;
-    line-height: 1.4 !important;
+    font-size: 1rem !important;
+    line-height: 1.2 !important;
   }
 
   .print-stats .text-xs {
-    font-size: 0.7rem !important;
+    font-size: 0.5rem !important;
   }
 
   /* Smaller fonts for notes & suggestions */
@@ -151,9 +243,9 @@
   }
 }
 
-/* Page margins for print */
+/* Page margins for print - minimal margins, let browser handle if needed */
 @page {
-  margin: 0.75in 0.65in;
+  margin: 0.4in 0.35in;
   size: letter;
 }
 
