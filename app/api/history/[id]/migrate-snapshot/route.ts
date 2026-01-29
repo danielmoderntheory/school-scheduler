@@ -12,6 +12,8 @@ export async function POST(
   { params }: { params: Promise<{ id: string }> }
 ) {
   const { id: generationId } = await params
+  const { searchParams } = request.nextUrl
+  const force = searchParams.get("force") === "true"
 
   // 1. Fetch the generation to get its quarter_id
   const { data: generation, error: genError } = await supabase
@@ -27,11 +29,18 @@ export async function POST(
     )
   }
 
-  // Check if already migrated
-  if (generation.stats?.classes_snapshot?.length > 0) {
+  // Check if already fully migrated (has all 4 snapshots)
+  const stats = generation.stats || {}
+  const hasAllSnapshots =
+    stats.classes_snapshot?.length > 0 &&
+    stats.teachers_snapshot?.length > 0 &&
+    stats.grades_snapshot?.length > 0 &&
+    stats.rules_snapshot?.length > 0
+
+  if (hasAllSnapshots && !force) {
     return NextResponse.json({
       message: "Already migrated",
-      stats_keys: Object.keys(generation.stats || {}),
+      stats_keys: Object.keys(stats),
     })
   }
 
