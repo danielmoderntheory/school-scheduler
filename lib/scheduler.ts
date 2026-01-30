@@ -183,6 +183,7 @@ interface Session {
   subject: string;
   validSlots: number[];
   isFixed: boolean;
+  cotaughtGroupId?: string; // Sessions with same grade+subject but different teachers
 }
 
 function buildSessions(classes: ClassEntry[]): Session[] {
@@ -225,6 +226,67 @@ function buildSessions(classes: ClassEntry[]): Session[] {
   return sessions;
 }
 
+/**
+ * Identify co-taught classes and assign group IDs.
+ * Co-taught = same grade+subject but different teachers.
+ * These sessions must be scheduled at the same time slot.
+ */
+function assignCotaughtGroups(sessions: Session[]): Map<string, Session[]> {
+  // Group sessions by grade+subject
+  const gradeSubjectGroups = new Map<string, Session[]>();
+
+  for (const session of sessions) {
+    // Skip electives - they don't have co-taught constraints
+    if (session.grade.includes('Elective')) continue;
+
+    const key = `${session.grade}|${session.subject}`;
+    if (!gradeSubjectGroups.has(key)) {
+      gradeSubjectGroups.set(key, []);
+    }
+    gradeSubjectGroups.get(key)!.push(session);
+  }
+
+  // Find groups with multiple teachers (co-taught)
+  const cotaughtGroups = new Map<string, Session[]>();
+
+  for (const [key, groupSessions] of gradeSubjectGroups) {
+    const teachers = new Set(groupSessions.map(s => s.teacher));
+    if (teachers.size > 1) {
+      // This is a co-taught class - multiple teachers for same grade+subject
+      // Group sessions by their "instance" (first session of each teacher pairs with first of others, etc.)
+      const sessionsByTeacher = new Map<string, Session[]>();
+      for (const s of groupSessions) {
+        if (!sessionsByTeacher.has(s.teacher)) {
+          sessionsByTeacher.set(s.teacher, []);
+        }
+        sessionsByTeacher.get(s.teacher)!.push(s);
+      }
+
+      // Find the minimum number of sessions across all teachers
+      const minSessions = Math.min(...Array.from(sessionsByTeacher.values()).map(arr => arr.length));
+
+      // Create co-taught groups by pairing sessions across teachers
+      for (let i = 0; i < minSessions; i++) {
+        const groupId = `${key}|${i}`;
+        const group: Session[] = [];
+
+        for (const [, teacherSessions] of sessionsByTeacher) {
+          if (i < teacherSessions.length) {
+            teacherSessions[i].cotaughtGroupId = groupId;
+            group.push(teacherSessions[i]);
+          }
+        }
+
+        if (group.length > 1) {
+          cotaughtGroups.set(groupId, group);
+        }
+      }
+    }
+  }
+
+  return cotaughtGroups;
+}
+
 // ============================================================================
 // JAVASCRIPT BACKTRACKING SOLVER
 // ============================================================================
@@ -240,7 +302,8 @@ function solveBacktracking(
   prefilledGradeSlots?: Map<string, Set<number>>,
   maxTimeMs: number = 5000, // 5 second timeout per attempt
   deprioritizeTeachers?: Set<string>, // Teachers to schedule last (for diversity)
-  rules?: SchedulingRule[] // Scheduling rules to respect
+  rules?: SchedulingRule[], // Scheduling rules to respect
+  cotaughtGroups?: Map<string, Session[]> // Co-taught class groups
 ): SolveResult {
   const assignment = new Map<number, number>();
   const startTime = Date.now();
@@ -251,6 +314,9 @@ function solveBacktracking(
   const teacherSlots = new Map<string, Set<number>>();
   const gradeSlots = new Map<string, Set<number>>();
   const gradeSubjectDay = new Map<string, Set<number>>(); // "grade|subject" -> set of days
+
+  // Track which co-taught sessions have been assigned (to skip them in main loop)
+  const assignedCotaughtSessions = new Set<number>();
 
   // Initialize tracking
   sessions.forEach(s => {
@@ -302,6 +368,31 @@ function solveBacktracking(
     return true;
   }
 
+  // Check if a slot is valid for an entire co-taught group (all teachers must be free)
+  function isValidForCotaughtGroup(groupId: string, slot: number): boolean {
+    const group = cotaughtGroups?.get(groupId);
+    if (!group) return true;
+
+    for (const session of group) {
+      if (!isValid(session, slot)) return false;
+    }
+    return true;
+  }
+
+  // Get intersection of valid slots across a co-taught group
+  function getCotaughtGroupValidSlots(groupId: string, baseSlots: number[]): number[] {
+    const group = cotaughtGroups?.get(groupId);
+    if (!group || group.length === 0) return baseSlots;
+
+    // Find slots that are valid for ALL sessions in the group
+    return baseSlots.filter(slot => {
+      for (const session of group) {
+        if (!session.validSlots.includes(slot)) return false;
+      }
+      return true;
+    });
+  }
+
   function assign(session: Session, slot: number): void {
     assignment.set(session.id, slot);
     teacherSlots.get(session.teacher)!.add(slot);
@@ -315,6 +406,17 @@ function solveBacktracking(
       if (!gradeSubjectDay.has(key)) gradeSubjectDay.set(key, new Set());
       gradeSubjectDay.get(key)!.add(day);
     });
+  }
+
+  // Assign all sessions in a co-taught group to the same slot
+  function assignCotaughtGroup(groupId: string, slot: number): void {
+    const group = cotaughtGroups?.get(groupId);
+    if (!group) return;
+
+    for (const session of group) {
+      assign(session, slot);
+      assignedCotaughtSessions.add(session.id);
+    }
   }
 
   function unassign(session: Session, slot: number): void {
@@ -331,6 +433,17 @@ function solveBacktracking(
     });
   }
 
+  // Unassign all sessions in a co-taught group
+  function unassignCotaughtGroup(groupId: string, slot: number): void {
+    const group = cotaughtGroups?.get(groupId);
+    if (!group) return;
+
+    for (const session of group) {
+      unassign(session, slot);
+      assignedCotaughtSessions.delete(session.id);
+    }
+  }
+
   function solve(idx: number): boolean | 'timeout' {
     // Check timeout and iteration limit
     iterations++;
@@ -341,18 +454,46 @@ function solveBacktracking(
     if (idx === sortedSessions.length) return true;
 
     const session = sortedSessions[idx];
-    let slots = session.validSlots.filter(s => isValid(session, s));
+
+    // Skip if this session was already assigned as part of a co-taught group
+    if (assignedCotaughtSessions.has(session.id)) {
+      return solve(idx + 1);
+    }
+
+    // Check if this session is part of a co-taught group
+    const cotaughtGroupId = session.cotaughtGroupId;
+    const isCotaught = cotaughtGroupId && cotaughtGroups?.has(cotaughtGroupId);
+
+    // Get valid slots - for co-taught, must work for ALL teachers in the group
+    let slots: number[];
+    if (isCotaught) {
+      // Get intersection of valid slots and filter by validity for entire group
+      slots = getCotaughtGroupValidSlots(cotaughtGroupId, session.validSlots)
+        .filter(s => isValidForCotaughtGroup(cotaughtGroupId, s));
+    } else {
+      slots = session.validSlots.filter(s => isValid(session, s));
+    }
 
     if (randomize) {
       slots = shuffle(slots);
     }
 
     for (const slot of slots) {
-      assign(session, slot);
+      if (isCotaught) {
+        assignCotaughtGroup(cotaughtGroupId, slot);
+      } else {
+        assign(session, slot);
+      }
+
       const result = solve(idx + 1);
       if (result === true) return true;
       if (result === 'timeout') return 'timeout';
-      unassign(session, slot);
+
+      if (isCotaught) {
+        unassignCotaughtGroup(cotaughtGroupId, slot);
+      } else {
+        unassign(session, slot);
+      }
     }
 
     return false;
@@ -899,6 +1040,13 @@ export async function generateSchedules(
 
   const sessions = buildSessions(classesToSchedule);
 
+  // Identify co-taught classes (same grade+subject, different teachers)
+  // These must be scheduled at the same time slot
+  const cotaughtGroups = assignCotaughtGroups(sessions);
+  if (cotaughtGroups.size > 0) {
+    console.log(`[Scheduler] Found ${cotaughtGroups.size} co-taught class groups`);
+  }
+
   if (isRefinementMode && sessions.length === 0) {
     console.log('[Scheduler] No sessions to schedule - all teachers locked?');
   }
@@ -968,7 +1116,8 @@ export async function generateSchedules(
       isRefinementMode ? lockedGradeSlots : undefined,
       5000, // 5 second timeout
       deprioritize.size > 0 ? deprioritize : undefined,
-      rules
+      rules,
+      cotaughtGroups.size > 0 ? cotaughtGroups : undefined
     );
 
     if (!result.assignment) {

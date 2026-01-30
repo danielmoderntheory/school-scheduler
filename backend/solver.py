@@ -178,7 +178,7 @@ def get_study_hall_eligible(teachers: list[Teacher], classes: list[ClassEntry]) 
     return eligible
 
 
-def build_sessions(classes: list[ClassEntry]) -> list[Session]:
+def build_sessions(classes: list[ClassEntry], locked_grade_slots: dict[str, set[int]] = None) -> list[Session]:
     """Convert classes to sessions (one per day of instruction).
 
     Sessions are sorted by constraint level (most constrained first):
@@ -192,6 +192,10 @@ def build_sessions(classes: list[ClassEntry]) -> list[Session]:
     Teacher load matters because a teacher with 20 sessions has less
     flexibility than one with 5, even if individual sessions have
     the same number of valid slots.
+
+    Args:
+        classes: List of ClassEntry objects to schedule
+        locked_grade_slots: Optional dict mapping grade -> set of slots blocked by locked teachers
     """
     sessions = []
     session_id = 0
@@ -261,13 +265,16 @@ def build_sessions(classes: list[ClassEntry]) -> list[Session]:
         else:
             valid_slots = get_valid_slots(cls.available_days, cls.available_blocks)
 
-            # For regular (non-elective) classes, remove slots blocked by electives
-            # This optimization pre-excludes slots where electives are fixed,
-            # reducing the solver's search space significantly
+            # For regular (non-elective) classes, remove slots blocked by:
+            # 1. Electives with fixed slots
+            # 2. Locked teachers (for partial regeneration)
             if not cls.is_elective and cls.grades:
                 blocked = set()
                 for grade in cls.grades:
                     blocked.update(grade_blocked_slots.get(grade, set()))
+                    # Also block slots from locked teachers
+                    if locked_grade_slots:
+                        blocked.update(locked_grade_slots.get(grade, set()))
                 if blocked:
                     valid_slots = [s for s in valid_slots if s not in blocked]
 
@@ -920,7 +927,9 @@ def generate_schedules(
     num_options: int = 3,
     num_attempts: int = 150,
     max_time_seconds: float = 280.0,
-    on_progress=None
+    on_progress=None,
+    locked_teachers: dict = None,  # Dict of teacher_name -> schedule (for partial regen)
+    teachers_needing_study_halls: list = None  # List of teacher names that need study halls
 ) -> dict:
     """
     Main entry point for schedule generation.
@@ -932,6 +941,8 @@ def generate_schedules(
         num_attempts: Number of seeds to try
         max_time_seconds: Maximum total time for all attempts
         on_progress: Optional callback(current, total, message)
+        locked_teachers: Dict mapping teacher names to their fixed schedules (for partial regen)
+        teachers_needing_study_halls: List of teacher names that need study halls assigned
 
     Returns:
         Dict with status, options, message, seeds_completed
@@ -1006,8 +1017,53 @@ def generate_schedules(
         ))
 
     full_time_names = [t.name for t in teacher_objs if t.status == 'full-time']
-    eligible = get_study_hall_eligible(teacher_objs, class_objs)
-    sessions = build_sessions(class_objs)
+
+    # Handle locked teachers for partial regeneration
+    locked_teacher_names = set(locked_teachers.keys()) if locked_teachers else set()
+    is_partial_regen = len(locked_teacher_names) > 0
+
+    # Filter out classes from locked teachers
+    if is_partial_regen:
+        classes_to_schedule = [c for c in class_objs if c.teacher not in locked_teacher_names]
+        print(f"[Solver] Partial regen: {len(locked_teacher_names)} locked teachers, "
+              f"{len(classes_to_schedule)}/{len(class_objs)} classes to schedule")
+    else:
+        classes_to_schedule = class_objs
+
+    # Pre-compute grade slots blocked by locked teachers
+    locked_grade_slots: dict[str, set[int]] = {g: set() for g in ALL_GRADES}
+    if locked_teachers:
+        for teacher_name, schedule in locked_teachers.items():
+            for day, blocks in schedule.items():
+                if day not in DAYS:
+                    continue
+                day_idx = DAYS.index(day)
+                for block_str, entry in blocks.items():
+                    if entry is None:
+                        continue
+                    block_num = int(block_str)
+                    if block_num not in BLOCKS:
+                        continue
+                    block_idx = BLOCKS.index(block_num)
+                    slot = day_block_to_slot(day_idx, block_idx)
+                    # entry is [grade, subject] - block this slot for this grade
+                    grade, subject = entry[0], entry[1]
+                    if subject != "OPEN" and subject != "Study Hall":
+                        # Parse grades (handle multi-grade like "6th-7th Grade")
+                        grades = GRADE_MAP.get(grade, [grade] if grade in ALL_GRADES else [])
+                        for g in grades:
+                            if g in locked_grade_slots:
+                                locked_grade_slots[g].add(slot)
+
+    eligible = get_study_hall_eligible(teacher_objs, classes_to_schedule)
+
+    # Override study hall eligible teachers if specific ones are requested
+    if teachers_needing_study_halls:
+        # Include both base eligible and explicitly requested teachers
+        eligible = list(set(eligible + teachers_needing_study_halls))
+        print(f"[Solver] Study hall teachers override: {teachers_needing_study_halls}")
+
+    sessions = build_sessions(classes_to_schedule, locked_grade_slots if is_partial_regen else None)
 
     if on_progress:
         on_progress(0, num_attempts, 'Initializing CP-SAT solver...')
@@ -1153,6 +1209,26 @@ def generate_schedules(
         for sol_idx, assignment in enumerate(solutions):
             # Build schedules
             teacher_schedules, grade_schedules = build_schedules(assignment, sessions, teacher_objs)
+
+            # Merge locked teacher schedules (for partial regeneration)
+            if locked_teachers:
+                for teacher_name, schedule in locked_teachers.items():
+                    teacher_schedules[teacher_name] = {}
+                    for day in DAYS:
+                        teacher_schedules[teacher_name][day] = {}
+                        for block in BLOCKS:
+                            entry = schedule.get(day, {}).get(str(block))
+                            teacher_schedules[teacher_name][day][block] = entry
+                            # Also update grade schedules
+                            if entry and entry[1] not in ("OPEN", "Study Hall"):
+                                grade, subject = entry[0], entry[1]
+                                # Handle multi-grade entries
+                                grades = GRADE_MAP.get(grade, [grade] if grade in ALL_GRADES else [])
+                                for g in grades:
+                                    if g in grade_schedules:
+                                        if day not in grade_schedules[g]:
+                                            grade_schedules[g][day] = {}
+                                        grade_schedules[g][day][block] = [teacher_name, subject]
 
             # Deep copy for processing
             ts = copy.deepcopy(teacher_schedules)

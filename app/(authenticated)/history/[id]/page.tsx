@@ -37,6 +37,7 @@ import Link from "next/link"
 import type { ScheduleOption, TeacherSchedule, GradeSchedule, Teacher, FloatingBlock, PendingPlacement, ValidationError, CellLocation } from "@/lib/types"
 import toast from "react-hot-toast"
 import { generateSchedules, reassignStudyHalls } from "@/lib/scheduler"
+import { generateSchedulesRemote } from "@/lib/scheduler-remote"
 
 // Sort grades: Kindergarten first, then by grade number
 function gradeSort(a: string, b: string): number {
@@ -438,23 +439,86 @@ export default function HistoryDetailPage() {
         .map(sh => sh.teacher as string)
 
       // Generate new schedule with locked teachers
-      // Use more attempts for refinement mode since constraints are tighter
+      // Try OR-Tools solver first, fall back to JS solver if it fails
       // Increment seed to get different results on subsequent regenerations
       const currentSeed = regenSeed + 1
       setRegenSeed(currentSeed)
 
-      setGenerationProgress({ current: 0, total: 100, message: "Starting..." })
-      const result = await generateSchedules(teachers, classes, {
+      setGenerationProgress({ current: 0, total: 100, message: "Starting OR-Tools solver..." })
+
+      // First try OR-Tools remote solver
+      const remoteResult = await generateSchedulesRemote(teachers, classes, {
         numOptions: 1,
-        numAttempts: 100,
+        numAttempts: 50, // Fewer attempts for regen since it's a partial solve
+        maxTimeSeconds: 120, // 2 minute timeout for regen
         lockedTeachers: lockedSchedules,
         teachersNeedingStudyHalls,
-        seed: currentSeed * 12345, // Multiply to spread seeds apart
-        rules, // Pass scheduling rules
+        rules,
         onProgress: (current, total, message) => {
-          setGenerationProgress({ current, total, message })
+          setGenerationProgress({ current, total, message: `[OR-Tools] ${message}` })
         }
       })
+
+      // Use a unified result type
+      let result: { status: string; options: ScheduleOption[]; message?: string } = remoteResult
+      let usedJsFallback = false
+
+      // Check if OR-Tools failed or produced no material changes
+      let shouldFallbackToJs = remoteResult.status !== 'success' || remoteResult.options.length === 0
+
+      // Also check for "no material changes" - if regenerated teachers' schedules are identical
+      if (!shouldFallbackToJs && remoteResult.options.length > 0) {
+        const newSchedules = remoteResult.options[0].teacherSchedules
+        let hasChanges = false
+
+        for (const teacher of selectedForRegen) {
+          const originalSchedule = selectedResult.teacherSchedules[teacher]
+          const newSchedule = newSchedules[teacher]
+
+          if (!originalSchedule || !newSchedule) continue
+
+          // Compare each slot
+          for (const day of ['Mon', 'Tues', 'Wed', 'Thurs', 'Fri']) {
+            for (const block of [1, 2, 3, 4, 5]) {
+              const origEntry = originalSchedule[day]?.[block]
+              const newEntry = newSchedule[day]?.[block]
+
+              // Compare as JSON strings to handle null and array entries
+              if (JSON.stringify(origEntry) !== JSON.stringify(newEntry)) {
+                hasChanges = true
+                break
+              }
+            }
+            if (hasChanges) break
+          }
+          if (hasChanges) break
+        }
+
+        if (!hasChanges) {
+          console.log('[Regen] OR-Tools returned no material changes, falling back to JS solver')
+          shouldFallbackToJs = true
+        }
+      }
+
+      // If OR-Tools failed or no changes, fall back to JS solver
+      if (shouldFallbackToJs) {
+        console.log('[Regen] Falling back to JS solver:', remoteResult.message || 'no changes')
+        setGenerationProgress({ current: 0, total: 100, message: "Trying JS solver for variety..." })
+
+        const jsResult = await generateSchedules(teachers, classes, {
+          numOptions: 1,
+          numAttempts: 100,
+          lockedTeachers: lockedSchedules,
+          teachersNeedingStudyHalls,
+          seed: currentSeed * 12345,
+          rules,
+          onProgress: (current, total, message) => {
+            setGenerationProgress({ current, total, message: `[JS] ${message}` })
+          }
+        })
+        result = jsResult
+        usedJsFallback = true
+      }
 
       if (result.status !== 'success' || result.options.length === 0) {
         toast.error(result.message || "Could not generate a valid schedule with these constraints")
@@ -472,7 +536,7 @@ export default function HistoryDetailPage() {
       setPreviewTeachers(new Set(selectedForRegen))
       setPreviewOption(newOption)
       setPreviewType("regen")
-      toast.success("Schedules regenerated")
+      toast.success(usedJsFallback ? "Schedules regenerated (JS solver)" : "Schedules regenerated (OR-Tools)")
     } catch (error) {
       console.error('Regeneration error:', error)
       toast.error("Failed to generate variation")

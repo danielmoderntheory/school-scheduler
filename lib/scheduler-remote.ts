@@ -21,6 +21,8 @@ export interface RemoteGeneratorOptions {
   maxTimeSeconds?: number;
   onProgress?: (current: number, total: number, message: string) => void;
   rules?: SchedulingRule[];
+  lockedTeachers?: Record<string, Record<string, Record<number, [string, string] | null>>>; // For partial regen
+  teachersNeedingStudyHalls?: string[]; // Teachers that need study halls assigned
 }
 
 export interface ScheduleDiagnostics {
@@ -99,7 +101,9 @@ export async function generateSchedulesRemote(
     numAttempts = 150,
     maxTimeSeconds = 280,
     onProgress,
-    rules = []
+    rules = [],
+    lockedTeachers,
+    teachersNeedingStudyHalls,
   } = options;
 
   // Allow UI to render before starting
@@ -147,6 +151,8 @@ export async function generateSchedulesRemote(
       numOptions,
       numAttempts,
       maxTimeSeconds,
+      lockedTeachers,
+      teachersNeedingStudyHalls,
     };
 
     // Start simulated progress (since we can't get real progress from the API)
