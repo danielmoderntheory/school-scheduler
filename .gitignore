@@ -37,3 +37,5 @@ next-env.d.ts
 supabase/.branches
 supabase/.temp
 backups/
+__pycache__/
+*.pyc

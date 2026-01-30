@@ -79,6 +79,8 @@ class SolveRequest(BaseModel):
     numOptions: int = 3
     numAttempts: int = 150
     maxTimeSeconds: float = 280.0  # Stay under Vercel's 300s function limit
+    lockedTeachers: Optional[dict] = None  # For partial regen: teacher_name -> schedule
+    teachersNeedingStudyHalls: Optional[list[str]] = None  # Teachers that need study halls
 
 
 class SolveResponse(BaseModel):
@@ -141,6 +143,12 @@ async def solve_schedule(request: SolveRequest):
             logger.debug(f"  Class {i+1}: {c['teacher']} - {grades} - {c['subject']} x{c.get('daysPerWeek', 1)}/wk{constraint_str}")
 
     try:
+        # Log partial regen info if applicable
+        if request.lockedTeachers:
+            logger.info(f"  Partial regen: {len(request.lockedTeachers)} locked teachers")
+        if request.teachersNeedingStudyHalls:
+            logger.info(f"  Teachers needing study halls: {request.teachersNeedingStudyHalls}")
+
         # Run the solver
         result = generate_schedules(
             teachers=teachers,
@@ -148,6 +156,8 @@ async def solve_schedule(request: SolveRequest):
             num_options=request.numOptions,
             num_attempts=request.numAttempts,
             max_time_seconds=request.maxTimeSeconds,
+            locked_teachers=request.lockedTeachers,
+            teachers_needing_study_halls=request.teachersNeedingStudyHalls,
         )
 
         elapsed = time.time() - start_time
