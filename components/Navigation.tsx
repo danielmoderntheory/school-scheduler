@@ -1,7 +1,7 @@
 "use client"
 
 import Link from "next/link"
-import { usePathname } from "next/navigation"
+import { usePathname, useRouter } from "next/navigation"
 import { cn } from "@/lib/utils"
 import { QuarterSelector } from "./QuarterSelector"
 import { Button } from "@/components/ui/button"
@@ -12,6 +12,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
 import { Settings, Users, History, Cog, Heart, GraduationCap, BookOpen } from "lucide-react"
+import { useGeneration } from "@/lib/generation-context"
 
 const mainNavItems = [
   { href: "/classes", label: "Classes" },
@@ -28,6 +29,15 @@ const moreItems = [
 
 export function Navigation() {
   const pathname = usePathname()
+  const router = useRouter()
+  const { confirmNavigation } = useGeneration()
+
+  const handleNavClick = (e: React.MouseEvent<HTMLAnchorElement>, href: string) => {
+    if (pathname === href) return // Already on this page
+    if (!confirmNavigation()) {
+      e.preventDefault()
+    }
+  }
 
   return (
     <header className="border-b no-print">
@@ -43,6 +53,7 @@ export function Navigation() {
                 <Link
                   key={item.href}
                   href={item.href}
+                  onClick={(e) => handleNavClick(e, item.href)}
                   className={cn(
                     "px-3 py-1.5 text-sm font-medium rounded-md transition-colors",
                     pathname === item.href
@@ -71,7 +82,11 @@ export function Navigation() {
               <DropdownMenuContent align="end">
                 {moreItems.map((item) => (
                   <DropdownMenuItem key={item.href} asChild>
-                    <Link href={item.href} className="flex items-center gap-2">
+                    <Link
+                      href={item.href}
+                      onClick={(e) => handleNavClick(e, item.href)}
+                      className="flex items-center gap-2"
+                    >
                       <item.icon className="h-4 w-4" />
                       {item.label}
                     </Link>

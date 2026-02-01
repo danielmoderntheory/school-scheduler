@@ -15,62 +15,77 @@ DAYS = ['Mon', 'Tues', 'Wed', 'Thurs', 'Fri']
 BLOCKS = [1, 2, 3, 4, 5]
 NUM_SLOTS = 25
 
-ALL_GRADES = [
-    'Kindergarten', '1st Grade', '2nd Grade', '3rd Grade', '4th Grade', '5th Grade',
-    '6th Grade', '7th Grade', '8th Grade', '9th Grade', '10th Grade', '11th Grade'
-]
+# NOTE: Grade lists are now passed from the database - no hardcoded grade constants
 
-GRADE_MAP = {
-    # Standard grade names
-    'Kindergarten': ['Kindergarten'],
-    'Kingergarten': ['Kindergarten'],  # Handle typo
-    'kindergarten': ['Kindergarten'],  # Handle lowercase
-    '1st Grade': ['1st Grade'],
-    '2nd Grade': ['2nd Grade'],
-    '3rd Grade': ['3rd Grade'],
-    '4th Grade': ['4th Grade'],
-    '5th Grade': ['5th Grade'],
-    '6th Grade': ['6th Grade'],
-    '7th Grade': ['7th Grade'],
-    '8th Grade': ['8th Grade'],
-    '9th Grade': ['9th Grade'],
-    '10th Grade': ['10th Grade'],
-    '11th Grade': ['11th Grade'],
-    # Shortened versions (database format)
-    '1st': ['1st Grade'],
-    '2nd': ['2nd Grade'],
-    '3rd': ['3rd Grade'],
-    '4th': ['4th Grade'],
-    '5th': ['5th Grade'],
-    '6th': ['6th Grade'],
-    '7th': ['7th Grade'],
-    '8th': ['8th Grade'],
-    '9th': ['9th Grade'],
-    '10th': ['10th Grade'],
-    '11th': ['11th Grade'],
-    # Combined grades
-    '6th-7th Grade': ['6th Grade', '7th Grade'],
-    '6th-7th': ['6th Grade', '7th Grade'],
-    '10th-11th Grade': ['10th Grade', '11th Grade'],
-    '10th-11th': ['10th Grade', '11th Grade'],
-    # Electives - spans multiple grades but treated as a single group
-    # Don't map to individual grades to avoid excessive conflicts
-    '6th-11th-elective': [],  # Electives handled specially - no grade conflicts
-}
 
-UPPER_GRADES = {
-    '6th Grade', '7th Grade', '8th Grade', '9th Grade', '10th Grade', '11th Grade',
-    '6th', '7th', '8th', '9th', '10th', '11th',  # Shortened versions
-    '6th-7th', '10th-11th', '6th-11th-elective',  # Combined grades
-}
+def is_rule_enabled(rules: list[dict], rule_key: str) -> bool:
+    """Check if a scheduling rule is enabled.
 
-# Study hall groups - each grade needs one study hall per week
-# Grades that CAN be combined if individual placement fails
-STUDY_HALL_GRADES = ['6th Grade', '7th Grade', '8th Grade', '9th Grade', '10th Grade', '11th Grade']
-COMBINABLE_GRADES = [
-    ('6th Grade', '7th Grade'),    # Can combine 6th-7th
-    ('10th Grade', '11th Grade'),  # Can combine 10th-11th
-]
+    Returns True if:
+    - rules is None or empty (default to enabled)
+    - rule not found in list (default to enabled)
+    - rule is found and enabled=True
+    """
+    if not rules:
+        return True
+    for rule in rules:
+        if rule.get('rule_key') == rule_key:
+            return rule.get('enabled', True)
+    return True  # Default to enabled if rule not found
+
+
+def get_rule_config(rules: list[dict], rule_key: str) -> dict:
+    """Get the config for a scheduling rule.
+
+    Returns empty dict if rules is None, rule not found, or no config.
+    """
+    if not rules:
+        return {}
+    for rule in rules:
+        if rule.get('rule_key') == rule_key:
+            return rule.get('config') or {}
+    return {}
+
+
+def get_study_hall_grades(rules: list[dict]) -> list[str]:
+    """Get the list of grades that should have study halls assigned.
+
+    Reads from study_hall_grades rule config. Returns empty if not configured.
+    All study hall grades must be explicitly configured in the database.
+    """
+    if not is_rule_enabled(rules, 'study_hall_grades'):
+        return []
+
+    config = get_rule_config(rules, 'study_hall_grades')
+    grades = config.get('grades', [])
+
+    # Return configured grades (no hardcoded defaults)
+    return list(grades) if grades else []
+
+
+def get_study_hall_eligible_statuses(rules: list[dict]) -> set[str]:
+    """Get the set of teacher statuses eligible for study hall supervision.
+
+    Reads from study_hall_teacher_eligibility rule config.
+    Returns set of statuses like {'full-time', 'part-time'}.
+    Default is {'full-time'} only.
+    """
+    if not is_rule_enabled(rules, 'study_hall_teacher_eligibility'):
+        return {'full-time'}  # Default to full-time only
+
+    config = get_rule_config(rules, 'study_hall_teacher_eligibility')
+
+    statuses = set()
+    if config.get('allow_full_time', True):  # Default to True
+        statuses.add('full-time')
+    if config.get('allow_part_time', False):  # Default to False
+        statuses.add('part-time')
+
+    # If somehow both are unchecked, default to full-time
+    if not statuses:
+        statuses.add('full-time')
+
+    return statuses
 
 
 @dataclass
@@ -137,10 +152,47 @@ def day_block_to_slot(day_idx: int, block_idx: int) -> int:
     return day_idx * 5 + block_idx
 
 
+def number_to_grade(num: int) -> str:
+    """Convert number to grade name: 0 -> 'Kindergarten', 6 -> '6th Grade'."""
+    if num == 0:
+        return 'Kindergarten'
+    suffix = 'st' if num == 1 else 'nd' if num == 2 else 'rd' if num == 3 else 'th'
+    return f'{num}{suffix} Grade'
+
+
 def parse_grades(grade_field: str) -> list:
-    if 'Elective' in grade_field:
+    """Parse grade display name to individual grades.
+    Used internally by the solver for constraint checking.
+    For matching against database grades, use parse_grades_from_database instead.
+    """
+    import re
+
+    if 'elective' in grade_field.lower():
         return []
-    return GRADE_MAP.get(grade_field.strip(), [])
+
+    trimmed = grade_field.strip()
+
+    # Try to parse grade ranges like "6th-8th Grade" or "6th-11th"
+    range_match = re.match(r'(\d+)(?:st|nd|rd|th)?[-–](\d+)(?:st|nd|rd|th)?', trimmed, re.IGNORECASE)
+    if range_match:
+        start = int(range_match.group(1))
+        end = int(range_match.group(2))
+        if start > 0 and end > 0 and start <= end:
+            return [number_to_grade(i) for i in range(start, end + 1)]
+
+    # Try Kindergarten
+    if 'kindergarten' in trimmed.lower():
+        return ['Kindergarten']
+
+    # Try single grade parsing (e.g., "6th Grade", "6th")
+    single_match = re.match(r'^(\d+)(?:st|nd|rd|th)', trimmed, re.IGNORECASE)
+    if single_match:
+        num = int(single_match.group(1))
+        if num >= 1:
+            return [number_to_grade(num)]
+
+    # If no pattern matched, return the original as-is (it might be a valid grade name)
+    return [trimmed] if trimmed else []
 
 
 def get_valid_slots(avail_days: list, avail_blocks: list) -> list:
@@ -157,19 +209,23 @@ def get_valid_slots(avail_days: list, avail_blocks: list) -> list:
     return slots if slots else list(range(25))
 
 
-def get_study_hall_eligible(teachers: list[Teacher], classes: list[ClassEntry]) -> list[str]:
+def get_study_hall_eligible(teachers: list[Teacher], classes: list[ClassEntry], rules: list[dict] = None) -> list[str]:
     """Get teachers eligible to supervise study hall.
 
     Eligibility:
-    - Must be full-time
-    - Not excluded (excludeFromStudyHall=True means excluded, stored as canSuperviseStudyHall)
+    - Status must match allowed statuses from study_hall_teacher_eligibility rule
+      (default: full-time only)
+    - Not individually excluded (canSuperviseStudyHall=True means excluded)
 
     Note: The field is inverted - canSuperviseStudyHall=True means EXCLUDED from study hall
     (because the UI checkbox is "Exclude from Study Hall")
     """
+    allowed_statuses = get_study_hall_eligible_statuses(rules)
+
     eligible = []
     for t in teachers:
-        if t.status != 'full-time':
+        # Check if teacher's status is allowed by the rule config
+        if t.status not in allowed_statuses:
             continue
         # canSuperviseStudyHall=True means EXCLUDED (checkbox is "Exclude from Study Hall")
         if t.can_supervise_study_hall is True:
@@ -178,8 +234,13 @@ def get_study_hall_eligible(teachers: list[Teacher], classes: list[ClassEntry]) 
     return eligible
 
 
-def build_sessions(classes: list[ClassEntry], locked_grade_slots: dict[str, set[int]] = None) -> list[Session]:
+def build_sessions(classes: list[ClassEntry], locked_grade_slots: dict[str, set[int]] = None, grades: list[str] = None) -> list[Session]:
     """Convert classes to sessions (one per day of instruction).
+
+    Args:
+        classes: List of ClassEntry objects
+        locked_grade_slots: Dict mapping grade to set of blocked slot numbers
+        grades: List of grade names from database (for grade_blocked_slots initialization)
 
     Sessions are sorted by constraint level (most constrained first):
     1. Fixed slots first (only 1 valid slot)
@@ -230,7 +291,8 @@ def build_sessions(classes: list[ClassEntry], locked_grade_slots: dict[str, set[
 
     # Pre-compute slots blocked by electives for each grade
     # Electives with fixed slots block those slots for all grades they cover
-    grade_blocked_slots: dict[str, set[int]] = {g: set() for g in ALL_GRADES}
+    all_grades = grades if grades else []
+    grade_blocked_slots: dict[str, set[int]] = {g: set() for g in all_grades}
     for cls in classes:
         if cls.is_elective and cls.fixed_slots:
             for day, block in cls.fixed_slots:
@@ -335,7 +397,7 @@ class SolutionCollector(cp_model.CpSolverSolutionCallback):
         return self._solutions
 
 
-def solve_with_cpsat(sessions: list[Session], seed: int = 0, time_limit: float = 10.0, max_solutions: int = 5, diagnostics: dict = None) -> list[dict]:
+def solve_with_cpsat(sessions: list[Session], seed: int = 0, time_limit: float = 10.0, max_solutions: int = 5, diagnostics: dict = None, rules: list[dict] = None, active_grades: list[str] = None) -> list[dict]:
     """
     Solve the scheduling problem using CP-SAT.
 
@@ -343,9 +405,17 @@ def solve_with_cpsat(sessions: list[Session], seed: int = 0, time_limit: float =
 
     If diagnostics dict is provided, it will be populated with diagnostic info
     that can be shown to end users to help understand infeasibility.
+
+    If rules is provided, certain constraints can be toggled on/off based on rule settings.
+
+    active_grades is required - list of all grade names from the database.
     """
     import random
     rng = random.Random(seed)
+
+    # active_grades is required - no fallback
+    if not active_grades:
+        active_grades = []
 
     if diagnostics is not None:
         # Collect diagnostic info for end users
@@ -434,7 +504,7 @@ def solve_with_cpsat(sessions: list[Session], seed: int = 0, time_limit: float =
     # - Elective vs Regular (same grades): CONFLICT - elective period blocks regular classes
     # - Regular vs Regular (same grades): CONFLICT - standard grade blocking
     #
-    for grade in ALL_GRADES:
+    for grade in active_grades:
         regular_sessions = [s for s in sessions if grade in s.grades and not s.is_elective]
         elective_sessions = [s for s in sessions if grade in s.grades and s.is_elective]
 
@@ -453,29 +523,31 @@ def solve_with_cpsat(sessions: list[Session], seed: int = 0, time_limit: float =
 
     # Hard Constraint 3: No duplicate subjects per day per grade
     # Note: Also skip electives for this constraint
-    for grade in ALL_GRADES:
-        subjects_for_grade = set()
-        for s in sessions:
-            if s.is_elective:
-                continue
-            if grade in s.grades:
-                subjects_for_grade.add(s.subject)
+    # This constraint can be toggled via the 'no_duplicate_subjects' rule
+    if is_rule_enabled(rules, 'no_duplicate_subjects'):
+        for grade in active_grades:
+            subjects_for_grade = set()
+            for s in sessions:
+                if s.is_elective:
+                    continue
+                if grade in s.grades:
+                    subjects_for_grade.add(s.subject)
 
-        for subject in subjects_for_grade:
-            # Get all sessions for this grade+subject (excluding electives)
-            gs_sessions = [s for s in sessions
-                         if grade in s.grades and s.subject == subject and not s.is_elective]
+            for subject in subjects_for_grade:
+                # Get all sessions for this grade+subject (excluding electives)
+                gs_sessions = [s for s in sessions
+                             if grade in s.grades and s.subject == subject and not s.is_elective]
 
-            if len(gs_sessions) > 1:
-                # For each pair, ensure they're on different days
-                for i, s1 in enumerate(gs_sessions):
-                    for s2 in gs_sessions[i+1:]:
-                        # day = slot // 5, so different days means slot1//5 != slot2//5
-                        day1 = model.NewIntVar(0, 4, f'd1_{s1.id}_{s2.id}')
-                        day2 = model.NewIntVar(0, 4, f'd2_{s1.id}_{s2.id}')
-                        model.AddDivisionEquality(day1, slot_vars[s1.id], 5)
-                        model.AddDivisionEquality(day2, slot_vars[s2.id], 5)
-                        model.Add(day1 != day2)
+                if len(gs_sessions) > 1:
+                    # For each pair, ensure they're on different days
+                    for i, s1 in enumerate(gs_sessions):
+                        for s2 in gs_sessions[i+1:]:
+                            # day = slot // 5, so different days means slot1//5 != slot2//5
+                            day1 = model.NewIntVar(0, 4, f'd1_{s1.id}_{s2.id}')
+                            day2 = model.NewIntVar(0, 4, f'd2_{s1.id}_{s2.id}')
+                            model.AddDivisionEquality(day1, slot_vars[s1.id], 5)
+                            model.AddDivisionEquality(day2, slot_vars[s2.id], 5)
+                            model.Add(day1 != day2)
 
     # Hard Constraint 4: Co-taught classes (same grade+subject, different teachers)
     # If multiple teachers teach the same grade+subject, they must be scheduled together.
@@ -573,8 +645,15 @@ def solve_with_cpsat(sessions: list[Session], seed: int = 0, time_limit: float =
     return []
 
 
-def build_schedules(assignment: dict, sessions: list[Session], teachers: list[Teacher]):
-    """Build teacher and grade schedule dictionaries from assignment."""
+def build_schedules(assignment: dict, sessions: list[Session], teachers: list[Teacher], grades: list[str] = None):
+    """Build teacher and grade schedule dictionaries from assignment.
+
+    Args:
+        assignment: Dict mapping session ID to slot
+        sessions: List of sessions being scheduled
+        teachers: List of all teachers
+        grades: Optional list of all grades (from database). If provided, all grades will be initialized.
+    """
     teacher_schedules = {}
     grade_schedules = {}
 
@@ -583,10 +662,14 @@ def build_schedules(assignment: dict, sessions: list[Session], teachers: list[Te
     for t in all_teachers:
         teacher_schedules[t] = {day: {b: None for b in BLOCKS} for day in DAYS}
 
-    all_grades = set()
-    for s in sessions:
-        for g in s.grades:
-            all_grades.add(g)
+    # Use provided grades if available, otherwise collect from sessions
+    if grades:
+        all_grades = set(grades)
+    else:
+        all_grades = set()
+        for s in sessions:
+            for g in s.grades:
+                all_grades.add(g)
     for grade in all_grades:
         grade_schedules[grade] = {day: {b: None for b in BLOCKS} for day in DAYS}
 
@@ -607,6 +690,114 @@ def build_schedules(assignment: dict, sessions: list[Session], teachers: list[Te
                 grade_schedules[grade][day][block] = [s.teacher, s.subject]
 
     return teacher_schedules, grade_schedules
+
+
+def parse_grades_from_database(grade_display: str, database_grades: set) -> list[str]:
+    """Parse grade display name to individual grades using DATABASE grades (no hardcoding).
+
+    Args:
+        grade_display: The display name from a schedule entry (e.g., "6th Grade" or "6th-7th Grade")
+        database_grades: Set of grade names from the database
+
+    Returns:
+        List of matching grade names from the database
+    """
+    import re
+
+    # Skip electives - they don't map to specific grades
+    if 'elective' in grade_display.lower():
+        return []
+
+    trimmed = grade_display.strip()
+
+    # 1. Direct match - most common case
+    if trimmed in database_grades:
+        return [trimmed]
+
+    # 2. Try to parse as a grade range (e.g., "6th-7th Grade", "6th-11th")
+    range_match = re.match(r'(\d+)(?:st|nd|rd|th)?[-–](\d+)(?:st|nd|rd|th)?', trimmed, re.IGNORECASE)
+    if range_match:
+        start = int(range_match.group(1))
+        end = int(range_match.group(2))
+        if start > 0 and end > 0 and start <= end:
+            matched_grades = []
+            # Find database grades that match numbers in this range
+            for db_grade in database_grades:
+                grade_num = grade_to_number(db_grade)
+                if grade_num >= start and grade_num <= end:
+                    matched_grades.append(db_grade)
+            if matched_grades:
+                return matched_grades
+
+    # 3. Try single grade number parsing and find matching database grade
+    single_match = re.search(r'(\d+)(?:st|nd|rd|th)', trimmed, re.IGNORECASE)
+    if single_match:
+        num = int(single_match.group(1))
+        # Find database grade with this number
+        for db_grade in database_grades:
+            if grade_to_number(db_grade) == num:
+                return [db_grade]
+
+    # 4. Handle Kindergarten variations
+    if 'kindergarten' in trimmed.lower():
+        for db_grade in database_grades:
+            if 'kindergarten' in db_grade.lower():
+                return [db_grade]
+
+    # No match found
+    return []
+
+
+def grade_to_number(grade: str) -> int:
+    """Parse grade number from string like '6th Grade' -> 6, 'Kindergarten' -> 0."""
+    import re
+    if 'kindergarten' in grade.lower():
+        return 0
+    match = re.search(r'(\d+)', grade)
+    return int(match.group(1)) if match else -1
+
+
+def rebuild_grade_schedules(teacher_schedules: dict, grades: list[str]) -> dict:
+    """Rebuild grade schedules entirely from teacher schedules.
+
+    This is a destructive rebuild that ensures grade schedules always match
+    teacher schedules, avoiding any merge/sync issues.
+
+    IMPORTANT: Uses database grades dynamically - NO hardcoded grade lists.
+
+    Args:
+        teacher_schedules: Dict mapping teacher names to their schedules
+        grades: List of all grade names (from database)
+
+    Returns:
+        New grade_schedules dict built from teacher_schedules
+    """
+    grade_schedules = {}
+    database_grades = set(grades)
+
+    # Initialize empty schedules for all database grades
+    for g in grades:
+        grade_schedules[g] = {day: {b: None for b in BLOCKS} for day in DAYS}
+
+    # Populate from teacher schedules
+    for teacher, schedule in teacher_schedules.items():
+        for day in DAYS:
+            for block in BLOCKS:
+                entry = schedule.get(day, {}).get(block)
+                if entry and len(entry) > 1 and entry[1] != 'OPEN':
+                    grade_display = entry[0]
+                    subject = entry[1]
+
+                    # Parse grades using DATABASE grades (no hardcoding)
+                    parsed_grades = parse_grades_from_database(grade_display, database_grades)
+
+                    for g in parsed_grades:
+                        # Initialize grade if somehow not in the list (safety)
+                        if g not in grade_schedules:
+                            grade_schedules[g] = {d: {b: None for b in BLOCKS} for d in DAYS}
+                        grade_schedules[g][day][block] = [teacher, subject]
+
+    return grade_schedules
 
 
 def redistribute_open_blocks(teacher_schedules: dict, grade_schedules: dict,
@@ -742,19 +933,34 @@ def redistribute_open_blocks(teacher_schedules: dict, grade_schedules: dict,
 
 
 def add_study_halls(teacher_schedules: dict, grade_schedules: dict,
-                    eligible_teachers: list[str]) -> list[StudyHallAssignment]:
+                    eligible_teachers: list[str],
+                    preserve_existing: bool = True,
+                    rules: list[dict] = None,
+                    grades: list[str] = None) -> list[StudyHallAssignment]:
     """Assign study halls to eligible teachers with open blocks.
 
     Strategy:
-    1. Try to place each grade (6th-11th) individually first
-    2. For grades that fail, try combining with adjacent grade (6th-7th or 10th-11th)
+    1. Try to place each grade (configured in study_hall_grades rule) individually first
+    2. If placement fails, mark as unplaced (no auto-combining)
+
+    Args:
+        preserve_existing: If True, keep existing study halls and only fill gaps.
+                          If False, reassign all study halls from scratch.
+        rules: Scheduling rules to read config from (study_hall_grades).
 
     Prioritizes teachers with MORE open blocks (not even distribution).
     """
+    # Get configured study hall grades from rules
+    study_hall_grades = get_study_hall_grades(rules)
+
+    # If no grades configured (or rule disabled), skip study hall assignment
+    if not study_hall_grades:
+        return []
+
     assignments = []
 
     if not eligible_teachers:
-        return [StudyHallAssignment(group=g) for g in STUDY_HALL_GRADES]
+        return [StudyHallAssignment(group=g) for g in study_hall_grades]
 
     def count_open_blocks(teacher: str) -> int:
         """Count remaining open blocks (not teaching, not already study hall)."""
@@ -771,12 +977,33 @@ def add_study_halls(teacher_schedules: dict, grade_schedules: dict,
     valid_teachers = [t for t in eligible_teachers if t in teacher_schedules]
 
     if not valid_teachers:
-        return [StudyHallAssignment(group=g) for g in STUDY_HALL_GRADES]
+        return [StudyHallAssignment(group=g) for g in study_hall_grades]
 
     # Track which days each grade already has a study hall
-    grade_study_hall_days: dict[str, set[str]] = {g: set() for g in ALL_GRADES}
+    all_grades = grades if grades else []
+    grade_study_hall_days: dict[str, set[str]] = {g: set() for g in all_grades}
     # Track which grades have been placed
     placed_grades: set[str] = set()
+
+    # Pre-populate with existing study halls from grade_schedules (for partial regen)
+    # Only if preserve_existing is True - otherwise we reassign all study halls
+    if preserve_existing:
+        for grade in all_grades:
+            if grade not in grade_schedules:
+                continue
+            for day in DAYS:
+                for block in BLOCKS:
+                    entry = grade_schedules.get(grade, {}).get(day, {}).get(block)
+                    if entry and len(entry) > 1 and entry[1] == 'Study Hall':
+                        grade_study_hall_days[grade].add(day)
+                        placed_grades.add(grade)
+                        # Also record as an assignment (for return value)
+                        assignments.append(StudyHallAssignment(
+                            group=grade,
+                            teacher=entry[0],  # teacher name is in entry[0]
+                            day=day,
+                            block=block
+                        ))
 
     def try_place_study_hall(group_name: str, group_grades: list[str]) -> bool:
         """Try to place a study hall for a group of grades. Returns True if successful."""
@@ -823,24 +1050,16 @@ def add_study_halls(teacher_schedules: dict, grade_schedules: dict,
                         return True
         return False
 
-    # Phase 1: Try to place each grade individually
+    # Try to place each grade individually
     failed_grades = []
-    for grade in STUDY_HALL_GRADES:
+    for grade in study_hall_grades:
+        # Skip grades that already have study halls (from locked teachers)
+        if grade in placed_grades:
+            continue
         if try_place_study_hall(grade, [grade]):
             placed_grades.add(grade)
         else:
             failed_grades.append(grade)
-
-    # Phase 2: For failed grades, try combining with adjacent grade
-    for grade1, grade2 in COMBINABLE_GRADES:
-        # Only combine if BOTH grades failed individually
-        if grade1 in failed_grades and grade2 in failed_grades:
-            combined_name = f"{grade1.replace(' Grade', '')}-{grade2.replace(' Grade', '')} Grade"
-            if try_place_study_hall(combined_name, [grade1, grade2]):
-                placed_grades.add(grade1)
-                placed_grades.add(grade2)
-                failed_grades.remove(grade1)
-                failed_grades.remove(grade2)
 
     # Add unplaced grades as failed assignments
     for grade in failed_grades:
@@ -879,6 +1098,30 @@ def count_back_to_back(teacher_schedules: dict, teacher: str) -> int:
 
             if is_open1 and is_open2:
                 count += 1
+
+    return count
+
+
+def count_same_day_open(teacher_schedules: dict, teacher: str) -> int:
+    """Count days with multiple OPEN blocks for a teacher (spread_open metric).
+
+    Returns the number of "extra" OPEN blocks per day beyond the first.
+    E.g., if a teacher has 3 OPEN blocks on Monday, that's 2 issues (3-1=2).
+
+    Both OPEN and Study Hall count as "open" for this calculation.
+    """
+    count = 0
+    schedule = teacher_schedules.get(teacher, {})
+
+    for day in DAYS:
+        open_count = 0
+        for block in BLOCKS:
+            cell = schedule.get(day, {}).get(block)
+            if cell and len(cell) > 1 and cell[1] in ('OPEN', 'Study Hall'):
+                open_count += 1
+        # Penalize having more than 1 OPEN block per day
+        if open_count > 1:
+            count += open_count - 1
 
     return count
 
@@ -924,12 +1167,18 @@ def compute_teacher_stats(teacher_schedules: dict, teachers: list[Teacher]) -> l
 def generate_schedules(
     teachers: list[dict],
     classes: list[dict],
+    rules: list[dict] = None,  # Scheduling rules from database
     num_options: int = 3,
     num_attempts: int = 150,
     max_time_seconds: float = 280.0,
     on_progress=None,
     locked_teachers: dict = None,  # Dict of teacher_name -> schedule (for partial regen)
-    teachers_needing_study_halls: list = None  # List of teacher names that need study halls
+    teachers_needing_study_halls: list = None,  # List of teacher names that need study halls
+    start_seed: int = 0,  # Starting seed offset for variety on re-runs
+    skip_top_solutions: int = 0,  # Skip the top N solutions and return next best (for variety)
+    randomize_scoring: bool = False,  # Add noise to scoring to pick suboptimal but valid solutions
+    allow_study_hall_reassignment: bool = False,  # If True, reassign all study halls; if False, preserve locked teacher study halls
+    grades: list[str] = None  # All grade names from database - used for grade schedule initialization
 ) -> dict:
     """
     Main entry point for schedule generation.
@@ -937,6 +1186,7 @@ def generate_schedules(
     Args:
         teachers: List of teacher dicts with name, status, can_supervise_study_hall
         classes: List of class dicts with teacher, grade, subject, days_per_week, etc.
+        rules: List of scheduling rules from database (controls which constraints are enforced)
         num_options: Number of schedule options to return
         num_attempts: Number of seeds to try
         max_time_seconds: Maximum total time for all attempts
@@ -949,6 +1199,46 @@ def generate_schedules(
     """
     start_time = time.time()
     time_per_attempt = min(10.0, max_time_seconds / num_attempts)
+
+    # Validate required inputs
+    if not teachers or len(teachers) == 0:
+        return {
+            'status': 'error',
+            'options': [],
+            'message': 'No teachers provided. At least one teacher is required.',
+            'seeds_completed': 0,
+            'infeasible_count': 0,
+        }
+
+    if not classes or len(classes) == 0:
+        return {
+            'status': 'error',
+            'options': [],
+            'message': 'No classes provided. At least one class is required.',
+            'seeds_completed': 0,
+            'infeasible_count': 0,
+        }
+
+    if not rules or len(rules) == 0:
+        return {
+            'status': 'error',
+            'options': [],
+            'message': 'No rules provided. Scheduling rules must be configured in the database.',
+            'seeds_completed': 0,
+            'infeasible_count': 0,
+        }
+
+    # Use grades from database (required - no fallback)
+    active_grades = grades if grades and len(grades) > 0 else []
+
+    if not active_grades:
+        return {
+            'status': 'error',
+            'options': [],
+            'message': 'No grades provided. Grades must be configured in the database.',
+            'seeds_completed': 0,
+            'infeasible_count': 0,
+        }
 
     # Convert dicts to dataclasses
     # Note: canSuperviseStudyHall can be True, False, or None/undefined
@@ -970,26 +1260,28 @@ def generate_schedules(
             return ''
         if len(grades_list) == 1:
             return grades_list[0]
-        # Sort by grade order and create range display
-        grade_order = {g: i for i, g in enumerate(ALL_GRADES)}
+        # Sort by grade order (use active_grades from database) and create range display
+        grade_order = {g: i for i, g in enumerate(active_grades)}
         sorted_grades = sorted(grades_list, key=lambda g: grade_order.get(g, 99))
         first = sorted_grades[0].replace(' Grade', '')
         last = sorted_grades[-1].replace(' Grade', '')
         return f"{first}-{last} Grade"
 
+    # Create a set for fast lookups
+    active_grades_set = set(active_grades)
+
     def normalize_grades(grades_input) -> list:
-        """Normalize grade input to list of standard grade names."""
+        """Normalize grade input to list of grade names from database."""
         if isinstance(grades_input, list):
-            # Already a list, normalize each grade name
+            # Already a list - use parse_grades_from_database for each
             result = []
             for g in grades_input:
-                # Map short names to full names
-                normalized = GRADE_MAP.get(g, [g] if g in ALL_GRADES else [])
-                result.extend(normalized)
+                parsed = parse_grades_from_database(g, active_grades_set)
+                result.extend(parsed)
             return list(set(result))  # Remove duplicates
         elif isinstance(grades_input, str):
-            # Single grade string (legacy format)
-            return GRADE_MAP.get(grades_input, [grades_input] if grades_input in ALL_GRADES else [])
+            # Single grade string
+            return parse_grades_from_database(grades_input, active_grades_set)
         return []
 
     class_objs = []
@@ -1025,13 +1317,11 @@ def generate_schedules(
     # Filter out classes from locked teachers
     if is_partial_regen:
         classes_to_schedule = [c for c in class_objs if c.teacher not in locked_teacher_names]
-        print(f"[Solver] Partial regen: {len(locked_teacher_names)} locked teachers, "
-              f"{len(classes_to_schedule)}/{len(class_objs)} classes to schedule")
     else:
         classes_to_schedule = class_objs
 
     # Pre-compute grade slots blocked by locked teachers
-    locked_grade_slots: dict[str, set[int]] = {g: set() for g in ALL_GRADES}
+    locked_grade_slots: dict[str, set[int]] = {g: set() for g in active_grades}
     if locked_teachers:
         for teacher_name, schedule in locked_teachers.items():
             for day, blocks in schedule.items():
@@ -1050,20 +1340,26 @@ def generate_schedules(
                     grade, subject = entry[0], entry[1]
                     if subject != "OPEN" and subject != "Study Hall":
                         # Parse grades (handle multi-grade like "6th-7th Grade")
-                        grades = GRADE_MAP.get(grade, [grade] if grade in ALL_GRADES else [])
-                        for g in grades:
+                        parsed_grades = parse_grades_from_database(grade, active_grades_set)
+                        for g in parsed_grades:
                             if g in locked_grade_slots:
                                 locked_grade_slots[g].add(slot)
 
-    eligible = get_study_hall_eligible(teacher_objs, classes_to_schedule)
+    eligible = get_study_hall_eligible(teacher_objs, classes_to_schedule, rules)
+
+    # For partial regen, only allow study halls on non-locked teachers
+    # Locked teachers already have their study halls preserved in their schedules
+    if is_partial_regen and locked_teachers:
+        locked_teacher_names = set(locked_teachers.keys())
+        eligible = [t for t in eligible if t not in locked_teacher_names]
 
     # Override study hall eligible teachers if specific ones are requested
     if teachers_needing_study_halls:
-        # Include both base eligible and explicitly requested teachers
-        eligible = list(set(eligible + teachers_needing_study_halls))
-        print(f"[Solver] Study hall teachers override: {teachers_needing_study_halls}")
+        # Include both base eligible and explicitly requested teachers (but still exclude locked)
+        additional = [t for t in teachers_needing_study_halls if t not in (locked_teachers or {}).keys()]
+        eligible = list(set(eligible + additional))
 
-    sessions = build_sessions(classes_to_schedule, locked_grade_slots if is_partial_regen else None)
+    sessions = build_sessions(classes_to_schedule, locked_grade_slots if is_partial_regen else None, active_grades)
 
     if on_progress:
         on_progress(0, num_attempts, 'Initializing CP-SAT solver...')
@@ -1182,8 +1478,9 @@ def generate_schedules(
         if elapsed > max_time_seconds - 5:  # Leave 5s buffer
             break
 
+        actual_seed = start_seed + attempt
         if on_progress:
-            on_progress(attempt + 1, num_attempts, f'Solving seed {attempt + 1}/{num_attempts}...')
+            on_progress(attempt + 1, num_attempts, f'Solving seed {actual_seed} ({attempt + 1}/{num_attempts})...')
 
         # Solve with this seed
         remaining_time = max_time_seconds - elapsed - 5
@@ -1193,10 +1490,12 @@ def generate_schedules(
         # Collect diagnostics on first attempt to help diagnose infeasibility
         solutions = solve_with_cpsat(
             sessions,
-            seed=attempt,
+            seed=actual_seed,
             time_limit=attempt_time,
             max_solutions=5,
-            diagnostics=diagnostics if attempt == 0 else None
+            diagnostics=diagnostics if attempt == 0 else None,
+            rules=rules,
+            active_grades=active_grades
         )
         seeds_completed = attempt + 1
 
@@ -1207,8 +1506,8 @@ def generate_schedules(
         # Process each solution from this seed
         import copy
         for sol_idx, assignment in enumerate(solutions):
-            # Build schedules
-            teacher_schedules, grade_schedules = build_schedules(assignment, sessions, teacher_objs)
+            # Build schedules (pass active_grades to ensure all grades are initialized for merge)
+            teacher_schedules, grade_schedules = build_schedules(assignment, sessions, teacher_objs, active_grades)
 
             # Merge locked teacher schedules (for partial regeneration)
             if locked_teachers:
@@ -1219,39 +1518,68 @@ def generate_schedules(
                         for block in BLOCKS:
                             entry = schedule.get(day, {}).get(str(block))
                             teacher_schedules[teacher_name][day][block] = entry
-                            # Also update grade schedules
-                            if entry and entry[1] not in ("OPEN", "Study Hall"):
+                            # Also update grade schedules (skip OPEN but include Study Hall)
+                            if entry and entry[1] != "OPEN":
                                 grade, subject = entry[0], entry[1]
-                                # Handle multi-grade entries
-                                grades = GRADE_MAP.get(grade, [grade] if grade in ALL_GRADES else [])
-                                for g in grades:
-                                    if g in grade_schedules:
-                                        if day not in grade_schedules[g]:
-                                            grade_schedules[g][day] = {}
-                                        grade_schedules[g][day][block] = [teacher_name, subject]
+                                # Handle multi-grade entries (use active_grades from database)
+                                parsed_grades = parse_grades_from_database(grade, active_grades_set)
+                                for g in parsed_grades:
+                                    # Initialize grade if it doesn't exist (needed for study halls on grades
+                                    # that regenerated teachers don't teach)
+                                    if g not in grade_schedules:
+                                        grade_schedules[g] = {d: {b: None for b in BLOCKS} for d in DAYS}
+                                    if day not in grade_schedules[g]:
+                                        grade_schedules[g][day] = {}
+                                    grade_schedules[g][day][block] = [teacher_name, subject]
 
             # Deep copy for processing
             ts = copy.deepcopy(teacher_schedules)
             gs = copy.deepcopy(grade_schedules)
 
-            # Add study halls
-            sh_assignments = add_study_halls(ts, gs, eligible)
-            sh_placed = sum(1 for sh in sh_assignments if sh.teacher is not None)
+            # Add study halls (only if study_hall_distribution rule is enabled)
+            # preserve_existing=True means keep locked teacher study halls
+            # allow_study_hall_reassignment=True means reassign all (preserve_existing=False)
+            if is_rule_enabled(rules, 'study_hall_distribution'):
+                sh_assignments = add_study_halls(ts, gs, eligible, preserve_existing=not allow_study_hall_reassignment, rules=rules, grades=active_grades)
+                sh_placed = sum(1 for sh in sh_assignments if sh.teacher is not None)
+            else:
+                sh_assignments = []
+                sh_placed = 0
 
             # Fill open blocks
             fill_open_blocks(ts)
 
             # Redistribute open blocks to minimize back-to-back issues
-            redistribute_open_blocks(ts, gs, full_time_names)
+            # Only run if the no_btb_open rule is enabled
+            if is_rule_enabled(rules, 'no_btb_open'):
+                redistribute_open_blocks(ts, gs, full_time_names)
+
+            # CRITICAL: Rebuild grade schedules from teacher schedules to ensure consistency.
+            # This is a destructive rebuild that ensures grade_schedules always match teacher_schedules,
+            # avoiding any sync issues from the merge logic above.
+            gs = rebuild_grade_schedules(ts, active_grades)
 
             # Calculate score (lower is better)
-            total_btb = sum(count_back_to_back(ts, t) for t in full_time_names)
-            score = (5 - sh_placed) * 100 + total_btb
+            # Only count back-to-back issues if the rule is enabled
+            if is_rule_enabled(rules, 'no_btb_open'):
+                total_btb = sum(count_back_to_back(ts, t) for t in full_time_names)
+            else:
+                total_btb = 0  # Don't penalize for BTB if rule is disabled
+
+            # Count spread_open issues (multiple OPEN on same day) if rule is enabled
+            if is_rule_enabled(rules, 'spread_open'):
+                total_spread = sum(count_same_day_open(ts, t) for t in full_time_names)
+            else:
+                total_spread = 0
+
+            # Score: missing study halls (heavily penalized) + BTB issues + spread issues
+            score = (5 - sh_placed) * 100 + total_btb + total_spread
 
             candidates.append({
-                'seed': attempt,
+                'seed': actual_seed,
                 'score': score,
                 'btb': total_btb,
+                'spread': total_spread,
                 'sh_placed': sh_placed,
                 'teacher_schedules': ts,
                 'grade_schedules': gs,
@@ -1270,7 +1598,14 @@ def generate_schedules(
         }
 
     # Sort by score and deduplicate
-    candidates.sort(key=lambda c: c['score'])
+    # When randomize_scoring is True, add noise to encourage picking suboptimal but valid solutions
+    if randomize_scoring:
+        import random
+        scoring_rng = random.Random(start_seed)
+        # Add noise of up to +/- 10 to the score (enough to shuffle rankings but not pick terrible solutions)
+        candidates.sort(key=lambda c: c['score'] + scoring_rng.uniform(-10, 10))
+    else:
+        candidates.sort(key=lambda c: c['score'])
 
     seen_fingerprints = set()
     unique = []
@@ -1290,8 +1625,10 @@ def generate_schedules(
                 break
 
     # Build primary options (top 3 for backward compatibility)
+    # When skip_top_solutions is set, skip those and return next best solutions for variety
     options = []
-    for i, c in enumerate(unique[:num_options]):
+    solutions_to_use = unique[skip_top_solutions:skip_top_solutions + num_options] if skip_top_solutions > 0 else unique[:num_options]
+    for i, c in enumerate(solutions_to_use):
         stats = compute_teacher_stats(c['teacher_schedules'], teacher_objs)
 
         options.append({

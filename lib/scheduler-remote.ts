@@ -23,6 +23,11 @@ export interface RemoteGeneratorOptions {
   rules?: SchedulingRule[];
   lockedTeachers?: Record<string, Record<string, Record<number, [string, string] | null>>>; // For partial regen
   teachersNeedingStudyHalls?: string[]; // Teachers that need study halls assigned
+  startSeed?: number; // Starting seed for solver randomization (increment for variety on re-runs)
+  skipTopSolutions?: number; // Skip the top N solutions and return next best (for variety)
+  randomizeScoring?: boolean; // Add noise to scoring for variety (picks suboptimal but valid solutions)
+  allowStudyHallReassignment?: boolean; // If true, reassign all study halls; if false, preserve locked teacher study halls
+  grades?: string[]; // All grade names from database - used for grade schedule initialization
 }
 
 export interface ScheduleDiagnostics {
@@ -104,6 +109,11 @@ export async function generateSchedulesRemote(
     rules = [],
     lockedTeachers,
     teachersNeedingStudyHalls,
+    startSeed = 0,
+    skipTopSolutions = 0,
+    randomizeScoring = false,
+    allowStudyHallReassignment = false,
+    grades,
   } = options;
 
   // Allow UI to render before starting
@@ -153,12 +163,18 @@ export async function generateSchedulesRemote(
       maxTimeSeconds,
       lockedTeachers,
       teachersNeedingStudyHalls,
+      startSeed,
+      skipTopSolutions,
+      randomizeScoring,
+      allowStudyHallReassignment,
+      grades,
     };
 
     // Start simulated progress (since we can't get real progress from the API)
     let simulatedProgress = 1;
     let progressInterval: ReturnType<typeof setInterval> | null = null;
     let completed = false;
+    let reachedEnd = false;
 
     const startProgressSimulation = () => {
       progressInterval = setInterval(() => {
@@ -166,10 +182,21 @@ export async function generateSchedulesRemote(
           if (progressInterval) clearInterval(progressInterval);
           return;
         }
-        // Slow logarithmic progress that never quite reaches 100%
-        simulatedProgress = Math.min(simulatedProgress + Math.max(1, Math.floor((numAttempts - simulatedProgress) / 30)), numAttempts - 5);
-        const elapsed = Math.floor((simulatedProgress / numAttempts) * maxTimeSeconds);
-        onProgress?.(simulatedProgress, numAttempts, `Solving with OR-Tools CP-SAT... (~${elapsed}s)`);
+
+        if (!reachedEnd) {
+          // Logarithmic progress that reaches 100%
+          simulatedProgress = Math.min(simulatedProgress + Math.max(1, Math.floor((numAttempts - simulatedProgress) / 20)), numAttempts);
+          const elapsed = Math.floor((simulatedProgress / numAttempts) * maxTimeSeconds);
+          onProgress?.(simulatedProgress, numAttempts, `Solving with OR-Tools CP-SAT... (~${elapsed}s)`);
+
+          // Once we reach 100%, switch to "finishing up" message
+          if (simulatedProgress >= numAttempts) {
+            reachedEnd = true;
+          }
+        } else {
+          // Show "finishing up" message - use -1 to signal UI to show activity indicator instead of counter
+          onProgress?.(-1, numAttempts, 'Finishing up and gathering results...');
+        }
       }, 1000);
     };
 

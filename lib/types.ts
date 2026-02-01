@@ -119,24 +119,11 @@ export interface GenerationResult {
 // Constants
 export const DAYS = ['Mon', 'Tues', 'Wed', 'Thurs', 'Fri'] as const;
 export const BLOCKS = [1, 2, 3, 4, 5] as const;
-export const ALL_GRADES = [
-  'Kindergarten',
-  '1st Grade',
-  '2nd Grade', 
-  '3rd Grade',
-  '4th Grade',
-  '5th Grade',
-  '6th Grade',
-  '7th Grade',
-  '8th Grade',
-  '9th Grade',
-  '10th Grade',
-  '11th Grade',
-] as const;
 
 export type Day = typeof DAYS[number];
 export type Block = typeof BLOCKS[number];
-export type Grade = typeof ALL_GRADES[number];
+// Grade type is now dynamic - grades come from the database
+export type Grade = string;
 
 // Freeform Mode Types
 export interface CellLocation {
@@ -165,7 +152,7 @@ export interface PendingPlacement {
 }
 
 export interface ValidationError {
-  type: 'teacher_conflict' | 'grade_conflict' | 'subject_conflict' | 'unplaced';
+  type: 'teacher_conflict' | 'grade_conflict' | 'subject_conflict' | 'unplaced' | 'locked_teacher_missing' | 'locked_teacher_modified' | 'session_count' | 'study_hall_coverage' | 'back_to_back' | 'fixed_slot_violation' | 'availability_violation';
   message: string;
   cells: CellLocation[];
   blockId?: string;

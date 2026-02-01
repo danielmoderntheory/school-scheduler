@@ -17,11 +17,12 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip"
 import { Info, AlertTriangle, ChevronDown, ChevronRight } from "lucide-react"
-import type { TeacherStat, StudyHallAssignment } from "@/lib/types"
+import type { TeacherStat, StudyHallAssignment, GradeSchedule } from "@/lib/types"
 
 interface ScheduleStatsProps {
   stats: TeacherStat[]
   studyHallAssignments: StudyHallAssignment[]
+  gradeSchedules?: Record<string, GradeSchedule>
   backToBackIssues: number
   studyHallsPlaced: number
   unscheduledClasses?: number
@@ -45,6 +46,7 @@ function InfoTooltip({ text }: { text: string }) {
 export function ScheduleStats({
   stats,
   studyHallAssignments,
+  gradeSchedules,
   backToBackIssues,
   studyHallsPlaced,
   unscheduledClasses = 0,
@@ -52,6 +54,43 @@ export function ScheduleStats({
   defaultExpanded = true,
 }: ScheduleStatsProps) {
   const [expanded, setExpanded] = useState(defaultExpanded)
+
+  // Calculate grade coverage from gradeSchedules
+  const DAYS = ['Mon', 'Tues', 'Wed', 'Thurs', 'Fri']
+  const BLOCKS = [1, 2, 3, 4, 5]
+  const BLOCKS_PER_WEEK = 25
+
+  let totalGrades = 0
+  let gradesFullCount = 0
+  let totalBlocksScheduled = 0
+  let totalBlocksAvailable = 0
+
+  if (gradeSchedules) {
+    const gradeNames = Object.keys(gradeSchedules)
+    totalGrades = gradeNames.length
+    totalBlocksAvailable = totalGrades * BLOCKS_PER_WEEK
+
+    for (const grade of gradeNames) {
+      const schedule = gradeSchedules[grade]
+      let filledBlocks = 0
+
+      for (const day of DAYS) {
+        for (const block of BLOCKS) {
+          const entry = schedule?.[day]?.[block]
+          // Count as filled if it's not empty and not OPEN
+          if (entry && entry[1] && entry[1] !== 'OPEN') {
+            filledBlocks++
+            // Count all filled blocks (including Study Hall)
+            totalBlocksScheduled++
+          }
+        }
+      }
+
+      if (filledBlocks >= BLOCKS_PER_WEEK) {
+        gradesFullCount++
+      }
+    }
+  }
   // Sort stats: full-time teachers first, then by utilization
   const sortedStats = [...stats].sort((a, b) => {
     if (a.status === 'full-time' && b.status !== 'full-time') return -1
@@ -106,7 +145,7 @@ export function ScheduleStats({
   if (unscheduledClasses > 0) {
     issues.push({
       type: 'warning',
-      message: `${unscheduledClasses} class session(s) could not be scheduled. Check for conflicting restrictions.`
+      message: `${unscheduledClasses} block${unscheduledClasses !== 1 ? 's' : ''} could not be scheduled. Check for conflicting restrictions.`
     })
   }
 
@@ -145,9 +184,11 @@ export function ScheduleStats({
   }
 
   // Compact stat item for collapsed view
-  const hasIssues = unscheduledClasses > 0 || studyHallsPlaced < 6
-  const classesStatus = unscheduledClasses > 0 ? 'error' : 'ok'
-  const studyHallStatus = studyHallsPlaced < 6 ? 'warning' : 'ok'
+  const totalStudyHallsExpected = studyHallAssignments.length
+  const blocksStatus = totalBlocksAvailable > 0 && totalBlocksScheduled < totalBlocksAvailable ? 'warning' : 'ok'
+  const gradesStatus = totalGrades > 0 && gradesFullCount < totalGrades ? 'warning' : 'ok'
+  const studyHallStatus = studyHallsPlaced < totalStudyHallsExpected ? 'warning' : 'ok'
+  const hasIssues = unscheduledClasses > 0 || blocksStatus === 'warning' || gradesStatus === 'warning' || studyHallStatus === 'warning'
 
   return (
     <TooltipProvider>
@@ -165,17 +206,17 @@ export function ScheduleStats({
             {/* Show inline stats when collapsed OR when printing */}
             <span className={`contents ${expanded ? 'hidden print:contents' : ''}`}>
               <span className="text-slate-300 ml-2">—</span>
-              <span className={`font-normal text-slate-500 ${classesStatus === 'error' ? 'text-red-600 font-medium' : ''}`}>
-                Classes: {totalClasses - unscheduledClasses}/{totalClasses}
+              <span className={`font-normal text-slate-500 ${blocksStatus === 'warning' ? 'text-amber-600 font-medium' : ''}`}>
+                {totalBlocksScheduled}/{totalBlocksAvailable} Blocks
+              </span>
+              <span className="text-slate-300">|</span>
+              <span className={`font-normal text-slate-500 ${gradesStatus === 'warning' ? 'text-amber-600 font-medium' : ''}`}>
+                {gradesFullCount}/{totalGrades} Grades Full
               </span>
               <span className="text-slate-300">|</span>
               <span className={`font-normal text-slate-500 ${studyHallStatus === 'warning' ? 'text-amber-600 font-medium' : ''}`}>
-                Study Halls: {studyHallsPlaced}/6
+                {studyHallsPlaced}/{totalStudyHallsExpected} Study Halls
               </span>
-              <span className="text-slate-300">|</span>
-              <span className="font-normal text-slate-500">BTB: {backToBackIssues}</span>
-              <span className="text-slate-300">|</span>
-              <span className="font-normal text-slate-500">Avg Open: {fullTimeTeachers.length > 0 ? (fullTimeTeachers.reduce((sum, t) => sum + t.open, 0) / fullTimeTeachers.length).toFixed(1) : 0}</span>
               {issues.length > 0 && (
                 <span className="text-xs font-normal text-amber-600 ml-1">
                   ({issues.length} note{issues.length !== 1 ? 's' : ''})
@@ -186,81 +227,104 @@ export function ScheduleStats({
         </div>
 
         {/* Summary Stats - Shown when expanded on screen and print */}
-        <div className={`grid grid-cols-2 md:grid-cols-4 gap-4 ${expanded ? 'print-stats' : 'hidden'}`}>
-          {/* Classes Scheduled */}
-          <div className={`border rounded-lg p-4 ${unscheduledClasses > 0 ? 'border-red-300 bg-red-50' : 'border-emerald-200 bg-emerald-50'}`}>
+        <div className={`grid grid-cols-2 gap-3 ${expanded ? 'print-stats' : 'hidden'} md:flex md:flex-wrap`}>
+          {/* Blocks Scheduled */}
+          <div className={`border rounded-lg p-3 md:flex-1 md:min-w-0 ${
+            totalBlocksScheduled < totalBlocksAvailable
+              ? 'border-amber-300 bg-amber-50'
+              : 'border-emerald-200 bg-emerald-50'
+          }`}>
             <div className="text-sm text-slate-600">
-              Classes Scheduled
-              <InfoTooltip text="Total class sessions successfully placed in the schedule. Each class with 3 days/week counts as 3 sessions." />
+              Blocks
+              <InfoTooltip text="Total class and study hall blocks placed in the schedule across all grades." />
             </div>
-            <div className="text-2xl font-bold">
-              {totalClasses - unscheduledClasses}/{totalClasses}
-              {unscheduledClasses > 0 && (
-                <Badge variant="destructive" className="ml-2 text-xs">
-                  {unscheduledClasses} Missing!
+            <div className="text-lg font-bold">
+              {totalBlocksScheduled}/{totalBlocksAvailable}
+              {totalBlocksScheduled >= totalBlocksAvailable && totalBlocksAvailable > 0 && (
+                <Badge className="ml-2 text-xs bg-emerald-500">All Filled</Badge>
+              )}
+              {totalBlocksScheduled < totalBlocksAvailable && (
+                <Badge variant="outline" className="ml-2 text-xs border-amber-400 text-amber-600">
+                  {totalBlocksAvailable - totalBlocksScheduled} Open
                 </Badge>
               )}
-              {unscheduledClasses === 0 && totalClasses > 0 && (
-                <Badge className="ml-2 text-xs bg-emerald-500">All Set</Badge>
+            </div>
+          </div>
+
+          {/* Grades Full */}
+          <div className={`border rounded-lg p-3 md:flex-1 md:min-w-0 ${gradesStatus === 'warning' ? 'border-amber-300 bg-amber-50' : 'border-emerald-200 bg-emerald-50'}`}>
+            <div className="text-sm text-slate-600">
+              Grades Full
+              <InfoTooltip text="Number of grades with all 25 blocks filled (no empty slots)." />
+            </div>
+            <div className="text-xl font-bold">
+              {gradesFullCount}/{totalGrades}
+              {gradesStatus === 'warning' && (
+                <Badge variant="outline" className="ml-2 text-xs border-amber-400 text-amber-600">
+                  {totalGrades - gradesFullCount} Gap{totalGrades - gradesFullCount !== 1 ? 's' : ''}
+                </Badge>
+              )}
+              {gradesFullCount === totalGrades && totalGrades > 0 && (
+                <Badge className="ml-2 text-xs bg-emerald-500">All Full</Badge>
               )}
             </div>
           </div>
 
           {/* Study Halls */}
           <div
-            className={`border rounded-lg p-4 ${studyHallsPlaced < 6 ? 'border-amber-200 bg-amber-50' : 'border-emerald-200 bg-emerald-50'} ${studyHallsPlaced < 6 ? 'cursor-pointer hover:border-amber-300' : ''}`}
-            onClick={studyHallsPlaced < 6 ? () => scrollToSection('study-hall-section') : undefined}
+            className={`border rounded-lg p-3 md:flex-1 md:min-w-0 ${studyHallsPlaced < totalStudyHallsExpected ? 'border-amber-200 bg-amber-50' : 'border-emerald-200 bg-emerald-50'} ${studyHallsPlaced < totalStudyHallsExpected ? 'cursor-pointer hover:border-amber-300' : ''}`}
+            onClick={studyHallsPlaced < totalStudyHallsExpected ? () => scrollToSection('study-hall-section') : undefined}
           >
             <div className="text-sm text-slate-600">
-              Study Halls Placed
-              <InfoTooltip text="Study hall supervision slots assigned to eligible full-time teachers. Grades 6-11 each need one study hall per week (6 total)." />
+              Study Halls
+              <InfoTooltip text="Study hall supervision slots assigned to eligible teachers based on configured study hall grades." />
             </div>
-            <div className="text-2xl font-bold">
-              {studyHallsPlaced}/6
-              {studyHallsPlaced >= 6 && (
+            <div className="text-xl font-bold">
+              {studyHallsPlaced}/{totalStudyHallsExpected}
+              {studyHallsPlaced >= totalStudyHallsExpected && totalStudyHallsExpected > 0 && (
                 <Badge className="ml-2 text-xs bg-emerald-500">Complete</Badge>
               )}
-              {studyHallsPlaced < 6 && (
+              {studyHallsPlaced < totalStudyHallsExpected && (
                 <Badge variant="outline" className="ml-2 text-xs border-amber-400 text-amber-700">
-                  {6 - studyHallsPlaced} Missing
+                  {totalStudyHallsExpected - studyHallsPlaced} Missing
                 </Badge>
               )}
             </div>
-            {studyHallsPlaced < 6 && (
+            {studyHallsPlaced < totalStudyHallsExpected && (
               <div className="text-xs text-amber-600 mt-1 no-print">Click for details</div>
             )}
           </div>
 
           {/* Back-to-Back Open */}
           <div
-            className={`border rounded-lg p-4 ${backToBackIssues > 0 ? 'border-amber-100 bg-amber-50/50 cursor-pointer hover:border-amber-200' : 'border-slate-200 bg-slate-50'}`}
+            className={`border rounded-lg p-3 md:flex-1 md:min-w-0 ${backToBackIssues > 0 ? 'border-amber-100 bg-amber-50/50 cursor-pointer hover:border-amber-200' : 'border-slate-200 bg-slate-50'}`}
             onClick={backToBackIssues > 0 ? () => scrollToSection('teacher-util-section') : undefined}
           >
             <div className="text-sm text-slate-600">
-              Back-to-Back Open
+              Back-to-Back
               <InfoTooltip text="Number of times a full-time teacher has consecutive open (unassigned) blocks. Ideally minimized but not critical - the schedule is still valid." />
             </div>
-            <div className="text-2xl font-bold text-slate-700">
+            <div className="text-xl font-bold text-slate-700">
               {backToBackIssues}
               <span className="text-sm font-normal text-slate-500 ml-1">
                 {backToBackIssues === 1 ? 'issue' : 'issues'}
               </span>
             </div>
             {backToBackIssues > 0 && (
-              <div className="text-xs text-amber-600 mt-1 no-print">Click to see which teachers</div>
+              <div className="text-xs text-amber-600 mt-1 no-print">Click to see teachers</div>
             )}
           </div>
 
           {/* Avg Open Blocks - Full-time teachers only */}
           <div
-            className="border rounded-lg p-4 border-slate-200 bg-slate-50 cursor-pointer hover:border-slate-300"
+            className="border rounded-lg p-3 md:flex-shrink md:min-w-0 border-slate-200 bg-slate-50 cursor-pointer hover:border-slate-300"
             onClick={() => scrollToSection('teacher-util-section')}
           >
             <div className="text-sm text-slate-600">
-              Avg Open Blocks
+              Avg Open
               <InfoTooltip text="Average number of unassigned blocks per full-time teacher. Lower means teachers are busier. Teachers with many open blocks could take on more classes." />
             </div>
-            <div className="text-2xl font-bold text-slate-700">
+            <div className="text-xl font-bold text-slate-700">
               {fullTimeTeachers.length > 0
                 ? (fullTimeTeachers.reduce((sum, t) => sum + t.open, 0) / fullTimeTeachers.length).toFixed(1)
                 : 0}
@@ -268,22 +332,21 @@ export function ScheduleStats({
                 / 25
               </span>
             </div>
-            <div className="text-xs text-slate-500 mt-1">Full-time teachers only</div>
+            <div className="text-xs text-slate-500 mt-1">Full-time only</div>
           </div>
         </div>
 
-        {/* Issues & Suggestions - Only show if there are issues and expanded, hidden on print */}
+        {/* Notes - Only show if there are issues and expanded, hidden on print */}
         {issues.length > 0 && expanded && (
-          <div className="border border-amber-200 rounded-lg bg-amber-50/50 p-4 no-print">
-            <h3 className="font-medium text-amber-800 mb-2 flex items-center gap-2">
+          <div className="border border-amber-200 rounded-lg bg-amber-50/50 p-3 no-print">
+            <h4 className="text-sm font-medium text-amber-800 mb-2 flex items-center gap-2">
               <AlertTriangle className="h-4 w-4" />
-              Notes & Suggestions
-            </h3>
-            <ul className="space-y-1.5">
+              Notes
+            </h4>
+            <ul className="space-y-1">
               {issues.map((issue, i) => (
                 <li key={i} className={`text-sm ${issue.type === 'warning' ? 'text-amber-800' : 'text-amber-700'}`}>
-                  {issue.type === 'warning' ? '• ' : '• '}
-                  {issue.message}
+                  • {issue.message}
                 </li>
               ))}
             </ul>

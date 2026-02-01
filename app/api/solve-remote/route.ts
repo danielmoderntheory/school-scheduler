@@ -37,6 +37,21 @@ interface SolveRequest {
   numOptions?: number
   numAttempts?: number
   maxTimeSeconds?: number
+  // Partial regeneration parameters
+  lockedTeachers?: Record<string, Record<string, Record<number, [string, string] | null>>>
+  teachersNeedingStudyHalls?: string[]
+  startSeed?: number
+  skipTopSolutions?: number
+  randomizeScoring?: boolean
+  allowStudyHallReassignment?: boolean
+  // Rules
+  rules?: Array<{
+    rule_key: string
+    enabled: boolean
+    config?: Record<string, unknown>
+  }>
+  // Grade list for grade schedule initialization
+  grades?: string[]
 }
 
 export async function POST(request: NextRequest) {
@@ -63,9 +78,19 @@ export async function POST(request: NextRequest) {
       body: JSON.stringify({
         teachers: body.teachers,
         classes: body.classes,
+        rules: body.rules,
         numOptions: body.numOptions || 3,
         numAttempts: body.numAttempts || 150,
         maxTimeSeconds: body.maxTimeSeconds || 280,
+        // Partial regeneration parameters
+        lockedTeachers: body.lockedTeachers,
+        teachersNeedingStudyHalls: body.teachersNeedingStudyHalls,
+        startSeed: body.startSeed || 0,
+        skipTopSolutions: body.skipTopSolutions || 0,
+        randomizeScoring: body.randomizeScoring || false,
+        allowStudyHallReassignment: body.allowStudyHallReassignment || false,
+        // Grade list for grade schedule initialization
+        grades: body.grades,
       }),
     })
 

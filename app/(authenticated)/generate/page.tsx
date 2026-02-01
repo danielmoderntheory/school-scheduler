@@ -20,6 +20,7 @@ import { ScheduleStats } from "@/components/ScheduleStats"
 import { Loader2, Play, Download, Coffee, History, AlertTriangle, X, Server, Eye, Star, Users, CheckCircle2, Info, ChevronDown, ChevronRight } from "lucide-react"
 import { generateSchedulesRemote, type ScheduleDiagnostics } from "@/lib/scheduler-remote"
 import type { Teacher, ClassEntry, ScheduleOption } from "@/lib/types"
+import { useGeneration } from "@/lib/generation-context"
 import toast from "react-hot-toast"
 
 // Sort grades: Kindergarten first, then by grade number
@@ -134,6 +135,7 @@ interface DBClass {
 
 export default function GeneratePage() {
   const router = useRouter()
+  const { setIsGenerating } = useGeneration()
   const [activeQuarter, setActiveQuarter] = useState<Quarter | null>(null)
   const [teachers, setTeachers] = useState<Teacher[]>([])
   const [grades, setGrades] = useState<Grade[]>([])
@@ -156,6 +158,19 @@ export default function GeneratePage() {
   useEffect(() => {
     loadData()
   }, [])
+
+  // Prevent accidental navigation away during generation
+  useEffect(() => {
+    setIsGenerating(generating)
+    if (generating) {
+      const handleBeforeUnload = (e: BeforeUnloadEvent) => {
+        e.preventDefault()
+        e.returnValue = ''
+      }
+      window.addEventListener('beforeunload', handleBeforeUnload)
+      return () => window.removeEventListener('beforeunload', handleBeforeUnload)
+    }
+  }, [generating, setIsGenerating])
 
   async function loadData() {
     try {
@@ -305,15 +320,54 @@ export default function GeneratePage() {
       // Store request payload for debugging
       setLastRequestPayload({ teachers: teacherList, classes: classList })
 
-      const result = await generateSchedulesRemote(teacherList, classList, {
+      // Get grade display names from database for solver
+      const gradeNames = grades.map(g => g.display_name)
+
+      let result = await generateSchedulesRemote(teacherList, classList, {
         numOptions: 1,
         numAttempts: 150,
         maxTimeSeconds: 280,
         rules, // Pass scheduling rules to remote solver
+        grades: gradeNames, // Pass grade names from database
         onProgress: (current, total, message) => {
           setProgress({ current, total, message })
         },
       })
+
+      // If first pass returned success but suboptimal results (missing study halls),
+      // try OR-Tools deep (fewer seeds, more time each) and keep the better result
+      if (result.status === 'success' && result.options.length > 0) {
+        const firstOption = result.options[0]
+        const expectedStudyHalls = firstOption.studyHallAssignments?.length || 0
+        const placedStudyHalls = firstOption.studyHallsPlaced || 0
+
+        if (placedStudyHalls < expectedStudyHalls) {
+          console.log(`[Generate] First pass placed ${placedStudyHalls}/${expectedStudyHalls} study halls, trying deep exploration...`)
+          setProgress({ current: 0, total: 15, message: "Trying deeper exploration for better results..." })
+
+          const deepResult = await generateSchedulesRemote(teacherList, classList, {
+            numOptions: 1,
+            numAttempts: 15, // Fewer seeds = more time per seed for deeper search
+            maxTimeSeconds: 120,
+            rules,
+            grades: gradeNames, // Pass grade names from database
+            onProgress: (current, total, message) => {
+              setProgress({ current, total, message: `[Deep] ${message}` })
+            },
+          })
+
+          // Keep the better result (more study halls placed)
+          if (deepResult.status === 'success' && deepResult.options.length > 0) {
+            const deepPlaced = deepResult.options[0].studyHallsPlaced || 0
+            if (deepPlaced > placedStudyHalls) {
+              console.log(`[Generate] Deep exploration found better result: ${deepPlaced}/${expectedStudyHalls} study halls`)
+              result = deepResult
+            } else {
+              console.log(`[Generate] Deep exploration didn't improve: ${deepPlaced}/${expectedStudyHalls}, keeping original`)
+            }
+          }
+        }
+      }
 
       // CRITICAL: Verify this result is for the current generation, not stale
       if (generationIdRef.current !== generationId) {
@@ -690,14 +744,21 @@ export default function GeneratePage() {
               <div className="flex justify-between text-sm text-slate-600">
                 <span>{progress.message}</span>
                 <span>
-                  {progress.current}/{progress.total}
+                  {progress.current === -1 ? (
+                    <span className="flex items-center gap-1.5">
+                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                      Wrapping up...
+                    </span>
+                  ) : (
+                    `${progress.current}/${progress.total}`
+                  )}
                 </span>
               </div>
               <div className="w-full bg-sky-100 rounded-full h-2">
                 <div
                   className="bg-sky-500 h-2 rounded-full transition-all"
                   style={{
-                    width: `${(progress.current / progress.total) * 100}%`,
+                    width: progress.current === -1 ? '100%' : `${(progress.current / progress.total) * 100}%`,
                   }}
                 />
               </div>
@@ -942,10 +1003,9 @@ export default function GeneratePage() {
               <ScheduleStats
                 stats={selectedResult.teacherStats}
                 studyHallAssignments={selectedResult.studyHallAssignments}
+                gradeSchedules={selectedResult.gradeSchedules}
                 backToBackIssues={selectedResult.backToBackIssues}
                 studyHallsPlaced={selectedResult.studyHallsPlaced}
-                totalClasses={classes.reduce((sum, c) => sum + c.days_per_week, 0)}
-                unscheduledClasses={0}
               />
 
               {/* Schedule Grids */}
@@ -1023,16 +1083,20 @@ export default function GeneratePage() {
           </CardHeader>
           <CardContent className="space-y-4">
             {/* Stats row */}
-            <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-sm">
+            <div className="grid grid-cols-2 md:grid-cols-5 gap-3 text-sm">
               <div className="border border-slate-200 rounded-lg p-3 bg-slate-50">
                 <div className="font-semibold text-slate-700">{teachers.length}</div>
                 <div className="text-slate-500 text-xs">Teachers</div>
               </div>
               <div className="border border-slate-200 rounded-lg p-3 bg-slate-50">
                 <div className="font-semibold text-slate-700">{classes.length}</div>
-                <div className="text-slate-500 text-xs">Classes</div>
+                <div className="text-slate-500 text-xs">Class Definitions</div>
               </div>
-              <div className={`border rounded-lg p-3 ${
+              <div className="border border-slate-200 rounded-lg p-3 bg-slate-50">
+                <div className="font-semibold text-slate-700">{grades.length} × 25</div>
+                <div className="text-slate-500 text-xs">Grades × Blocks</div>
+              </div>
+              <div className={`border rounded-lg px-2 py-3 ${
                 isOverCapacity
                   ? 'border-red-300 bg-red-50'
                   : isAtCapacity
@@ -1041,7 +1105,7 @@ export default function GeneratePage() {
                       ? 'border-amber-200 bg-amber-50'
                       : 'border-sky-200 bg-sky-50'
               }`}>
-                <div className={`font-semibold ${
+                <div className={`font-semibold whitespace-nowrap ${
                   isOverCapacity
                     ? 'text-red-700'
                     : isAtCapacity
@@ -1050,7 +1114,7 @@ export default function GeneratePage() {
                         ? 'text-amber-700'
                         : 'text-sky-700'
                 }`}>
-                  {totalGradeSessions} / {availableGradeSlots}
+                  {totalGradeSessions}/{availableGradeSlots}
                 </div>
                 <div className={`text-xs ${
                   isOverCapacity
@@ -1061,19 +1125,33 @@ export default function GeneratePage() {
                         ? 'text-amber-600'
                         : 'text-sky-600'
                 }`}>
-                  Grade-sessions ({capacityPercent}%)
+                  {isAtCapacity ? 'Full Schedule' : isOverCapacity ? 'Over Capacity' : 'Schedule Coverage'}
                 </div>
               </div>
               <div className={`border rounded-lg p-3 ${
                 isOverCapacity
                   ? 'border-red-300 bg-red-50'
-                  : 'border-emerald-200 bg-emerald-50'
+                  : isAtCapacity
+                    ? 'border-emerald-200 bg-emerald-50'
+                    : 'border-amber-200 bg-amber-50'
               }`}>
-                <div className={`font-semibold ${isOverCapacity ? 'text-red-700' : 'text-emerald-700'}`}>
-                  {isOverCapacity ? `-${totalGradeSessions - availableGradeSlots}` : availableGradeSlots - totalGradeSessions}
+                <div className={`font-semibold ${
+                  isOverCapacity
+                    ? 'text-red-700'
+                    : isAtCapacity
+                      ? 'text-emerald-700'
+                      : 'text-amber-700'
+                }`}>
+                  {isOverCapacity ? `+${totalGradeSessions - availableGradeSlots}` : availableGradeSlots - totalGradeSessions}
                 </div>
-                <div className={`text-xs ${isOverCapacity ? 'text-red-600' : 'text-emerald-600'}`}>
-                  {isOverCapacity ? 'Over capacity' : 'Unused blocks'}
+                <div className={`text-xs ${
+                  isOverCapacity
+                    ? 'text-red-600'
+                    : isAtCapacity
+                      ? 'text-emerald-600'
+                      : 'text-amber-600'
+                }`}>
+                  {isOverCapacity ? 'Blocks Over' : 'Unfilled'}
                 </div>
               </div>
             </div>
