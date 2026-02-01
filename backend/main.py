@@ -73,14 +73,26 @@ class ClassEntry(BaseModel):
     fixedSlots: Optional[list[list]] = None  # [[day, block], ...]
 
 
+class SchedulingRule(BaseModel):
+    rule_key: str
+    enabled: bool
+    config: Optional[dict] = None
+
+
 class SolveRequest(BaseModel):
     teachers: list[Teacher]
     classes: list[ClassEntry]
+    rules: Optional[list[SchedulingRule]] = None  # Scheduling rules from database
     numOptions: int = 3
     numAttempts: int = 150
     maxTimeSeconds: float = 280.0  # Stay under Vercel's 300s function limit
     lockedTeachers: Optional[dict] = None  # For partial regen: teacher_name -> schedule
     teachersNeedingStudyHalls: Optional[list[str]] = None  # Teachers that need study halls
+    startSeed: int = 0  # Starting seed for solver randomization (increment for variety on re-runs)
+    skipTopSolutions: int = 0  # Skip the top N solutions and return the next best ones (for variety)
+    randomizeScoring: bool = False  # Add noise to scoring for variety (picks suboptimal but valid solutions)
+    allowStudyHallReassignment: bool = False  # If True, reassign all study halls; if False, preserve locked teacher study halls
+    grades: Optional[list[str]] = None  # All grade names from database - for grade schedule initialization
 
 
 class SolveResponse(BaseModel):
@@ -120,6 +132,7 @@ async def solve_schedule(request: SolveRequest):
 
     # Log request summary
     logger.info(f"=== SOLVE REQUEST === Teachers: {len(teachers)}, Classes: {len(classes)}, Attempts: {request.numAttempts}")
+    logger.info(f"  Grades received: {request.grades}")
 
     # Log detailed info only when DEBUG_SOLVER is enabled
     if DEBUG_SOLVER:
@@ -149,15 +162,24 @@ async def solve_schedule(request: SolveRequest):
         if request.teachersNeedingStudyHalls:
             logger.info(f"  Teachers needing study halls: {request.teachersNeedingStudyHalls}")
 
+        # Convert rules to dicts for solver
+        rules = [r.model_dump() for r in request.rules] if request.rules else []
+
         # Run the solver
         result = generate_schedules(
             teachers=teachers,
             classes=classes,
+            rules=rules,
             num_options=request.numOptions,
             num_attempts=request.numAttempts,
             max_time_seconds=request.maxTimeSeconds,
             locked_teachers=request.lockedTeachers,
             teachers_needing_study_halls=request.teachersNeedingStudyHalls,
+            start_seed=request.startSeed,
+            skip_top_solutions=request.skipTopSolutions,
+            randomize_scoring=request.randomizeScoring,
+            allow_study_hall_reassignment=request.allowStudyHallReassignment,
+            grades=request.grades,
         )
 
         elapsed = time.time() - start_time
@@ -171,11 +193,11 @@ async def solve_schedule(request: SolveRequest):
 
         return SolveResponse(
             status=result['status'],
-            options=result['options'],
+            options=result.get('options', []),
             allSolutions=result.get('allSolutions', []),
-            message=result['message'],
-            seedsCompleted=result['seeds_completed'],
-            infeasibleCount=result['infeasible_count'],
+            message=result.get('message', ''),
+            seedsCompleted=result.get('seeds_completed', 0),
+            infeasibleCount=result.get('infeasible_count', 0),
             elapsedSeconds=elapsed,
             diagnostics=result.get('diagnostics'),
         )

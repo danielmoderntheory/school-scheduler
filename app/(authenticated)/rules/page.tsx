@@ -14,12 +14,21 @@ const LOCKED_RULES = new Set([
   'no_teacher_conflicts',  // Teacher can't be in two places
   'no_grade_conflicts',    // Grade can't have two classes at once
   'teacher_availability',  // Must respect day/block availability
+  'fixed_slots',           // Fixed time slots are always honored
+  'cotaught_classes',      // Co-taught classes always scheduled together (rename class to avoid)
 ])
 
-const ALL_GRADES = [
-  "Kindergarten", "1st Grade", "2nd Grade", "3rd Grade", "4th Grade", "5th Grade",
-  "6th Grade", "7th Grade", "8th Grade", "9th Grade", "10th Grade", "11th Grade"
-]
+// Rules that aren't implemented yet (config not read by solver)
+const UNIMPLEMENTED_RULES = new Set<string>([
+  // All rules are now implemented
+])
+
+interface Grade {
+  id: string
+  name: string
+  display_name: string
+  sort_order: number
+}
 
 interface Rule {
   id: string
@@ -34,23 +43,32 @@ interface Rule {
 
 export default function RulesPage() {
   const [rules, setRules] = useState<Rule[]>([])
+  const [grades, setGrades] = useState<Grade[]>([])
   const [loading, setLoading] = useState(true)
   const [savingId, setSavingId] = useState<string | null>(null)
   const [hardCollapsed, setHardCollapsed] = useState(true)
 
   useEffect(() => {
-    loadRules()
+    loadData()
   }, [])
 
-  async function loadRules() {
+  async function loadData() {
     try {
-      const res = await fetch("/api/rules")
-      if (res.ok) {
-        const data = await res.json()
-        setRules(data)
+      const [rulesRes, gradesRes] = await Promise.all([
+        fetch("/api/rules"),
+        fetch("/api/grades"),
+      ])
+      if (rulesRes.ok) {
+        const rulesData = await rulesRes.json()
+        setRules(rulesData)
+      }
+      if (gradesRes.ok) {
+        const gradesData = await gradesRes.json()
+        // Sort by sort_order
+        setGrades(gradesData.sort((a: Grade, b: Grade) => a.sort_order - b.sort_order))
       }
     } catch (error) {
-      toast.error("Failed to load rules")
+      toast.error("Failed to load data")
     } finally {
       setLoading(false)
     }
@@ -151,6 +169,7 @@ export default function RulesPage() {
                 <ConfigurableRuleCard
                   key={rule.id}
                   rule={rule}
+                  grades={grades}
                   onToggle={(enabled) => toggleRule(rule.id, enabled)}
                   onConfigChange={(config) => updateRuleConfig(rule.id, config)}
                   saving={savingId === rule.id}
@@ -201,11 +220,13 @@ interface CompactRuleCardProps {
 
 function CompactRuleCard({ rule, onToggle, saving }: CompactRuleCardProps) {
   const isLocked = LOCKED_RULES.has(rule.rule_key)
+  const isUnimplemented = UNIMPLEMENTED_RULES.has(rule.rule_key)
 
   return (
     <div className={cn(
       "flex items-center justify-between p-3 rounded-lg border bg-white",
-      !rule.enabled && !isLocked && "opacity-50"
+      !rule.enabled && !isLocked && !isUnimplemented && "opacity-50",
+      isUnimplemented && "opacity-50"
     )}>
       <div className="min-w-0 flex-1 mr-3">
         <div className="font-medium text-sm flex items-center gap-2">
@@ -222,6 +243,8 @@ function CompactRuleCard({ rule, onToggle, saving }: CompactRuleCardProps) {
         {saving && <Loader2 className="h-3 w-3 animate-spin" />}
         {isLocked ? (
           <span className="text-xs text-slate-400 italic">Always on</span>
+        ) : isUnimplemented ? (
+          <span className="text-xs text-slate-400 italic">Not implemented</span>
         ) : (
           <Switch
             checked={rule.enabled}
@@ -237,13 +260,30 @@ function CompactRuleCard({ rule, onToggle, saving }: CompactRuleCardProps) {
 
 interface ConfigurableRuleCardProps {
   rule: Rule
+  grades: Grade[]
   onToggle: (enabled: boolean) => void
   onConfigChange: (config: Record<string, unknown>) => void
   saving: boolean
 }
 
-function ConfigurableRuleCard({ rule, onToggle, onConfigChange, saving }: ConfigurableRuleCardProps) {
+function ConfigurableRuleCard({ rule, grades, onToggle, onConfigChange, saving }: ConfigurableRuleCardProps) {
   const config = rule.config || {}
+  const isUnimplemented = UNIMPLEMENTED_RULES.has(rule.rule_key)
+
+  // Show simple card for unimplemented rules
+  if (isUnimplemented) {
+    return (
+      <div className="p-3 rounded-lg border bg-white opacity-50">
+        <div className="flex items-center justify-between">
+          <div>
+            <div className="font-medium text-sm">{rule.name}</div>
+            <div className="text-xs text-muted-foreground">{rule.description}</div>
+          </div>
+          <span className="text-xs text-slate-400 italic">Not implemented</span>
+        </div>
+      </div>
+    )
+  }
 
   if (rule.rule_key === "study_hall_grades") {
     const selectedGrades = (config.grades as string[]) || []
@@ -270,29 +310,32 @@ function ConfigurableRuleCard({ rule, onToggle, onConfigChange, saving }: Config
         </div>
         {rule.enabled && (
           <div className="mt-3 pt-3 border-t">
+            <p className="text-xs text-muted-foreground mb-2">
+              Select which grades should have study halls assigned. Uncheck all to skip study hall assignment.
+            </p>
             <div className="flex flex-wrap gap-2">
-              {ALL_GRADES.map((grade) => (
+              {grades.map((grade) => (
                 <label
-                  key={grade}
+                  key={grade.id}
                   className={cn(
                     "flex items-center gap-1.5 px-2 py-1 rounded border text-xs cursor-pointer transition-colors",
-                    selectedGrades.includes(grade)
+                    selectedGrades.includes(grade.display_name)
                       ? "bg-sky-50 border-sky-300 text-sky-700"
                       : "bg-slate-50 border-slate-200 text-slate-500 hover:border-slate-300"
                   )}
                 >
                   <Checkbox
-                    checked={selectedGrades.includes(grade)}
+                    checked={selectedGrades.includes(grade.display_name)}
                     onCheckedChange={(checked) => {
                       const newGrades = checked
-                        ? [...selectedGrades, grade]
-                        : selectedGrades.filter((g) => g !== grade)
+                        ? [...selectedGrades, grade.display_name]
+                        : selectedGrades.filter((g) => g !== grade.display_name)
                       onConfigChange({ ...config, grades: newGrades })
                     }}
                     disabled={saving}
                     className="h-3 w-3"
                   />
-                  {grade.replace(" Grade", "")}
+                  {grade.display_name.replace(" Grade", "")}
                 </label>
               ))}
             </div>
@@ -303,7 +346,9 @@ function ConfigurableRuleCard({ rule, onToggle, onConfigChange, saving }: Config
   }
 
   if (rule.rule_key === "study_hall_teacher_eligibility") {
-    const requireFullTime = config.require_full_time !== false
+    // Default: full-time allowed, part-time not allowed
+    const allowFullTime = config.allow_full_time !== false
+    const allowPartTime = config.allow_part_time === true
 
     return (
       <div className={cn(
@@ -327,18 +372,43 @@ function ConfigurableRuleCard({ rule, onToggle, onConfigChange, saving }: Config
         </div>
         {rule.enabled && (
           <div className="mt-3 pt-3 border-t">
-            <label className="flex items-center gap-2 text-sm">
-              <Checkbox
-                checked={requireFullTime}
-                onCheckedChange={(checked) => {
-                  onConfigChange({ ...config, require_full_time: checked })
-                }}
-                disabled={saving}
-              />
-              <span>Must be full-time teacher</span>
-            </label>
+            <p className="text-xs text-muted-foreground mb-2">
+              Select which teacher types can supervise study halls:
+            </p>
+            <div className="flex flex-col gap-2">
+              <label className="flex items-center gap-2 text-sm">
+                <Checkbox
+                  checked={allowFullTime}
+                  onCheckedChange={(checked) => {
+                    // Don't allow unchecking both - if unchecking full-time, ensure part-time is checked
+                    if (!checked && !allowPartTime) {
+                      onConfigChange({ ...config, allow_full_time: false, allow_part_time: true })
+                    } else {
+                      onConfigChange({ ...config, allow_full_time: checked })
+                    }
+                  }}
+                  disabled={saving}
+                />
+                <span>Full-time teachers</span>
+              </label>
+              <label className="flex items-center gap-2 text-sm">
+                <Checkbox
+                  checked={allowPartTime}
+                  onCheckedChange={(checked) => {
+                    // Don't allow unchecking both - if unchecking part-time, ensure full-time is checked
+                    if (!checked && !allowFullTime) {
+                      onConfigChange({ ...config, allow_part_time: false, allow_full_time: true })
+                    } else {
+                      onConfigChange({ ...config, allow_part_time: checked })
+                    }
+                  }}
+                  disabled={saving}
+                />
+                <span>Part-time teachers</span>
+              </label>
+            </div>
             <p className="text-xs text-muted-foreground mt-2">
-              Individual teachers can be excluded via the &quot;Exclude from Study Hall&quot; checkbox on their teacher record.
+              Individual teachers can also be excluded via the &quot;Exclude from Study Hall&quot; checkbox on their teacher record.
             </p>
           </div>
         )}

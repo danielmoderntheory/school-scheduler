@@ -76,7 +76,7 @@ interface Quarter {
 
 const DAYS = ["Mon", "Tues", "Wed", "Thurs", "Fri"]
 const BLOCKS = [1, 2, 3, 4, 5]
-const STUDY_HALL_GRADES = ["6th Grade", "7th Grade", "8th Grade", "9th Grade", "10th Grade", "11th Grade"]
+// NOTE: Study hall grades are now configured in the rules, fetched below
 
 function formatTimeAgo(timestamp: string): string {
   const now = new Date()
@@ -97,6 +97,7 @@ export default function ClassesPage() {
   const [teachers, setTeachers] = useState<Teacher[]>([])
   const [grades, setGrades] = useState<Grade[]>([])
   const [subjects, setSubjects] = useState<Subject[]>([])
+  const [studyHallGrades, setStudyHallGrades] = useState<string[]>([])
   const [activeQuarter, setActiveQuarter] = useState<Quarter | null>(null)
   const [loading, setLoading] = useState(true)
   const [lastRun, setLastRun] = useState<LastRun | null>(null)
@@ -131,23 +132,32 @@ export default function ClassesPage() {
 
   async function loadData() {
     try {
-      const [teachersRes, gradesRes, subjectsRes, quartersRes] = await Promise.all([
+      const [teachersRes, gradesRes, subjectsRes, quartersRes, rulesRes] = await Promise.all([
         fetch("/api/teachers"),
         fetch("/api/grades"),
         fetch("/api/subjects"),
         fetch("/api/quarters"),
+        fetch("/api/rules"),
       ])
 
-      const [teachersData, gradesData, subjectsData, quartersData] = await Promise.all([
+      const [teachersData, gradesData, subjectsData, quartersData, rulesData] = await Promise.all([
         teachersRes.json(),
         gradesRes.json(),
         subjectsRes.json(),
         quartersRes.json(),
+        rulesRes.json(),
       ])
 
       setTeachers(teachersData)
       setGrades(gradesData)
       setSubjects(subjectsData)
+
+      // Extract study hall grades from rules config
+      const studyHallRule = rulesData.find((r: { rule_key: string }) => r.rule_key === 'study_hall_grades')
+      const configuredStudyHallGrades: string[] = studyHallRule?.enabled && studyHallRule?.config?.grades
+        ? studyHallRule.config.grades
+        : []
+      setStudyHallGrades(configuredStudyHallGrades)
 
       const active = quartersData.find((q: Quarter) => q.is_active)
       setActiveQuarter(active || null)
@@ -1442,7 +1452,7 @@ export default function ClassesPage() {
   }
 
   // Add 1 for study hall for grades 6-11
-  for (const gradeName of STUDY_HALL_GRADES) {
+  for (const gradeName of studyHallGrades) {
     const current = gradeCapacity.get(gradeName) || 0
     gradeCapacity.set(gradeName, current + 1)
   }
@@ -1693,7 +1703,7 @@ Maria\t6th-11th Elective\tSpanish 101\t1\tMon Block 5`}
             return (
               <div
                 key={grade.id}
-                title={`${grade.display_name}: ${count}/25 blocks${STUDY_HALL_GRADES.includes(grade.display_name) ? ' (includes study hall)' : ''}`}
+                title={`${grade.display_name}: ${count}/25 blocks${studyHallGrades.includes(grade.display_name) ? ' (includes study hall)' : ''}`}
                 className={cn(
                   "flex items-center gap-1 px-2 py-0.5 rounded text-xs font-medium flex-shrink-0",
                   isOver && "bg-red-100 text-red-700",

@@ -3,7 +3,7 @@
 import { cn } from "@/lib/utils"
 import { Badge } from "@/components/ui/badge"
 import { Checkbox } from "@/components/ui/checkbox"
-import { RefreshCw } from "lucide-react"
+import { RefreshCw, AlertTriangle, Check } from "lucide-react"
 import type { TeacherSchedule, GradeSchedule, FloatingBlock, PendingPlacement, ValidationError, CellLocation } from "@/lib/types"
 
 const DAYS = ["Mon", "Tues", "Wed", "Thurs", "Fri"]
@@ -16,6 +16,8 @@ interface ScheduleGridProps {
   type: "teacher" | "grade"
   name: string
   status?: string
+  // Change indicator: 'pending' = changes will be applied, 'applied' = changes have been applied in preview
+  changeStatus?: 'pending' | 'applied'
   // Selection mode props
   showCheckbox?: boolean
   isSelected?: boolean
@@ -43,6 +45,7 @@ export function ScheduleGrid({
   type,
   name,
   status,
+  changeStatus,
   showCheckbox,
   isSelected,
   onToggleSelect,
@@ -292,10 +295,22 @@ export function ScheduleGrid({
       <div
         className={cn(
           "px-3 py-2 font-medium border-b flex items-center justify-between",
-          isSelected ? "bg-sky-50" : "bg-slate-50"
+          isSelected ? "bg-sky-50" : changeStatus === 'pending' ? "bg-amber-50" : changeStatus === 'applied' ? "bg-emerald-50" : "bg-slate-50"
         )}
       >
         <div className="flex items-center gap-2">
+          {changeStatus === 'pending' && (
+            <div className="flex items-center gap-1 bg-amber-100 text-amber-700 px-1.5 py-0.5 rounded text-xs font-medium">
+              <AlertTriangle className="h-3.5 w-3.5" />
+              <span>Changed</span>
+            </div>
+          )}
+          {changeStatus === 'applied' && (
+            <div className="flex items-center gap-1 bg-emerald-100 text-emerald-700 px-1.5 py-0.5 rounded text-xs font-medium">
+              <Check className="h-3.5 w-3.5" />
+              <span>Updated</span>
+            </div>
+          )}
           <span>{name}</span>
           {status && (
             <Badge
