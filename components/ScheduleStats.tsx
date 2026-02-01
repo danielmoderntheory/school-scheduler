@@ -113,7 +113,7 @@ export function ScheduleStats({
 
   // Calculate issues for suggestions
   const unplacedStudyHalls = studyHallAssignments.filter(sh => !sh.teacher)
-  const teachersWithBTB = sortedStats.filter(s => s.backToBackIssues > 0)
+  const teachersWithBTB = sortedStats.filter(s => s.backToBackIssues > 0 && s.status === 'full-time')
   const fullTimeTeachers = sortedStats.filter(s => s.status === 'full-time')
 
   // Calculate utilization for full-time teachers only
@@ -197,37 +197,41 @@ export function ScheduleStats({
         {/* On screen: clickable, shows expanded/collapsed state */}
         {/* On print: always shows collapsed inline summary */}
         <div
-          className="border border-slate-200 rounded-lg p-3 bg-slate-50/50 cursor-pointer print:cursor-default"
-          onClick={() => setExpanded(!expanded)}
+          className="border border-slate-200 rounded-lg bg-slate-50/50"
         >
-          <div className="flex items-center gap-2 text-sm font-medium text-slate-600 hover:text-slate-800 print:hover:text-slate-600">
-            <ChevronDown className={`h-4 w-4 transition-transform no-print ${!expanded ? '-rotate-90' : ''}`} />
-            Schedule Summary
-            {/* Show inline stats when collapsed OR when printing */}
-            <span className={`contents ${expanded ? 'hidden print:contents' : ''}`}>
-              <span className="text-slate-300 ml-2">—</span>
-              <span className={`font-normal text-slate-500 ${blocksStatus === 'warning' ? 'text-amber-600 font-medium' : ''}`}>
-                {totalBlocksScheduled}/{totalBlocksAvailable} Blocks
-              </span>
-              <span className="text-slate-300">|</span>
-              <span className={`font-normal text-slate-500 ${gradesStatus === 'warning' ? 'text-amber-600 font-medium' : ''}`}>
-                {gradesFullCount}/{totalGrades} Grades Full
-              </span>
-              <span className="text-slate-300">|</span>
-              <span className={`font-normal text-slate-500 ${studyHallStatus === 'warning' ? 'text-amber-600 font-medium' : ''}`}>
-                {studyHallsPlaced}/{totalStudyHallsExpected} Study Halls
-              </span>
-              {issues.length > 0 && (
-                <span className="text-xs font-normal text-amber-600 ml-1">
-                  ({issues.length} note{issues.length !== 1 ? 's' : ''})
+          <div
+            className="p-3 cursor-pointer print:cursor-default"
+            onClick={() => setExpanded(!expanded)}
+          >
+            <div className="flex items-center gap-2 text-sm font-medium text-slate-600 hover:text-slate-800 print:hover:text-slate-600">
+              <ChevronDown className={`h-4 w-4 transition-transform no-print ${!expanded ? '-rotate-90' : ''}`} />
+              Schedule Summary
+              {/* Show inline stats when collapsed OR when printing */}
+              <span className={`contents ${expanded ? 'hidden print:contents' : ''}`}>
+                <span className="text-slate-300 ml-2">—</span>
+                <span className={`font-normal text-slate-500 ${blocksStatus === 'warning' ? 'text-amber-600 font-medium' : ''}`}>
+                  {totalBlocksScheduled}/{totalBlocksAvailable} Blocks
                 </span>
-              )}
-            </span>
+                <span className="text-slate-300">|</span>
+                <span className={`font-normal text-slate-500 ${gradesStatus === 'warning' ? 'text-amber-600 font-medium' : ''}`}>
+                  {gradesFullCount}/{totalGrades} Grades Full
+                </span>
+                <span className="text-slate-300">|</span>
+                <span className={`font-normal text-slate-500 ${studyHallStatus === 'warning' ? 'text-amber-600 font-medium' : ''}`}>
+                  {studyHallsPlaced}/{totalStudyHallsExpected} Study Halls
+                </span>
+                {issues.length > 0 && (
+                  <span className="text-xs font-normal text-amber-600 ml-1">
+                    ({issues.length} note{issues.length !== 1 ? 's' : ''})
+                  </span>
+                )}
+              </span>
+            </div>
           </div>
-        </div>
 
-        {/* Summary Stats - Shown when expanded on screen and print */}
-        <div className={`grid grid-cols-2 gap-3 ${expanded ? 'print-stats' : 'hidden'} md:flex md:flex-wrap`}>
+          {/* Summary Stats - Shown when expanded, inside the container */}
+          {expanded && (
+          <div className="grid grid-cols-2 gap-3 px-3 pb-3 print-stats md:flex md:flex-wrap">
           {/* Blocks Scheduled */}
           <div className={`border rounded-lg p-3 md:flex-1 md:min-w-0 ${
             totalBlocksScheduled < totalBlocksAvailable
@@ -335,23 +339,25 @@ export function ScheduleStats({
             <div className="text-xs text-slate-500 mt-1">Full-time only</div>
           </div>
         </div>
+          )}
 
-        {/* Notes - Only show if there are issues and expanded, hidden on print */}
-        {issues.length > 0 && expanded && (
-          <div className="border border-amber-200 rounded-lg bg-amber-50/50 p-3 no-print">
-            <h4 className="text-sm font-medium text-amber-800 mb-2 flex items-center gap-2">
-              <AlertTriangle className="h-4 w-4" />
-              Notes
-            </h4>
-            <ul className="space-y-1">
-              {issues.map((issue, i) => (
-                <li key={i} className={`text-sm ${issue.type === 'warning' ? 'text-amber-800' : 'text-amber-700'}`}>
-                  • {issue.message}
-                </li>
-              ))}
-            </ul>
-          </div>
-        )}
+          {/* Notes - Only show if there are issues and expanded, hidden on print */}
+          {issues.length > 0 && expanded && (
+            <div className="border border-amber-200 rounded-lg bg-amber-50/50 p-3 mx-3 mb-3 no-print">
+              <h4 className="text-sm font-medium text-amber-800 mb-2 flex items-center gap-2">
+                <AlertTriangle className="h-4 w-4" />
+                Notes
+              </h4>
+              <ul className="space-y-1">
+                {issues.map((issue, i) => (
+                  <li key={i} className={`text-sm ${issue.type === 'warning' ? 'text-amber-800' : 'text-amber-700'}`}>
+                    • {issue.message}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+        </div>
 
         {/* Detailed Tables - Collapsed */}
         <details id="stats-details" className="group border border-slate-200 rounded-lg p-3 bg-slate-50/50">
