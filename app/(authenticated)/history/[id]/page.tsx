@@ -1046,13 +1046,13 @@ export default function HistoryDetailPage() {
         const currentSelection = parseInt(selectedOption)
         if (currentSelection === optionNum) {
           // Deleted the selected option - select nearest revision
-          // Prefer next option, fall back to previous
-          if (optionIndex < updatedOptions.length) {
-            // There's an option after the deleted one (now at same index)
-            setSelectedOption((optionIndex + 1).toString())
-          } else {
-            // No option after, select the previous one
+          // Prefer previous option (smaller number), fall back to next
+          if (optionIndex > 0) {
+            // There's an option before the deleted one
             setSelectedOption(optionIndex.toString())
+          } else {
+            // No option before, select the first one (was second, now first)
+            setSelectedOption("1")
           }
         } else if (currentSelection > optionNum) {
           // Adjust selection if we deleted an earlier option
