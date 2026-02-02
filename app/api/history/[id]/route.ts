@@ -35,6 +35,7 @@ export async function PUT(
   if (body.notes !== undefined) updates.notes = body.notes
   if (body.is_starred !== undefined) updates.is_starred = body.is_starred
   if (body.options !== undefined) updates.options = body.options
+  if (body.stats !== undefined) updates.stats = body.stats
 
   const { data, error } = await supabase
     .from("schedule_generations")

@@ -81,7 +81,9 @@ export interface TeacherSchedule {
 
 export interface GradeSchedule {
   [day: string]: {
-    [block: number]: [string, string] | null; // [teacher, subject] or null
+    // Array of [teacher, subject] entries - supports multiple electives at same slot
+    // Single-entry array for regular classes, multi-entry for electives
+    [block: number]: [string, string][] | null;
   };
 }
 
