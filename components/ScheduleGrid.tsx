@@ -34,6 +34,8 @@ interface ScheduleGridProps {
   pendingPlacements?: PendingPlacement[]
   selectedFloatingBlock?: string | null
   validationErrors?: ValidationError[]
+  autoFixedBlockIds?: string[]  // Our placements that have conflicts (amber)
+  movedBlockerCells?: Array<{ teacher: string; day: string; block: number }>  // Cells where blockers were moved to (cyan)
   onPickUp?: (location: CellLocation) => void
   onPlace?: (location: CellLocation) => void
   onUnplace?: (blockId: string) => void
@@ -59,6 +61,8 @@ export function ScheduleGrid({
   pendingPlacements = [],
   selectedFloatingBlock,
   validationErrors = [],
+  autoFixedBlockIds = [],
+  movedBlockerCells = [],
   onPickUp,
   onPlace,
   onUnplace,
@@ -141,6 +145,13 @@ export function ScheduleGrid({
     )
   }
 
+  function isMovedBlockerCell(day: string, block: number): boolean {
+    if (type !== "teacher") return false
+    return movedBlockerCells.some(c =>
+      c.teacher === name && c.day === day && c.block === block
+    )
+  }
+
   function isValidFreeformTarget(day: string, block: number): boolean {
     if (!freeformMode || !selectedFloatingBlock) return false
     if (type !== "teacher") return false
@@ -183,11 +194,21 @@ export function ScheduleGrid({
         const placedBlock = floatingBlocks.find(b => b.id === placement.blockId)
         const isStudyHall = placedBlock?.subject === "Study Hall"
         const placementBg = isStudyHall ? "bg-blue-100" : "bg-green-50"
+        const isAutoFixed = autoFixedBlockIds.includes(placement.blockId)
         // If a block is selected, this is a valid target
         if (selectedFloatingBlock) {
           return cn(placementBg, "ring-2 ring-inset ring-emerald-400 cursor-pointer hover:ring-emerald-500")
         }
+        // Auto-fixed blocks get amber ring to distinguish from manual placements
+        if (isAutoFixed) {
+          return cn(placementBg, "ring-2 ring-inset ring-amber-400 cursor-pointer")
+        }
         return cn(placementBg, "ring-2 ring-inset ring-indigo-400 cursor-pointer")
+      }
+
+      // Moved blocker cell styling - amber with pulse to show auto-moved classes
+      if (isMovedBlockerCell(day, block)) {
+        return cn(baseClass, "ring-2 ring-inset ring-amber-400 animate-pulse")
       }
 
       // Picked-up cell ghost styling - light indigo dashed

@@ -143,6 +143,7 @@ export interface FloatingBlock {
   grade: string;
   subject: string;
   entry: [string, string];
+  isDisplaced?: boolean; // true if picked up via chain (blocking another placement)
 }
 
 export interface PendingPlacement {

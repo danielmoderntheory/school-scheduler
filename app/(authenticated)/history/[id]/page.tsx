@@ -1,6 +1,6 @@
 "use client"
 
-import { useState, useEffect, useRef } from "react"
+import { useState, useEffect, useRef, useMemo } from "react"
 import { useParams, useSearchParams, useRouter } from "next/navigation"
 import { Button } from "@/components/ui/button"
 import { ScheduleGrid } from "@/components/ScheduleGrid"
@@ -189,6 +189,25 @@ export default function HistoryDetailPage() {
   } | null>(null)
   const [freeformClasses, setFreeformClasses] = useState<ClassEntry[] | null>(null)
 
+  // Conflict resolution state - tracks blockers that were moved to accommodate our placements
+  const [conflictResolution, setConflictResolution] = useState<{
+    movedBlockers: Array<{
+      from: { teacher: string; day: string; block: number }
+      to: { teacher: string; day: string; block: number }
+      grade: string
+      subject: string
+    }>
+    blockersList: Array<{
+      blocker: { teacher: string; day: string; block: number; grade: string; subject: string; entry: [string, string] }
+      blockedPlacement: PendingPlacement
+      reason: string
+    }>  // Original blockers for retry
+    schedules: {
+      teacherSchedules: Record<string, TeacherSchedule>
+      gradeSchedules: Record<string, GradeSchedule>
+    }
+    attemptIndex: number
+  } | null>(null)
 
   // Star dialog state
   const [showStarDialog, setShowStarDialog] = useState(false)
@@ -204,6 +223,93 @@ export default function HistoryDetailPage() {
   const [useCurrentClasses, setUseCurrentClasses] = useState(false) // When true, regen uses current DB classes instead of snapshot
   const [changesExpanded, setChangesExpanded] = useState(false) // Expandable changes list in regen banner
   const [allowStudyHallReassignment, setAllowStudyHallReassignment] = useState(false) // Allow study halls to move to any eligible teacher
+
+  // Compute which placements have conflicts and detailed info for validation errors
+  const placementConflicts = useMemo(() => {
+    if (!workingSchedules || pendingPlacements.length === 0 || conflictResolution) return []
+
+    const conflicts: Array<{
+      blockId: string
+      placement: PendingPlacement
+      block: FloatingBlock
+      reason: string
+      conflictingTeacher: string
+      conflictingBlock: number
+      conflictingEntry: [string, string]
+    }> = []
+
+    // Check each placed block for conflicts
+    for (const placement of pendingPlacements) {
+      const block = floatingBlocks.find(b => b.id === placement.blockId)
+      if (!block) continue
+
+      const { day, block: blockNum } = placement
+
+      // Check grade conflict - is this grade scheduled elsewhere at the same time?
+      for (const [teacher, sched] of Object.entries(workingSchedules.teacherSchedules)) {
+        if (teacher === placement.teacher) continue
+        const entry = (sched as TeacherSchedule)[day]?.[blockNum]
+        if (entry && entry[0] === block.grade && entry[1] !== "OPEN" && entry[1] !== "Study Hall") {
+          conflicts.push({
+            blockId: block.id,
+            placement,
+            block,
+            reason: `${block.grade} already has ${entry[1]} with ${teacher} at ${day} B${blockNum}`,
+            conflictingTeacher: teacher,
+            conflictingBlock: blockNum,
+            conflictingEntry: entry
+          })
+          break
+        }
+      }
+
+      // Check subject conflict - same subject on same day for same grade
+      for (const [teacher, sched] of Object.entries(workingSchedules.teacherSchedules)) {
+        for (let b = 1; b <= 5; b++) {
+          if (teacher === placement.teacher && b === blockNum) continue
+          const entry = (sched as TeacherSchedule)[day]?.[b]
+          if (entry && entry[0] === block.grade && entry[1] === block.subject) {
+            // Only add if not already added for grade conflict
+            if (!conflicts.some(c => c.blockId === block.id)) {
+              conflicts.push({
+                blockId: block.id,
+                placement,
+                block,
+                reason: `${block.grade} already has ${block.subject} on ${day} (${teacher} B${b})`,
+                conflictingTeacher: teacher,
+                conflictingBlock: b,
+                conflictingEntry: entry
+              })
+            }
+            break
+          }
+        }
+      }
+    }
+
+    return conflicts
+  }, [workingSchedules, pendingPlacements, floatingBlocks, conflictResolution])
+
+  // Extract just the IDs for highlighting
+  const conflictingBlockIds = useMemo(() =>
+    placementConflicts.map(c => c.blockId),
+    [placementConflicts]
+  )
+
+  // Set validation errors when conflicts are detected
+  useEffect(() => {
+    if (placementConflicts.length > 0 && !conflictResolution) {
+      setValidationErrors(placementConflicts.map(c => ({
+        type: 'grade_conflict' as const,
+        message: c.reason,
+        cells: [{ teacher: c.placement.teacher, day: c.placement.day, block: c.placement.block }],
+        blockId: c.blockId
+      })))
+    } else if (placementConflicts.length === 0 && !conflictResolution) {
+      // Clear conflict-related validation errors when no more conflicts
+      setValidationErrors(prev => prev.filter(e => e.type !== 'grade_conflict'))
+    }
+  }, [placementConflicts, conflictResolution])
 
   useEffect(() => {
     loadGeneration()
@@ -2448,6 +2554,7 @@ export default function HistoryDetailPage() {
     setValidationErrors([])
     setWorkingSchedules(null)
     setFreeformClasses(null)
+    setConflictResolution(null)
   }
 
   function handlePickUpBlock(location: CellLocation) {
@@ -2472,7 +2579,8 @@ export default function HistoryDetailPage() {
       sourceBlock: location.block,
       grade: entry[0],
       subject: entry[1],
-      entry
+      entry,
+      isDisplaced: false  // Manually picked up = intentional
     }
 
     setFloatingBlocks(prev => [...prev, block])
@@ -2491,8 +2599,9 @@ export default function HistoryDetailPage() {
     setWorkingSchedules({ teacherSchedules: newTeacherSchedules, gradeSchedules: newGradeSchedules })
     setSelectedFloatingBlock(blockId)
 
-    // Clear any previous validation errors
+    // Clear any previous validation errors and conflict resolution
     setValidationErrors([])
+    setConflictResolution(null)
   }
 
   function handlePlaceBlock(location: CellLocation) {
@@ -2527,7 +2636,8 @@ export default function HistoryDetailPage() {
           sourceBlock: location.block,
           grade: targetEntry[0],
           subject: targetEntry[1],
-          entry: targetEntry
+          entry: targetEntry,
+          isDisplaced: true  // Picked up via chain = displaced
         }
 
         // Remove from grade schedule
@@ -2589,8 +2699,9 @@ export default function HistoryDetailPage() {
       setSelectedFloatingBlock(null)
     }
 
-    // Clear validation errors
+    // Clear validation errors and conflict resolution
     setValidationErrors([])
+    setConflictResolution(null)
   }
 
   function handleReturnBlock(blockId: string) {
@@ -2682,6 +2793,438 @@ export default function HistoryDetailPage() {
     if (isPlaced) return
 
     setSelectedFloatingBlock(blockId === selectedFloatingBlock ? null : blockId)
+  }
+
+  /**
+   * Find what's BLOCKING our intentional placements
+   * Returns the blocking classes that need to be moved (not our placements)
+   */
+  function findBlockers(
+    schedules: { teacherSchedules: Record<string, TeacherSchedule>; gradeSchedules: Record<string, GradeSchedule> },
+    placedBlocks: Array<{ block: FloatingBlock; placement: PendingPlacement }>
+  ): Array<{
+    blocker: { teacher: string; day: string; block: number; grade: string; subject: string; entry: [string, string] }
+    blockedPlacement: PendingPlacement
+    reason: string
+  }> {
+    const blockers: Array<{
+      blocker: { teacher: string; day: string; block: number; grade: string; subject: string; entry: [string, string] }
+      blockedPlacement: PendingPlacement
+      reason: string
+    }> = []
+    const seenBlockers = new Set<string>() // Avoid duplicates
+
+    for (const { block, placement } of placedBlocks) {
+      const { day, block: blockNum } = placement
+
+      // Check grade conflict - find the OTHER class that has the same grade at this time
+      for (const [teacher, sched] of Object.entries(schedules.teacherSchedules)) {
+        if (teacher === placement.teacher) continue // Skip our placement
+        const entry = (sched as TeacherSchedule)[day]?.[blockNum]
+        if (entry && entry[0] === block.grade && entry[1] !== "OPEN" && entry[1] !== "Study Hall") {
+          // Check if both are electives - electives can share slots
+          const isElective = generation?.stats?.classes_snapshot?.some(
+            c => c.teacher_name === teacher && c.subject_name === entry[1] && c.is_elective
+          )
+          const blockIsElective = generation?.stats?.classes_snapshot?.some(
+            c => c.teacher_name === block.sourceTeacher && c.subject_name === block.subject && c.is_elective
+          )
+          if (!isElective || !blockIsElective) {
+            const key = `${teacher}-${day}-${blockNum}`
+            if (!seenBlockers.has(key)) {
+              seenBlockers.add(key)
+              blockers.push({
+                blocker: { teacher, day, block: blockNum, grade: entry[0], subject: entry[1], entry },
+                blockedPlacement: placement,
+                reason: `${entry[0]} ${entry[1]} conflicts with ${block.grade} at same time`
+              })
+            }
+          }
+        }
+      }
+
+      // Check subject conflict - find the OTHER class that has same subject on same day for same grade
+      for (const [teacher, sched] of Object.entries(schedules.teacherSchedules)) {
+        for (let b = 1; b <= 5; b++) {
+          if (teacher === placement.teacher && b === blockNum) continue // Skip our placement
+          const entry = (sched as TeacherSchedule)[day]?.[b]
+          if (entry && entry[0] === block.grade && entry[1] === block.subject) {
+            const key = `${teacher}-${day}-${b}`
+            if (!seenBlockers.has(key)) {
+              seenBlockers.add(key)
+              blockers.push({
+                blocker: { teacher, day, block: b, grade: entry[0], subject: entry[1], entry },
+                blockedPlacement: placement,
+                reason: `${entry[0]} already has ${entry[1]} on ${day}`
+              })
+            }
+          }
+        }
+      }
+    }
+
+    return blockers
+  }
+
+  /**
+   * Try to fix conflicts by moving BLOCKING classes to new positions
+   * Our intentional placements stay where they are
+   */
+  function findConflictResolution(
+    schedules: { teacherSchedules: Record<string, TeacherSchedule>; gradeSchedules: Record<string, GradeSchedule> },
+    blockers: Array<{
+      blocker: { teacher: string; day: string; block: number; grade: string; subject: string; entry: [string, string] }
+      blockedPlacement: PendingPlacement
+      reason: string
+    }>,
+    seed: number = 0
+  ): {
+    movedBlockers: Array<{ from: { teacher: string; day: string; block: number }; to: { teacher: string; day: string; block: number }; grade: string; subject: string }>
+    schedules: typeof schedules
+  } | null {
+    if (blockers.length === 0) return null
+
+    const DAYS = ["Mon", "Tues", "Wed", "Thurs", "Fri"]
+    const BLOCKS = [1, 2, 3, 4, 5]
+
+    // Deep copy schedules
+    const newTeacherSchedules = JSON.parse(JSON.stringify(schedules.teacherSchedules))
+    const newGradeSchedules = JSON.parse(JSON.stringify(schedules.gradeSchedules))
+
+    // Clear blockers from their current positions
+    for (const { blocker } of blockers) {
+      newTeacherSchedules[blocker.teacher][blocker.day][blocker.block] = [blocker.grade, "OPEN"]
+      if (newGradeSchedules[blocker.grade]?.[blocker.day]?.[blocker.block]) {
+        newGradeSchedules[blocker.grade][blocker.day][blocker.block] = null
+      }
+    }
+
+    // Helper: check if a placement is valid for a blocker being moved
+    function isValidPlacement(grade: string, subject: string, day: string, blockNum: number, teacher: string): boolean {
+      // Check if slot is occupied (by a non-OPEN class)
+      const currentEntry = newTeacherSchedules[teacher]?.[day]?.[blockNum]
+      if (currentEntry && currentEntry[1] !== "OPEN") return false
+
+      // Check grade conflict - same grade at same time on another teacher
+      for (const [t, sched] of Object.entries(newTeacherSchedules)) {
+        const entry = (sched as TeacherSchedule)[day]?.[blockNum]
+        if (entry && entry[0] === grade && entry[1] !== "OPEN" && entry[1] !== "Study Hall") {
+          return false
+        }
+      }
+
+      // Check subject conflict - same subject on same day for same grade
+      for (const [, sched] of Object.entries(newTeacherSchedules)) {
+        for (let b = 1; b <= 5; b++) {
+          if (b === blockNum) continue
+          const entry = (sched as TeacherSchedule)[day]?.[b]
+          if (entry && entry[0] === grade && entry[1] === subject) {
+            return false
+          }
+        }
+      }
+
+      return true
+    }
+
+    // Seeded random shuffle
+    function shuffle<T>(arr: T[], s: number): T[] {
+      const result = [...arr]
+      let rand = s
+      for (let i = result.length - 1; i > 0; i--) {
+        rand = (rand * 1103515245 + 12345) & 0x7fffffff
+        const j = rand % (i + 1)
+        ;[result[i], result[j]] = [result[j], result[i]]
+      }
+      return result
+    }
+
+    // Get valid slots for each blocker (must stay on same teacher)
+    const blockersWithSlots = blockers.map(({ blocker }) => {
+      const slots: Array<{ day: string; block: number }> = []
+      for (const day of DAYS) {
+        for (const blockNum of BLOCKS) {
+          if (isValidPlacement(blocker.grade, blocker.subject, day, blockNum, blocker.teacher)) {
+            slots.push({ day, block: blockNum })
+          }
+        }
+      }
+      return { blocker, validSlots: slots }
+    }).sort((a, b) => a.validSlots.length - b.validSlots.length)
+
+    // Check if any blocker has no valid slots
+    if (blockersWithSlots.some(b => b.validSlots.length === 0)) {
+      return null
+    }
+
+    const movedBlockers: Array<{ from: { teacher: string; day: string; block: number }; to: { teacher: string; day: string; block: number }; grade: string; subject: string }> = []
+
+    // Try to place each blocker in a new position
+    for (const { blocker, validSlots } of blockersWithSlots) {
+      const shuffledSlots = shuffle(validSlots, seed + movedBlockers.length)
+
+      let placed = false
+      for (const slot of shuffledSlots) {
+        if (!isValidPlacement(blocker.grade, blocker.subject, slot.day, slot.block, blocker.teacher)) continue
+
+        // Place the blocker at the new position
+        newTeacherSchedules[blocker.teacher][slot.day][slot.block] = blocker.entry
+
+        if (!newGradeSchedules[blocker.grade]) {
+          newGradeSchedules[blocker.grade] = {}
+        }
+        if (!newGradeSchedules[blocker.grade][slot.day]) {
+          newGradeSchedules[blocker.grade][slot.day] = {}
+        }
+        newGradeSchedules[blocker.grade][slot.day][slot.block] = [blocker.teacher, blocker.subject]
+
+        movedBlockers.push({
+          from: { teacher: blocker.teacher, day: blocker.day, block: blocker.block },
+          to: { teacher: blocker.teacher, day: slot.day, block: slot.block },
+          grade: blocker.grade,
+          subject: blocker.subject
+        })
+
+        placed = true
+        break
+      }
+
+      if (!placed) {
+        return null
+      }
+    }
+
+    return {
+      movedBlockers,
+      schedules: { teacherSchedules: newTeacherSchedules, gradeSchedules: newGradeSchedules }
+    }
+  }
+
+  function handleCheckAndFix(singleConflictBlockId?: string) {
+    if (!workingSchedules) return
+
+    // Get all placed floating blocks
+    const placedBlocks = pendingPlacements.map(p => {
+      const block = floatingBlocks.find(b => b.id === p.blockId)
+      return block ? { block, placement: p } : null
+    }).filter((b): b is { block: FloatingBlock; placement: PendingPlacement } => b !== null)
+
+    if (placedBlocks.length === 0) {
+      toast.error("No blocks have been placed yet")
+      return
+    }
+
+    let blockers: Array<{
+      blocker: { teacher: string; day: string; block: number; grade: string; subject: string; entry: [string, string] }
+      blockedPlacement: PendingPlacement
+      reason: string
+    }>
+
+    if (singleConflictBlockId) {
+      // For single conflict, use placementConflicts directly to get the exact blocker
+      const conflict = placementConflicts.find(c => c.blockId === singleConflictBlockId)
+      if (!conflict) {
+        toast.error("Could not find the specified conflict")
+        return
+      }
+
+      // Get the blocker info from the conflict - use conflictingBlock for the exact position
+      const blockerEntry = workingSchedules.teacherSchedules[conflict.conflictingTeacher]?.[conflict.placement.day]?.[conflict.conflictingBlock]
+      if (!blockerEntry || blockerEntry[1] === "OPEN" || blockerEntry[1] === "Study Hall") {
+        toast.error("Blocker no longer exists at that position")
+        return
+      }
+
+      blockers = [{
+        blocker: {
+          teacher: conflict.conflictingTeacher,
+          day: conflict.placement.day,
+          block: conflict.conflictingBlock,
+          grade: blockerEntry[0],
+          subject: blockerEntry[1],
+          entry: blockerEntry
+        },
+        blockedPlacement: conflict.placement,
+        reason: conflict.reason
+      }]
+    } else {
+      // For "Fix All", use findBlockers to get all blockers
+      const allBlockers = findBlockers(workingSchedules, placedBlocks)
+
+      if (allBlockers.length === 0) {
+        toast.success("No conflicts found!")
+        setValidationErrors([])
+        return
+      }
+
+      blockers = allBlockers
+    }
+
+    // Try to fix by moving blockers to new positions
+    const attemptIndex = conflictResolution ? conflictResolution.attemptIndex + 1 : 0
+
+    const result = findConflictResolution(
+      workingSchedules,
+      blockers,
+      attemptIndex * 17 + Date.now() % 1000
+    )
+
+    if (!result) {
+      const msg = singleConflictBlockId
+        ? "Couldn't find an alternative position for this conflict."
+        : `Found ${blockers.length} blocking class${blockers.length !== 1 ? 'es' : ''} but couldn't find alternative positions.`
+      toast.error(msg)
+      // Only update validation errors for unfixable ones
+      if (!singleConflictBlockId) {
+        setValidationErrors(blockers.map(b => ({
+          type: 'grade_conflict' as const,
+          message: b.reason,
+          cells: [{ teacher: b.blocker.teacher, day: b.blocker.day, block: b.blocker.block }],
+          blockId: pendingPlacements.find(p => p === b.blockedPlacement)?.blockId
+        })))
+      }
+      return
+    }
+
+    setConflictResolution({
+      movedBlockers: result.movedBlockers,
+      blockersList: blockers,
+      schedules: result.schedules,
+      attemptIndex
+    })
+
+    // Scroll to the first moved blocker's new location
+    if (result.movedBlockers.length > 0) {
+      const firstMoved = result.movedBlockers[0]
+      const teacherId = `teacher-grid-${firstMoved.to.teacher.replace(/\s+/g, '-')}`
+      setTimeout(() => {
+        const element = document.getElementById(teacherId)
+        if (element) {
+          element.scrollIntoView({ behavior: 'smooth', block: 'center' })
+        }
+      }, 100)
+    }
+  }
+
+  function handleTryDifferentFix() {
+    if (!conflictResolution || !workingSchedules) return
+
+    // Restore blockers to their original positions and try again with different seed
+    const restoredSchedules = JSON.parse(JSON.stringify(workingSchedules))
+
+    // Put blockers back at their original positions
+    for (const moved of conflictResolution.movedBlockers) {
+      // Clear the new position
+      restoredSchedules.teacherSchedules[moved.to.teacher][moved.to.day][moved.to.block] = [moved.grade, "OPEN"]
+      // Restore to original position
+      const entry: [string, string] = [moved.grade, moved.subject]
+      restoredSchedules.teacherSchedules[moved.from.teacher][moved.from.day][moved.from.block] = entry
+    }
+
+    const result = findConflictResolution(
+      restoredSchedules,
+      conflictResolution.blockersList,
+      (conflictResolution.attemptIndex + 1) * 17 + Date.now() % 1000
+    )
+
+    if (!result) {
+      toast.error("No more alternative positions found")
+      return
+    }
+
+    setConflictResolution({
+      ...conflictResolution,
+      movedBlockers: result.movedBlockers,
+      schedules: result.schedules,
+      attemptIndex: conflictResolution.attemptIndex + 1
+    })
+
+    // Scroll to the first moved blocker's new location
+    if (result.movedBlockers.length > 0) {
+      const firstMoved = result.movedBlockers[0]
+      const teacherId = `teacher-grid-${firstMoved.to.teacher.replace(/\s+/g, '-')}`
+      setTimeout(() => {
+        const element = document.getElementById(teacherId)
+        if (element) {
+          element.scrollIntoView({ behavior: 'smooth', block: 'center' })
+        }
+      }, 100)
+    }
+  }
+
+  function handleAcceptFix() {
+    if (!conflictResolution || !workingSchedules) return
+
+    // Store previous state for undo
+    const previousSchedules = JSON.parse(JSON.stringify(workingSchedules))
+    const movedBlockers = conflictResolution.movedBlockers
+
+    // Apply the new schedules with moved blockers
+    setWorkingSchedules(conflictResolution.schedules)
+
+    // pendingPlacements stay the same - we only moved other classes, not our placements
+    setConflictResolution(null)
+    setValidationErrors([])
+
+    // Build description of what was moved
+    const moveDescriptions = movedBlockers.map(m =>
+      `${m.grade} ${m.subject} → ${m.to.day} B${m.to.block}`
+    ).join(', ')
+
+    // Dismiss any existing undo toast
+    if (undoToastId.current) toast.dismiss(undoToastId.current)
+
+    const toastId = toast(
+      (t) => (
+        <div className="flex items-center gap-3">
+          <span className="text-sm">Fixed: {moveDescriptions}</span>
+          <button
+            onClick={() => {
+              toast.dismiss(t.id)
+              undoToastId.current = null
+              // Restore previous schedules
+              setWorkingSchedules(previousSchedules)
+              toast.success("Fix undone")
+            }}
+            className="px-2 py-1 text-sm font-medium text-amber-600 hover:text-amber-800 hover:bg-amber-50 rounded transition-colors"
+          >
+            Undo
+          </button>
+        </div>
+      ),
+      {
+        duration: 60000,
+        icon: <Check className="h-4 w-4 text-emerald-600" />,
+      }
+    )
+    undoToastId.current = toastId
+  }
+
+  function handleUndoFix() {
+    if (!conflictResolution || !workingSchedules) return
+
+    // Restore blockers to their original positions
+    const newTeacherSchedules = JSON.parse(JSON.stringify(workingSchedules.teacherSchedules))
+    const newGradeSchedules = JSON.parse(JSON.stringify(workingSchedules.gradeSchedules))
+
+    // Move blockers back to their original positions
+    for (const moved of conflictResolution.movedBlockers) {
+      // Clear the new position
+      newTeacherSchedules[moved.to.teacher][moved.to.day][moved.to.block] = [moved.grade, "OPEN"]
+      if (newGradeSchedules[moved.grade]?.[moved.to.day]?.[moved.to.block]) {
+        newGradeSchedules[moved.grade][moved.to.day][moved.to.block] = null
+      }
+      // Restore to original position
+      const entry: [string, string] = [moved.grade, moved.subject]
+      newTeacherSchedules[moved.from.teacher][moved.from.day][moved.from.block] = entry
+      if (!newGradeSchedules[moved.grade]) newGradeSchedules[moved.grade] = {}
+      if (!newGradeSchedules[moved.grade][moved.from.day]) newGradeSchedules[moved.grade][moved.from.day] = {}
+      newGradeSchedules[moved.grade][moved.from.day][moved.from.block] = [moved.from.teacher, moved.subject]
+    }
+
+    setWorkingSchedules({ teacherSchedules: newTeacherSchedules, gradeSchedules: newGradeSchedules })
+    setConflictResolution(null)
+    toast.success("Undo complete - blocking classes restored to original positions")
   }
 
   /**
@@ -4103,22 +4646,26 @@ export default function HistoryDetailPage() {
                       <div>
                         <span className="text-indigo-800 font-medium">Freeform Mode</span>
                         <p className="text-sm text-indigo-600">
-                          {selectedFloatingBlock
-                            ? "Click an OPEN slot to place the selected block"
-                            : floatingBlocks.length === 0
-                              ? "Click any class to pick it up and move it to a different time slot."
-                              : "Select a floating block, then click an OPEN slot to place it"}
+                          {conflictResolution
+                            ? `Fix preview: ${conflictResolution.movedBlockers.length} blocking class${conflictResolution.movedBlockers.length !== 1 ? 'es were' : ' was'} moved (pulsing). Accept, try different, or undo.`
+                            : selectedFloatingBlock
+                              ? "Click an OPEN slot to place the selected block"
+                              : floatingBlocks.length === 0
+                                ? "Click any class to pick it up and move it to a different time slot."
+                                : "Select a floating block, then click an OPEN slot to place it. Use Check & Fix to resolve conflicts."}
                         </p>
                       </div>
                     </div>
                     <div className="flex items-center gap-2">
+                      {/* Main freeform buttons */}
                       <Button
                         variant="outline"
                         size="sm"
                         onClick={handleValidate}
                         className="text-indigo-600 border-indigo-300 hover:bg-indigo-100"
-                        disabled={floatingBlocks.length === 0}
+                        disabled={floatingBlocks.length === 0 || !!conflictResolution}
                       >
+                        <AlertTriangle className="h-4 w-4 mr-1" />
                         Validate
                       </Button>
                       <Button
@@ -4134,7 +4681,7 @@ export default function HistoryDetailPage() {
                         size="sm"
                         onClick={() => handleApplyFreeform(generation.options.length === 1)}
                         className="bg-indigo-600 hover:bg-indigo-700 text-white"
-                        disabled={floatingBlocks.length === 0}
+                        disabled={floatingBlocks.length === 0 || !!conflictResolution}
                       >
                         <Check className="h-4 w-4 mr-1" />
                         Save
@@ -4171,8 +4718,19 @@ export default function HistoryDetailPage() {
                       <span className="text-indigo-600">
                         {pendingPlacements.length} placed
                       </span>
-                      {validationErrors.length > 0 && (
+                      {/* Status indicators */}
+                      {conflictingBlockIds.length > 0 && !conflictResolution && (
                         <span className="text-amber-600 font-medium">
+                          {conflictingBlockIds.length} conflict{conflictingBlockIds.length !== 1 ? 's' : ''}
+                        </span>
+                      )}
+                      {conflictResolution && (
+                        <span className="text-amber-600 font-medium">
+                          {conflictResolution.movedBlockers.length} moved
+                        </span>
+                      )}
+                      {validationErrors.length > 0 && !conflictResolution && conflictingBlockIds.length === 0 && (
+                        <span className="text-red-600 font-medium">
                           {validationErrors.length} issue{validationErrors.length !== 1 ? 's' : ''}
                         </span>
                       )}
@@ -4181,20 +4739,95 @@ export default function HistoryDetailPage() {
                       {generation.options.length === 1 ? "Will create Revision 2" : `Will update Revision ${viewingOption}`}
                     </span>
                   </div>
-                  {/* Validation errors list */}
-                  {validationErrors.length > 0 && (
+                  {/* Validation errors list - includes Fix buttons for auto-fixable conflicts */}
+                  {validationErrors.length > 0 && !conflictResolution && (
                     <div className="mt-3 pt-3 border-t border-indigo-200">
-                      <div className="text-xs font-medium text-red-600 mb-1">Validation Issues:</div>
-                      <ul className="text-xs text-red-600 space-y-0.5">
+                      <div className="flex items-center justify-between mb-1">
+                        <div className={`text-xs font-medium ${conflictingBlockIds.length > 0 ? 'text-amber-600' : 'text-red-600'}`}>
+                          {conflictingBlockIds.length > 0 ? 'Conflicts:' : 'Validation Issues:'}
+                        </div>
+                        {conflictingBlockIds.length > 1 && (
+                          <button
+                            onClick={() => handleCheckAndFix()}
+                            className="inline-flex items-center gap-1 px-2 py-0.5 text-xs font-medium text-amber-700 bg-amber-100 hover:bg-amber-200 border border-amber-300 rounded-md transition-colors"
+                          >
+                            Fix All
+                          </button>
+                        )}
+                      </div>
+                      <ul className={`text-xs space-y-1 ${conflictingBlockIds.length > 0 ? 'text-amber-700' : 'text-red-600'}`}>
                         {validationErrors.map((error, idx) => (
-                          <li key={idx} className="flex items-start gap-1">
-                            <span className="text-red-400 mt-0.5">•</span>
+                          <li key={idx} className="flex items-center gap-2">
+                            <span className={`${conflictingBlockIds.length > 0 ? 'text-amber-500' : 'text-red-400'}`}>•</span>
                             <span>{error.message}</span>
+                            {error.blockId && conflictingBlockIds.includes(error.blockId) && (
+                              <button
+                                onClick={() => handleCheckAndFix(error.blockId)}
+                                className="shrink-0 px-1.5 py-0.5 text-[10px] font-medium text-amber-700 bg-amber-50 hover:bg-amber-100 border border-amber-300 rounded transition-colors"
+                              >
+                                Fix
+                              </button>
+                            )}
                           </li>
                         ))}
                       </ul>
                     </div>
                   )}
+                </div>
+              )}
+
+              {/* Floating Fix buttons - appears below freeform banner when conflict resolution is active */}
+              {freeformMode && conflictResolution && (
+                <div className="flex justify-center mt-1 mb-2 no-print">
+                  <div className="flex items-center gap-4 px-4 py-2 bg-amber-50 border border-amber-300 rounded-lg shadow-md">
+                    <div className="text-xs text-amber-700">
+                      To place{' '}
+                      {conflictResolution.blockersList.map((b, i) => {
+                        const block = floatingBlocks.find(f => f.id === b.blockedPlacement.blockId)
+                        return (
+                          <span key={i}>
+                            {i > 0 && ', '}
+                            <span className="font-semibold text-amber-900">{b.blockedPlacement.teacher}</span>'s {block?.grade} {block?.subject}
+                          </span>
+                        )
+                      })}
+                      , moved{' '}
+                      {conflictResolution.movedBlockers.map((m, i) => (
+                        <span key={i}>
+                          {i > 0 && ', '}
+                          <span className="font-semibold text-amber-900">{m.from.teacher}</span>'s {m.grade} {m.subject} to {m.to.day} B{m.to.block}
+                        </span>
+                      ))}
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={handleTryDifferentFix}
+                        className="text-amber-700 border-amber-400 hover:bg-amber-100"
+                      >
+                        <Shuffle className="h-4 w-4 mr-1" />
+                        Try Different
+                      </Button>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={handleUndoFix}
+                        className="text-amber-700 border-amber-400 hover:bg-amber-100"
+                      >
+                        <X className="h-4 w-4 mr-1" />
+                        Undo
+                      </Button>
+                      <Button
+                        size="sm"
+                        onClick={handleAcceptFix}
+                        className="bg-amber-500 hover:bg-amber-600 text-white"
+                      >
+                        <Check className="h-4 w-4 mr-1" />
+                        Accept Fix
+                      </Button>
+                    </div>
+                  </div>
                 </div>
               )}
 
@@ -4634,16 +5267,18 @@ export default function HistoryDetailPage() {
                           )
 
                           return (
-                            <div key={teacher} className="space-y-2">
+                            <div key={teacher} id={`teacher-grid-${teacher.replace(/\s+/g, '-')}`} className="space-y-2">
                               <ScheduleGrid
                                 schedule={
-                                  freeformMode && workingSchedules && showingPreview
-                                    ? workingSchedules.teacherSchedules[teacher]
-                                    : swapMode && swapWorkingSchedules && showingPreview
-                                      ? swapWorkingSchedules.teacherSchedules[teacher]
-                                      : previewOption && previewType === "regen" && showingPreview
-                                        ? previewOption.teacherSchedules[teacher]
-                                        : schedule
+                                  freeformMode && conflictResolution && showingPreview
+                                    ? conflictResolution.schedules.teacherSchedules[teacher]
+                                    : freeformMode && workingSchedules && showingPreview
+                                      ? workingSchedules.teacherSchedules[teacher]
+                                      : swapMode && swapWorkingSchedules && showingPreview
+                                        ? swapWorkingSchedules.teacherSchedules[teacher]
+                                        : previewOption && previewType === "regen" && showingPreview
+                                          ? previewOption.teacherSchedules[teacher]
+                                          : schedule
                                 }
                                 type="teacher"
                                 name={teacher}
@@ -4666,6 +5301,12 @@ export default function HistoryDetailPage() {
                                 pendingPlacements={pendingPlacements}
                                 selectedFloatingBlock={selectedFloatingBlock}
                                 validationErrors={validationErrors}
+                                autoFixedBlockIds={conflictingBlockIds}
+                                movedBlockerCells={conflictResolution?.movedBlockers.map(m => ({
+                                  teacher: m.to.teacher,
+                                  day: m.to.day,
+                                  block: m.to.block
+                                })) || []}
                                 onPickUp={handlePickUpBlock}
                                 onPlace={handlePlaceBlock}
                                 onUnplace={handleUnplaceBlock}
