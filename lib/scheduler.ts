@@ -9,6 +9,7 @@ import type {
   Teacher, ClassEntry, ScheduleOption, TeacherStat, StudyHallAssignment,
   TeacherSchedule, GradeSchedule
 } from './types';
+import { BLOCK_TYPE_OPEN, BLOCK_TYPE_STUDY_HALL, isOpenBlock, isStudyHall, isScheduledClass, isOccupiedBlock } from './schedule-utils';
 
 // Constants
 export const DAYS = ['Mon', 'Tues', 'Wed', 'Thurs', 'Fri'];
@@ -619,7 +620,7 @@ function rebuildGradeSchedules(
     for (const day of DAYS) {
       for (const block of BLOCKS) {
         const entry = schedule[day]?.[block];
-        if (entry && entry[0] && entry[1] !== 'OPEN') {
+        if (entry && entry[0] && isOccupiedBlock(entry[1])) {
           const gradeDisplay = entry[0];
           const subject = entry[1];
 
@@ -714,7 +715,7 @@ function addStudyHalls(
     DAYS.forEach(day => {
       BLOCKS.forEach(block => {
         const entry = teacherSchedules[teacher]?.[day]?.[block];
-        if (entry && entry[1] !== 'OPEN' && entry[1] !== 'Study Hall') {
+        if (entry && isScheduledClass(entry[1])) {
           count++;
         }
       });
@@ -761,7 +762,7 @@ function addStudyHalls(
   function isGradeFreeAtSlot(grade: string, day: string, block: number): boolean {
     for (const [, schedule] of Object.entries(teacherSchedules)) {
       const entry = schedule?.[day]?.[block];
-      if (entry && entry[1] && entry[1] !== 'OPEN' && entry[1] !== 'Study Hall') {
+      if (entry && entry[1] && isScheduledClass(entry[1])) {
         // Check if this entry includes the target grade
         if (gradeDisplayIncludesGrade(entry[0], grade)) {
           return false; // Grade has a class at this slot
@@ -791,9 +792,9 @@ function addStudyHalls(
           const allFree = group.grades.every(g => isGradeFreeAtSlot(g, day, block));
 
           if (allFree) {
-            teacherSchedules[teacher][day][block] = [group.name, 'Study Hall'];
+            teacherSchedules[teacher][day][block] = [group.name, BLOCK_TYPE_STUDY_HALL];
             group.grades.forEach(g => {
-              gradeSchedules[g][day][block] = [teacher, 'Study Hall'];
+              gradeSchedules[g][day][block] = [teacher, BLOCK_TYPE_STUDY_HALL];
               gradeStudyHallDays.get(g)!.add(day);
               placedGrades.add(g);
             });
@@ -900,7 +901,7 @@ function fillOpenBlocks(teacherSchedules: Record<string, TeacherSchedule>): void
     DAYS.forEach(day => {
       BLOCKS.forEach(block => {
         if (teacherSchedules[teacher][day][block] === null) {
-          teacherSchedules[teacher][day][block] = ['', 'OPEN'];
+          teacherSchedules[teacher][day][block] = ['', BLOCK_TYPE_OPEN];
         }
       });
     });
@@ -913,7 +914,7 @@ function countBackToBack(teacherSchedules: Record<string, TeacherSchedule>, teac
     let prevOpen = false;
     BLOCKS.forEach(block => {
       const entry = teacherSchedules[teacher]?.[day]?.[block];
-      const currOpen = !entry || entry[1] === 'OPEN' || entry[1] === 'Study Hall';
+      const currOpen = !entry || !isScheduledClass(entry[1]);
       if (prevOpen && currOpen) count++;
       prevOpen = currOpen;
     });
@@ -932,7 +933,7 @@ function countSameDayOpen(teacherSchedules: Record<string, TeacherSchedule>, tea
     let openCount = 0;
     BLOCKS.forEach(block => {
       const entry = teacherSchedules[teacher]?.[day]?.[block];
-      if (!entry || entry[1] === 'OPEN' || entry[1] === 'Study Hall') {
+      if (!entry || !isScheduledClass(entry[1])) {
         openCount++;
       }
     });
@@ -955,8 +956,8 @@ function redistributeOpenBlocks(
       for (let i = 0; i < BLOCKS.length - 1; i++) {
         const entry1 = teacherSchedules[teacher][day][BLOCKS[i]];
         const entry2 = teacherSchedules[teacher][day][BLOCKS[i + 1]];
-        const isOpen1 = !entry1 || entry1[1] === 'OPEN' || entry1[1] === 'Study Hall';
-        const isOpen2 = !entry2 || entry2[1] === 'OPEN' || entry2[1] === 'Study Hall';
+        const isOpen1 = !entry1 || !isScheduledClass(entry1[1]);
+        const isOpen2 = !entry2 || !isScheduledClass(entry2[1]);
         if (isOpen1 && isOpen2) {
           pairs.push({ day, block: BLOCKS[i + 1] });
         }
@@ -969,11 +970,11 @@ function redistributeOpenBlocks(
     const blockIdx = BLOCKS.indexOf(block);
     if (blockIdx > 0) {
       const prev = teacherSchedules[teacher][day][BLOCKS[blockIdx - 1]];
-      if (!prev || prev[1] === 'OPEN' || prev[1] === 'Study Hall') return true;
+      if (!prev || !isScheduledClass(prev[1])) return true;
     }
     if (blockIdx < 4) {
       const next = teacherSchedules[teacher][day][BLOCKS[blockIdx + 1]];
-      if (!next || next[1] === 'OPEN' || next[1] === 'Study Hall') return true;
+      if (!next || !isScheduledClass(next[1])) return true;
     }
     return false;
   };
@@ -993,7 +994,7 @@ function redistributeOpenBlocks(
 
           for (const targetBlock of BLOCKS) {
             const entry = teacherSchedules[teacher][targetDay][targetBlock];
-            if (!entry || entry[1] === 'OPEN' || entry[1] === 'Study Hall' || !entry[0]) {
+            if (!entry || !isScheduledClass(entry[1]) || !entry[0]) {
               continue;
             }
 
@@ -1007,7 +1008,7 @@ function redistributeOpenBlocks(
             let hasConflict = false;
             for (const g of grades) {
               const slot = gradeSchedules[g]?.[issueDay]?.[issueBlock];
-              if (slot && slot[1] !== 'OPEN' && slot[1] !== null) {
+              if (slot && isOccupiedBlock(slot[1])) {
                 hasConflict = true;
                 break;
               }
@@ -1030,7 +1031,7 @@ function redistributeOpenBlocks(
 
             // Perform swap
             teacherSchedules[teacher][issueDay][issueBlock] = [gradeDisplay, subject];
-            teacherSchedules[teacher][targetDay][targetBlock] = ['', 'OPEN'];
+            teacherSchedules[teacher][targetDay][targetBlock] = ['', BLOCK_TYPE_OPEN];
 
             grades.forEach(g => {
               gradeSchedules[g][targetDay][targetBlock] = null;
@@ -1063,9 +1064,9 @@ function calculateStats(
     DAYS.forEach(day => {
       BLOCKS.forEach(block => {
         const entry = teacherSchedules[t.name]?.[day]?.[block];
-        if (!entry || entry[1] === 'OPEN') {
+        if (!entry || isOpenBlock(entry[1])) {
           open++;
-        } else if (entry[1] === 'Study Hall') {
+        } else if (isStudyHall(entry[1])) {
           studyHall++;
         } else {
           teaching++;
@@ -1247,7 +1248,7 @@ export async function generateSchedules(
       DAYS.forEach((day, dayIdx) => {
         BLOCKS.forEach((block, blockIdx) => {
           const entry = schedule[day]?.[block];
-          if (entry && entry[0] && entry[1] !== 'OPEN' && entry[1] !== 'Study Hall') {
+          if (entry && entry[0] && isScheduledClass(entry[1])) {
             const slot = dayBlockToSlot(dayIdx, blockIdx);
             const parsedGrades = parseGradesFromDatabase(entry[0], databaseGrades);
             parsedGrades.forEach(g => lockedGradeSlots.get(g)?.add(slot));
@@ -1337,8 +1338,8 @@ export async function generateSchedules(
         DAYS.forEach(day => {
           BLOCKS.forEach(block => {
             const entry = schedule[day]?.[block];
-            if (entry && entry[0] && entry[1] !== 'OPEN') {
-              if (entry[1] === 'Study Hall') {
+            if (entry && entry[0] && isOccupiedBlock(entry[1])) {
+              if (isStudyHall(entry[1])) {
                 // When allowStudyHallReassignment is true, skip preserving locked study halls
                 // This allows study halls to be reassigned to any eligible teacher
                 if (!allowStudyHallReassignment) {
@@ -1355,7 +1356,7 @@ export async function generateSchedules(
                   const shGrades = parseGradesFromDatabase(entry[0], databaseGrades);
                   shGrades.forEach(g => {
                     if (gs[g]) {
-                      gs[g][day][block] = [teacher, 'Study Hall'];
+                      gs[g][day][block] = [teacher, BLOCK_TYPE_STUDY_HALL];
                       // Track that this grade has a study hall on this day
                       existingGradeStudyHallDays.get(g)?.add(day);
                     }
@@ -1621,7 +1622,7 @@ export function reassignStudyHalls(
       for (const day of DAYS) {
         for (const block of BLOCKS) {
           const entry = teacherSchedules[teacher]?.[day]?.[block];
-          if (entry && (entry[1] === 'Study Hall' || entry[1] === 'OPEN')) {
+          if (entry && !isScheduledClass(entry[1])) {
             teacherSchedules[teacher][day][block] = null;
           }
         }
@@ -1633,7 +1634,7 @@ export function reassignStudyHalls(
       for (const day of DAYS) {
         for (const block of BLOCKS) {
           const entry = gradeSchedules[grade]?.[day]?.[block];
-          if (entry && entry[1] === 'Study Hall') {
+          if (entry && isStudyHall(entry[1])) {
             gradeSchedules[grade][day][block] = null;
           }
         }
@@ -1707,7 +1708,7 @@ export function reassignStudyHalls(
       for (const day of DAYS) {
         for (const block of BLOCKS) {
           if (teacherSchedules[teacher][day][block] === null) {
-            teacherSchedules[teacher][day][block] = ['', 'OPEN'];
+            teacherSchedules[teacher][day][block] = ['', BLOCK_TYPE_OPEN];
           }
         }
       }

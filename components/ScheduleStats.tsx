@@ -19,6 +19,7 @@ import {
 import { Info, AlertTriangle, ChevronDown, ChevronRight } from "lucide-react"
 import type { TeacherStat, StudyHallAssignment, GradeSchedule, TeacherSchedule } from "@/lib/types"
 import { parseGradeDisplayToNames } from "@/lib/grade-utils"
+import { isOccupiedBlock } from "@/lib/schedule-utils"
 
 interface ScheduleStatsProps {
   stats: TeacherStat[]
@@ -100,7 +101,7 @@ export function ScheduleStats({
       for (const day of DAYS) {
         for (const block of BLOCKS) {
           const entry = schedule?.[day]?.[block]
-          if (entry && entry[1] && entry[1] !== 'OPEN') {
+          if (entry && entry[1] && isOccupiedBlock(entry[1])) {
             const gradeDisplay = entry[0]
             const subject = entry[1]
 
@@ -148,7 +149,7 @@ export function ScheduleStats({
         for (const block of BLOCKS) {
           const entry = schedule?.[day]?.[block]
           // Count as filled if it's not empty and not OPEN
-          if (entry && entry[1] && entry[1] !== 'OPEN') {
+          if (entry && entry[1] && isOccupiedBlock(entry[1])) {
             filledBlocks++
             totalBlocksScheduled++
           } else {

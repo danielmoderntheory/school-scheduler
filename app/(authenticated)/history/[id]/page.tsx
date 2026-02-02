@@ -37,14 +37,15 @@ import Link from "next/link"
 import type { ScheduleOption, TeacherSchedule, GradeSchedule, Teacher, FloatingBlock, PendingPlacement, ValidationError, CellLocation, ClassEntry } from "@/lib/types"
 import { parseClassesFromSnapshot, parseTeachersFromSnapshot, parseRulesFromSnapshot, hasValidSnapshots, detectClassChanges, type GenerationStats, type ChangeDetectionResult, type CurrentClass } from "@/lib/snapshot-utils"
 import { parseGradeDisplayToNumbers, gradesOverlap, gradeNumToDisplay, isClassElective, shouldIgnoreGradeConflict } from "@/lib/grade-utils"
+import { BLOCK_TYPE_OPEN, BLOCK_TYPE_STUDY_HALL, isOpenBlock, isStudyHall, isScheduledClass, isOccupiedBlock, entryIsOpen, entryIsOccupied, entryIsScheduledClass } from "@/lib/schedule-utils"
 import toast from "react-hot-toast"
 import { generateSchedules, reassignStudyHalls } from "@/lib/scheduler"
 import { generateSchedulesRemote } from "@/lib/scheduler-remote"
 import { useGeneration } from "@/lib/generation-context"
 
-// Note: Grade and elective helper functions are imported from @/lib/grade-utils:
-// parseGradeDisplayToNumbers, gradesOverlap, gradeNumToDisplay,
-// isClassElective, shouldIgnoreGradeConflict
+// Note: Helper functions are imported from shared modules:
+// - @/lib/grade-utils: parseGradeDisplayToNumbers, gradesOverlap, gradeNumToDisplay, isClassElective, shouldIgnoreGradeConflict
+// - @/lib/schedule-utils: BLOCK_TYPE_OPEN, BLOCK_TYPE_STUDY_HALL, isOpenBlock, isStudyHall, isScheduledClass, isOccupiedBlock, entryIsOpen, entryIsOccupied, entryIsScheduledClass
 
 // Sort grades: Kindergarten first, then by grade number
 function gradeSort(a: string, b: string): number {
@@ -179,7 +180,7 @@ function rebuildGradeSchedules(
     for (const day of DAYS) {
       for (let block = 1; block <= 5; block++) {
         const entry = schedule[day]?.[block]
-        if (!entry || entry[1] === "OPEN") continue
+        if (!entry || isOpenBlock(entry[1])) continue
 
         const gradeDisplay = entry[0]
         const subject = entry[1]
@@ -200,7 +201,7 @@ function rebuildGradeSchedules(
     for (const day of DAYS) {
       for (let block = 1; block <= 5; block++) {
         const entry = schedule[day]?.[block]
-        if (!entry || entry[1] === "OPEN") continue
+        if (!entry || isOpenBlock(entry[1])) continue
 
         const gradeDisplay = entry[0]
         const subject = entry[1]
@@ -234,7 +235,7 @@ function analyzeTeacherGrades(schedule: TeacherSchedule): { primaryGrade: number
 
   for (const day of Object.values(schedule)) {
     for (const entry of Object.values(day)) {
-      if (entry && entry[0] && entry[1] !== "OPEN" && entry[1] !== "Study Hall") {
+      if (entry && entry[0] && isScheduledClass(entry[1])) {
         totalTeaching++
         const gradeStr = entry[0]
 
@@ -457,7 +458,7 @@ export default function HistoryDetailPage() {
       for (const [teacher, sched] of Object.entries(workingSchedules.teacherSchedules)) {
         if (teacher === placement.teacher) continue
         const entry = (sched as TeacherSchedule)[day]?.[blockNum]
-        if (entry && gradesOverlap(entry[0], block.grade) && entry[1] !== "OPEN") {
+        if (entry && gradesOverlap(entry[0], block.grade) && isOccupiedBlock(entry[1])) {
           // Skip conflict if both classes are electives (they can share the slot)
           if (shouldIgnoreGradeConflict(teacher, entry[1], block.sourceTeacher || placement.teacher, block.subject, classesSnapshot)) {
             continue
@@ -2306,7 +2307,7 @@ export default function HistoryDetailPage() {
       subjectsByDay[day] = new Set()
       for (const block of BLOCKS) {
         const entry = gradeSchedule[day]?.[block]
-        if (entry && entry[1] !== "OPEN" && entry[1] !== "Study Hall") {
+        if (entry && isScheduledClass(entry[1])) {
           if (!(day === source.day && block === source.block)) {
             subjectsByDay[day].add(entry[1])
           }
@@ -2401,7 +2402,7 @@ export default function HistoryDetailPage() {
       subjectsByDay[day] = new Set()
       for (const block of BLOCKS) {
         const entry = gradeSchedule[day]?.[block]
-        if (entry && entry[1] !== "OPEN" && entry[1] !== "Study Hall") {
+        if (entry && isScheduledClass(entry[1])) {
           // Don't count the source cell's subject
           if (!(day === source.day && block === source.block)) {
             subjectsByDay[day].add(entry[1])
@@ -2640,7 +2641,7 @@ export default function HistoryDetailPage() {
         if (!newGradeSchedules[gradeGroup][target.day]) {
           newGradeSchedules[gradeGroup][target.day] = {}
         }
-        newGradeSchedules[gradeGroup][target.day][target.block] = [target.teacher, "Study Hall"]
+        newGradeSchedules[gradeGroup][target.day][target.block] = [target.teacher, BLOCK_TYPE_STUDY_HALL]
       }
 
       toast(`Study Hall reassigned: ${source.teacher} → ${target.teacher} (${target.day} B${target.block})`, { icon: "✓" })
@@ -2688,7 +2689,7 @@ export default function HistoryDetailPage() {
     }
 
     // Move class: source slot becomes OPEN, target slot gets the class
-    newTeacherSchedules[teacher][source.day][source.block] = [grade, "OPEN"]
+    newTeacherSchedules[teacher][source.day][source.block] = [grade, BLOCK_TYPE_OPEN]
     newTeacherSchedules[teacher][target.day][target.block] = sourceTeacherEntry
 
     // Update grade schedule
@@ -2758,7 +2759,7 @@ export default function HistoryDetailPage() {
       }
 
       // Update teacher schedule: source slot becomes OPEN, target slot gets the class
-      newTeacherSchedules[sourceTeacher][source.day][source.block] = [grade, "OPEN"]
+      newTeacherSchedules[sourceTeacher][source.day][source.block] = [grade, BLOCK_TYPE_OPEN]
       newTeacherSchedules[sourceTeacher][target.day][target.block] = sourceTeacherEntry
 
       // Update grade schedule: source slot becomes empty/null, target slot gets the class
@@ -2787,10 +2788,10 @@ export default function HistoryDetailPage() {
       }
 
       // Swap in teacher schedules
-      newTeacherSchedules[sourceTeacher][source.day][source.block] = [grade, "OPEN"]
+      newTeacherSchedules[sourceTeacher][source.day][source.block] = [grade, BLOCK_TYPE_OPEN]
       newTeacherSchedules[sourceTeacher][target.day][target.block] = sourceTeacherEntry
 
-      newTeacherSchedules[targetTeacher][target.day][target.block] = [grade, "OPEN"]
+      newTeacherSchedules[targetTeacher][target.day][target.block] = [grade, BLOCK_TYPE_OPEN]
       newTeacherSchedules[targetTeacher][source.day][source.block] = targetTeacherEntry
 
       // Swap in grade schedule
@@ -3139,7 +3140,7 @@ export default function HistoryDetailPage() {
     const newTeacherSchedules = JSON.parse(JSON.stringify(workingSchedules.teacherSchedules))
     const newGradeSchedules = JSON.parse(JSON.stringify(workingSchedules.gradeSchedules))
 
-    newTeacherSchedules[location.teacher][location.day][location.block] = [entry[0], "OPEN"]
+    newTeacherSchedules[location.teacher][location.day][location.block] = [entry[0], BLOCK_TYPE_OPEN]
 
     // Remove from grade schedule (works for both classes and study halls)
     if (newGradeSchedules[entry[0]]?.[location.day]?.[location.block]) {
@@ -3199,7 +3200,7 @@ export default function HistoryDetailPage() {
       // Restore OPEN at old placement location
       const oldEntry = newTeacherSchedules[existingPlacement.teacher][existingPlacement.day][existingPlacement.block]
       if (oldEntry) {
-        newTeacherSchedules[existingPlacement.teacher][existingPlacement.day][existingPlacement.block] = [oldEntry[0], "OPEN"]
+        newTeacherSchedules[existingPlacement.teacher][existingPlacement.day][existingPlacement.block] = [oldEntry[0], BLOCK_TYPE_OPEN]
       }
       // Note: Don't update gradeSchedules directly - it will be rebuilt from teacherSchedules on save
     }
@@ -3257,7 +3258,7 @@ export default function HistoryDetailPage() {
 
     // If it was placed, clear that location (teacherSchedules only - gradeSchedules rebuilt on save)
     if (placement) {
-      newTeacherSchedules[placement.teacher][placement.day][placement.block] = [block.grade, "OPEN"]
+      newTeacherSchedules[placement.teacher][placement.day][placement.block] = [block.grade, BLOCK_TYPE_OPEN]
       // Skip gradeSchedules update - rebuilt on save
       setPendingPlacements(prev => prev.filter(p => p.blockId !== blockId))
     }
@@ -3304,7 +3305,7 @@ export default function HistoryDetailPage() {
     const newGradeSchedules = JSON.parse(JSON.stringify(workingSchedules.gradeSchedules))
 
     // Clear the placement location - set to OPEN
-    newTeacherSchedules[placement.teacher][placement.day][placement.block] = [block.grade, "OPEN"]
+    newTeacherSchedules[placement.teacher][placement.day][placement.block] = [block.grade, BLOCK_TYPE_OPEN]
     if (newGradeSchedules[block.grade]?.[placement.day]?.[placement.block]) {
       newGradeSchedules[block.grade][placement.day][placement.block] = null
     }
@@ -3355,7 +3356,7 @@ export default function HistoryDetailPage() {
       for (const [teacher, sched] of Object.entries(schedules.teacherSchedules)) {
         if (teacher === placement.teacher) continue // Skip our placement
         const entry = (sched as TeacherSchedule)[day]?.[blockNum]
-        if (entry && gradesOverlap(entry[0], block.grade) && entry[1] !== "OPEN") {
+        if (entry && gradesOverlap(entry[0], block.grade) && isOccupiedBlock(entry[1])) {
           // Skip if both classes are electives (they can share the slot)
           if (shouldIgnoreGradeConflict(teacher, entry[1], block.sourceTeacher || placement.teacher, block.subject, classesSnapshot)) {
             continue
@@ -3462,7 +3463,7 @@ export default function HistoryDetailPage() {
 
     // Clear blockers from their current positions (only in teacherSchedules - gradeSchedules will be rebuilt)
     for (const { blocker } of blockers) {
-      newTeacherSchedules[blocker.teacher][blocker.day][blocker.block] = [blocker.grade, "OPEN"]
+      newTeacherSchedules[blocker.teacher][blocker.day][blocker.block] = [blocker.grade, BLOCK_TYPE_OPEN]
     }
 
     // Helper: check if a placement is valid for a blocker being moved
@@ -3496,7 +3497,7 @@ export default function HistoryDetailPage() {
       // In freeform mode, Study Halls are legitimate blocks (just another class)
       for (const [t, sched] of Object.entries(newTeacherSchedules)) {
         const entry = (sched as TeacherSchedule)[day]?.[blockNum]
-        if (entry && entry[1] !== "OPEN") {
+        if (entry && isOccupiedBlock(entry[1])) {
           if (gradesOverlap(entry[0], grade)) {
             return false
           }
@@ -3698,7 +3699,7 @@ export default function HistoryDetailPage() {
     // Put blockers back at their original positions
     for (const moved of conflictResolution.movedBlockers) {
       // Clear the new position
-      restoredSchedules.teacherSchedules[moved.to.teacher][moved.to.day][moved.to.block] = [moved.grade, "OPEN"]
+      restoredSchedules.teacherSchedules[moved.to.teacher][moved.to.day][moved.to.block] = [moved.grade, BLOCK_TYPE_OPEN]
       // Restore to original position
       const entry: [string, string] = [moved.grade, moved.subject]
       restoredSchedules.teacherSchedules[moved.from.teacher][moved.from.day][moved.from.block] = entry
@@ -3794,7 +3795,7 @@ export default function HistoryDetailPage() {
     // Move blockers back to their original positions
     for (const moved of conflictResolution.movedBlockers) {
       // Clear the new position
-      newTeacherSchedules[moved.to.teacher][moved.to.day][moved.to.block] = [moved.grade, "OPEN"]
+      newTeacherSchedules[moved.to.teacher][moved.to.day][moved.to.block] = [moved.grade, BLOCK_TYPE_OPEN]
       if (newGradeSchedules[moved.grade]?.[moved.to.day]?.[moved.to.block]) {
         newGradeSchedules[moved.grade][moved.to.day][moved.to.block] = null
       }
@@ -3833,7 +3834,7 @@ export default function HistoryDetailPage() {
         for (const day of DAYS) {
           for (let block = 1; block <= 5; block++) {
             const entry = schedule[day]?.[block]
-            if (entry && entry[0] && entry[1] !== "OPEN" && entry[1] !== "Study Hall") {
+            if (entry && entry[0] && isScheduledClass(entry[1])) {
               availableGrades.add(entry[0])
             }
           }
@@ -3892,7 +3893,7 @@ export default function HistoryDetailPage() {
       for (const day of DAYS) {
         for (let block = 1; block <= 5; block++) {
           const entry = schedule[day]?.[block]
-          if (!entry || !entry[0] || entry[1] === "OPEN" || entry[1] === "Study Hall") continue
+          if (!entry || !entry[0] || !isScheduledClass(entry[1])) continue
 
           const gradeDisplay = entry[0]
           const subject = entry[1]
@@ -3969,7 +3970,7 @@ export default function HistoryDetailPage() {
       for (const day of DAYS) {
         for (let block = 1; block <= 5; block++) {
           const entry = schedule[day]?.[block]
-          if (!entry || entry[1] === "OPEN" || entry[1] === "Study Hall") continue
+          if (!entry || !isScheduledClass(entry[1])) continue
 
           // Count how many classes this teacher has at this slot (should be 1)
           const placementsHere = pendingPlacements.filter(p =>
@@ -3994,7 +3995,7 @@ export default function HistoryDetailPage() {
       if (!placedBlock) continue
 
       // Skip Study Halls - they don't cause grade conflicts
-      if (placedBlock.subject === "Study Hall") continue
+      if (isStudyHall(placedBlock.subject)) continue
 
       const grade = placedBlock.grade
       const { day, block } = placement
@@ -4006,7 +4007,7 @@ export default function HistoryDetailPage() {
         if (p === placement) return false
         const otherBlock = floatingBlocks.find(b => b.id === p.blockId)
         // Skip Study Halls
-        if (otherBlock?.subject === "Study Hall") return false
+        if (isStudyHall(otherBlock?.subject)) return false
         if (!otherBlock || !gradesOverlap(otherBlock.grade, grade) || p.day !== day || p.block !== block) return false
         // Skip if both are electives (they can share the slot)
         if (shouldIgnoreGradeConflict(otherBlock.sourceTeacher || p.teacher, otherBlock.subject, placedBlock.sourceTeacher || placement.teacher, placedBlock.subject, classesSnapshot)) {
@@ -4038,7 +4039,7 @@ export default function HistoryDetailPage() {
       for (const day of DAYS) {
         for (let block = 1; block <= 5; block++) {
           const entry = schedule[day]?.[block]
-          if (!entry || entry[1] === "OPEN" || entry[1] === "Study Hall") continue
+          if (!entry || !isScheduledClass(entry[1])) continue
 
           const grade = entry[0]
           const subject = entry[1]
@@ -4214,7 +4215,7 @@ export default function HistoryDetailPage() {
         for (let block = 1; block <= 5; block++) {
           const entries: Array<{ grade: string; subject: string }> = []
           const entry = schedule[day]?.[block]
-          if (entry && entry[1] && entry[1] !== "OPEN") {
+          if (entry && isOccupiedBlock(entry[1])) {
             // Count this as an entry (grade, subject)
             entries.push({ grade: entry[0], subject: entry[1] })
           }

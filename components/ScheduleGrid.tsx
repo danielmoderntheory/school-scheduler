@@ -5,6 +5,7 @@ import { Badge } from "@/components/ui/badge"
 import { Checkbox } from "@/components/ui/checkbox"
 import { RefreshCw, AlertTriangle, Check } from "lucide-react"
 import type { TeacherSchedule, GradeSchedule, FloatingBlock, PendingPlacement, ValidationError, CellLocation } from "@/lib/types"
+import { BLOCK_TYPE_OPEN, isOpenBlock, isStudyHall, isScheduledClass } from "@/lib/schedule-utils"
 
 const DAYS = ["Mon", "Tues", "Wed", "Thurs", "Fri"]
 const BLOCKS = [1, 2, 3, 4, 5]
@@ -79,7 +80,7 @@ export function ScheduleGrid({
         // New format: array of arrays
         const entries = raw as unknown as [string, string][]
         // Filter to actual classes (not OPEN or Study Hall)
-        const classEntries = entries.filter(([, subject]) => subject !== "OPEN" && subject !== "Study Hall")
+        const classEntries = entries.filter(([, subject]) => isScheduledClass(subject))
         if (classEntries.length > 1) {
           // Multiple classes at same time = Elective period
           return { entry: ["", "Elective"], isMultiple: true }
@@ -97,8 +98,8 @@ export function ScheduleGrid({
   function getCellType(entry: [string, string] | null): "study-hall" | "open" | "class" | "empty" {
     if (!entry) return "empty"
     const [, subject] = entry
-    if (subject === "OPEN") return "open"
-    if (subject === "Study Hall") return "study-hall"
+    if (isOpenBlock(subject)) return "open"
+    if (isStudyHall(subject)) return "study-hall"
     return "class"
   }
 
@@ -167,8 +168,8 @@ export function ScheduleGrid({
     const baseClass = (() => {
       if (!entry) return "bg-muted/30"
       const [, subject] = entry
-      if (subject === "OPEN") return "bg-gray-100 text-gray-500"
-      if (subject === "Study Hall") return "bg-blue-100 text-blue-800"
+      if (isOpenBlock(subject)) return "bg-gray-100 text-gray-500"
+      if (isStudyHall(subject)) return "bg-blue-100 text-blue-800"
       if (subject === "Elective") return "bg-purple-50"
       return "bg-green-50"
     })()
@@ -192,8 +193,8 @@ export function ScheduleGrid({
       // Pending placement styling - use the block's natural color with a ring
       if (placement) {
         const placedBlock = floatingBlocks.find(b => b.id === placement.blockId)
-        const isStudyHall = placedBlock?.subject === "Study Hall"
-        const placementBg = isStudyHall ? "bg-blue-100" : "bg-green-50"
+        const placedBlockIsStudyHall = isStudyHall(placedBlock?.subject)
+        const placementBg = placedBlockIsStudyHall ? "bg-blue-100" : "bg-green-50"
         const isAutoFixed = autoFixedBlockIds.includes(placement.blockId)
         // If a block is selected, this is a valid target
         if (selectedFloatingBlock) {
@@ -446,9 +447,9 @@ export function ScheduleGrid({
                       <div className="text-[10px] text-indigo-400 italic">
                         moved
                       </div>
-                    ) : displaySecondary === "OPEN" ? (
+                    ) : isOpenBlock(displaySecondary) ? (
                       // OPEN cells just show "OPEN" without grade
-                      <span className="text-xs text-muted-foreground">OPEN</span>
+                      <span className="text-xs text-muted-foreground">{BLOCK_TYPE_OPEN}</span>
                     ) : isMultiple ? (
                       // Multiple entries (electives) - show just "Elective" or "Multiple"
                       <div className="max-w-full overflow-hidden">

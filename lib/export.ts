@@ -1,5 +1,6 @@
 import XLSX from "xlsx-js-style"
 import type { ScheduleOption, TeacherSchedule, GradeSchedule } from "./types"
+import { BLOCK_TYPE_OPEN, BLOCK_TYPE_STUDY_HALL, isOpenBlock, isStudyHall, isScheduledClass } from "./schedule-utils"
 
 const DAYS = ["Mon", "Tues", "Wed", "Thurs", "Fri"]
 const BLOCKS = [1, 2, 3, 4, 5]
@@ -29,7 +30,7 @@ function analyzeTeacherGrades(schedule: TeacherSchedule): { primaryGrade: number
 
   for (const day of Object.values(schedule)) {
     for (const entry of Object.values(day as Record<number, [string, string] | null>)) {
-      if (entry && entry[0] && entry[1] !== "OPEN" && entry[1] !== "Study Hall") {
+      if (entry && entry[0] && isScheduledClass(entry[1])) {
         totalTeaching++
         const gradeStr = entry[0]
 
@@ -116,10 +117,10 @@ function sortTeachers(
 function formatCell(entry: [string, string] | null | undefined): string {
   if (!entry) return ""
   // OPEN blocks have no grade info
-  if (entry[1] === "OPEN") return "OPEN"
+  if (isOpenBlock(entry[1])) return BLOCK_TYPE_OPEN
   // Study Hall should show the grade
-  if (entry[1] === "Study Hall") {
-    return entry[0] ? `${entry[0]} - Study Hall` : "Study Hall"
+  if (isStudyHall(entry[1])) {
+    return entry[0] ? `${entry[0]} - ${BLOCK_TYPE_STUDY_HALL}` : BLOCK_TYPE_STUDY_HALL
   }
   // If first part is empty, just show subject
   if (!entry[0]) return entry[1]
@@ -148,18 +149,18 @@ function formatGradeCell(raw: unknown): string {
   // Single entry - show teacher and subject
   if (entries.length === 1) {
     const [teacher, subject] = entries[0]
-    if (subject === "OPEN") return "OPEN"
-    if (subject === "Study Hall") return `${teacher} - Study Hall`
+    if (isOpenBlock(subject)) return BLOCK_TYPE_OPEN
+    if (isStudyHall(subject)) return `${teacher} - ${BLOCK_TYPE_STUDY_HALL}`
     return `${teacher} - ${subject}`
   }
 
   // Multiple entries (electives) - just show "Elective"
   // Filter out OPEN and Study Hall for counting
-  const classEntries = entries.filter(([, subject]) => subject !== "OPEN" && subject !== "Study Hall")
+  const classEntries = entries.filter(([, subject]) => isScheduledClass(subject))
   if (classEntries.length === 0) {
     // All entries are Study Hall or OPEN - just show first
     const [teacher, subject] = entries[0]
-    return subject === "OPEN" ? "OPEN" : `${teacher} - ${subject}`
+    return isOpenBlock(subject) ? BLOCK_TYPE_OPEN : `${teacher} - ${subject}`
   }
   if (classEntries.length === 1) {
     const [teacher, subject] = classEntries[0]
