@@ -111,18 +111,92 @@ function sortTeachers(
   })
 }
 
+// Abbreviate grade display: "6th Grade" -> "6th", "6th-11th Grade" -> "6th-11th", "Kindergarten" -> "K"
+function abbreviateGrade(gradeDisplay: string): string {
+  if (!gradeDisplay) return ""
+
+  // Handle Kindergarten
+  if (gradeDisplay.toLowerCase().includes("kindergarten")) return "K"
+
+  // Handle ranges like "6th-11th Grade" or "6th-11th Grades"
+  const rangeMatch = gradeDisplay.match(/^(\d+)(?:st|nd|rd|th)?[-–](\d+)(?:st|nd|rd|th)?/i)
+  if (rangeMatch) {
+    const start = parseInt(rangeMatch[1])
+    const end = parseInt(rangeMatch[2])
+    const startSuffix = start === 1 ? "st" : start === 2 ? "nd" : start === 3 ? "rd" : "th"
+    const endSuffix = end === 1 ? "st" : end === 2 ? "nd" : end === 3 ? "rd" : "th"
+    return `${start}${startSuffix}-${end}${endSuffix}`
+  }
+
+  // Handle single grades like "6th Grade"
+  const singleMatch = gradeDisplay.match(/^(\d+)(?:st|nd|rd|th)/i)
+  if (singleMatch) {
+    const num = parseInt(singleMatch[1])
+    const suffix = num === 1 ? "st" : num === 2 ? "nd" : num === 3 ? "rd" : "th"
+    return `${num}${suffix}`
+  }
+
+  // Fallback: remove " Grade" or " Grades" suffix
+  return gradeDisplay.replace(/\s*Grades?\s*$/i, "").trim()
+}
+
 // Format schedule cell: "Grade - Subject" or just "OPEN" (no dash)
+// For teacher schedules: entry is [grade, subject]
 function formatCell(entry: [string, string] | null | undefined): string {
   if (!entry) return ""
   // OPEN blocks have no grade info
   if (entry[1] === "OPEN") return "OPEN"
-  // Study Hall should show the grade
+  // Study Hall should show the grade (abbreviated)
   if (entry[1] === "Study Hall") {
-    return entry[0] ? `${entry[0]} - Study Hall` : "Study Hall"
+    return entry[0] ? `${abbreviateGrade(entry[0])} - Study Hall` : "Study Hall"
   }
   // If first part is empty, just show subject
   if (!entry[0]) return entry[1]
-  return `${entry[0]} - ${entry[1]}`
+  return `${abbreviateGrade(entry[0])} - ${entry[1]}`
+}
+
+// Format grade schedule cell - handles array format [[teacher, subject], ...]
+// For grade schedules: entries are [teacher, subject] pairs
+function formatGradeCell(raw: unknown): string {
+  if (!raw) return ""
+
+  // Handle array format (new)
+  let entries: [string, string][] = []
+  if (Array.isArray(raw) && raw.length > 0) {
+    if (Array.isArray(raw[0])) {
+      // New format: array of arrays
+      entries = raw as [string, string][]
+    } else if (typeof raw[0] === 'string' && raw.length === 2) {
+      // Old format: single tuple
+      entries = [raw as [string, string]]
+    }
+  }
+
+  if (entries.length === 0) return ""
+
+  // Single entry - show teacher and subject
+  if (entries.length === 1) {
+    const [teacher, subject] = entries[0]
+    if (subject === "OPEN") return "OPEN"
+    if (subject === "Study Hall") return `${teacher} - Study Hall`
+    return `${teacher} - ${subject}`
+  }
+
+  // Multiple entries (electives) - show "Elective" with count
+  // Filter out OPEN and Study Hall for counting
+  const classEntries = entries.filter(([, subject]) => subject !== "OPEN" && subject !== "Study Hall")
+  if (classEntries.length === 0) {
+    // All entries are Study Hall or OPEN - just show first
+    const [teacher, subject] = entries[0]
+    return subject === "OPEN" ? "OPEN" : `${teacher} - ${subject}`
+  }
+  if (classEntries.length === 1) {
+    const [teacher, subject] = classEntries[0]
+    return `${teacher} - ${subject}`
+  }
+
+  // Multiple electives - list them all
+  return classEntries.map(([teacher, subject]) => `${teacher}: ${subject}`).join(" | ")
 }
 
 // Style definitions
@@ -383,7 +457,7 @@ export function generateXLSX(option: ScheduleOption, metadata?: ExportMetadata):
       gradeRowInfo.push({ type: "block", row: gradeData.length })
       const row: (string | number)[] = [`Block ${block}`]
       DAYS.forEach((day) => {
-        row.push(formatCell(schedule[day]?.[block]))
+        row.push(formatGradeCell(schedule[day]?.[block]))
       })
       gradeData.push(row)
     })
@@ -476,7 +550,7 @@ export function generateCSV(option: ScheduleOption, metadata?: ExportMetadata): 
     BLOCKS.forEach((block) => {
       const row: string[] = [`Block ${block}`]
       DAYS.forEach((day) => {
-        const cell = formatCell(schedule[day]?.[block])
+        const cell = formatGradeCell(schedule[day]?.[block])
         row.push(cell ? `"${cell}"` : "")
       })
       lines.push(row.join(","))

@@ -85,6 +85,16 @@ export function ScheduleStats({
     // Helper to parse grade names from grade_display string (e.g., "6th-11th Grade" -> ["6th Grade", "7th Grade", ...])
     const parseGradeDisplay = (gradeDisplay: string): string[] => {
       const grades: string[] = []
+
+      // Check for Kindergarten first
+      if (gradeDisplay.toLowerCase().includes('kindergarten') || gradeDisplay === 'K') {
+        const kGrade = gradeNames.find(g => g.toLowerCase().includes('kindergarten') || g === 'K')
+        if (kGrade) {
+          grades.push(kGrade)
+        }
+        return grades
+      }
+
       // Check for range pattern like "6th-11th" or "6th-8th"
       const rangeMatch = gradeDisplay.match(/(\d+)(?:st|nd|rd|th)-(\d+)(?:st|nd|rd|th)/)
       if (rangeMatch) {
@@ -151,7 +161,11 @@ export function ScheduleStats({
 
       for (const day of DAYS) {
         for (const block of BLOCKS) {
-          const entry = schedule?.[day]?.[block]
+          const rawEntry = schedule?.[day]?.[block]
+          // Handle both array format and legacy tuple format
+          const entry = Array.isArray(rawEntry) && rawEntry.length > 0
+            ? (Array.isArray(rawEntry[0]) ? rawEntry[0] : rawEntry) as [string, string]
+            : null
           // Count as filled if it's not empty and not OPEN
           if (entry && entry[1] && entry[1] !== 'OPEN') {
             filledBlocks++

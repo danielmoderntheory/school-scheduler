@@ -38,6 +38,8 @@ interface ScheduleGridProps {
   onPlace?: (location: CellLocation) => void
   onUnplace?: (blockId: string) => void
   onDeselect?: () => void
+  // For grade view: detect elective slots (multiple teachers at same slot)
+  allTeacherSchedules?: Record<string, TeacherSchedule>
 }
 
 export function ScheduleGrid({
@@ -63,9 +65,53 @@ export function ScheduleGrid({
   onPlace,
   onUnplace,
   onDeselect,
+  allTeacherSchedules,
 }: ScheduleGridProps) {
+  // Get cell content - handles both teacher schedules (single entry) and grade schedules (array)
   function getCellContent(day: string, block: number): [string, string] | null {
-    return schedule[day]?.[block] || null
+    const raw = schedule[day]?.[block]
+    if (!raw) return null
+
+    if (type === "grade") {
+      // Grade schedule: array format [[teacher, subject], ...]
+      // Return first entry for display (we handle multiple separately)
+      if (Array.isArray(raw) && raw.length > 0) {
+        // Check if it's array of arrays (new format) or single tuple (old format)
+        if (Array.isArray(raw[0])) {
+          return raw[0] as [string, string]
+        }
+        // Old format: single tuple
+        return raw as unknown as [string, string]
+      }
+      return null
+    }
+
+    // Teacher schedule: single entry format [grade, subject]
+    return raw as [string, string]
+  }
+
+  // Get all entries for a grade schedule slot (for elective detection)
+  function getGradeSlotEntries(day: string, block: number): [string, string][] {
+    if (type !== "grade") return []
+    const raw = schedule[day]?.[block]
+    if (!raw) return []
+
+    // New format: array of arrays
+    if (Array.isArray(raw) && raw.length > 0 && Array.isArray(raw[0])) {
+      return raw as [string, string][]
+    }
+    // Old format: single tuple - wrap in array
+    if (Array.isArray(raw) && raw.length === 2 && typeof raw[0] === 'string') {
+      return [raw as unknown as [string, string]]
+    }
+    return []
+  }
+
+  // For grade view: check if this slot has multiple entries (elective slot)
+  function isElectiveSlot(day: string, block: number): boolean {
+    if (type !== "grade") return false
+    const entries = getGradeSlotEntries(day, block)
+    return entries.length > 1
   }
 
   function getCellType(entry: [string, string] | null): "study-hall" | "open" | "class" | "empty" {
@@ -407,12 +453,26 @@ export function ScheduleGrid({
                       <span className="text-xs text-muted-foreground">OPEN</span>
                     ) : hasContent ? (
                       <div className="max-w-full overflow-hidden">
-                        <div className="font-medium text-xs leading-tight truncate" title={type === "teacher" ? displayPrimary : displaySecondary}>
-                          {type === "teacher" ? displayPrimary.replace(' Grade', '').replace('Kindergarten', 'K') : displaySecondary}
-                        </div>
-                        <div className="text-[10px] leading-tight text-muted-foreground truncate" title={type === "teacher" ? displaySecondary : displayPrimary}>
-                          {type === "teacher" ? displaySecondary : displayPrimary}
-                        </div>
+                        {type === "grade" && isElectiveSlot(day, block) ? (
+                          // Elective slot - show "Elective" as subject with same styling as regular classes
+                          <>
+                            <div className="font-medium text-xs leading-tight truncate" title="Elective (multiple options)">
+                              Elective
+                            </div>
+                            <div className="text-[10px] leading-tight text-muted-foreground truncate" title={displayPrimary}>
+                              {displayPrimary}
+                            </div>
+                          </>
+                        ) : (
+                          <>
+                            <div className="font-medium text-xs leading-tight truncate" title={type === "teacher" ? displayPrimary : displaySecondary}>
+                              {type === "teacher" ? displayPrimary.replace(' Grade', '').replace('Kindergarten', 'K') : displaySecondary}
+                            </div>
+                            <div className="text-[10px] leading-tight text-muted-foreground truncate" title={type === "teacher" ? displaySecondary : displayPrimary}>
+                              {type === "teacher" ? displaySecondary : displayPrimary}
+                            </div>
+                          </>
+                        )}
                       </div>
                     ) : (
                       <span className="text-xs text-muted-foreground">-</span>

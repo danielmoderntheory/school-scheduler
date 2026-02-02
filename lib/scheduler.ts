@@ -517,7 +517,11 @@ function buildSchedules(
 
     teacherSchedules[s.teacher][day][block] = [s.grade, s.subject];
     parseGrades(s.grade).forEach(g => {
-      gradeSchedules[g][day][block] = [s.teacher, s.subject];
+      // Initialize array if null, then push entry (supports multiple electives at same slot)
+      if (!gradeSchedules[g][day][block]) {
+        gradeSchedules[g][day][block] = [];
+      }
+      gradeSchedules[g][day][block]!.push([s.teacher, s.subject]);
     });
   });
 
@@ -637,7 +641,11 @@ function rebuildGradeSchedules(
                 }
               }
             }
-            gradeSchedules[g][day][block] = [teacher, subject];
+            // Initialize array if null, then push entry (supports multiple electives at same slot)
+            if (!gradeSchedules[g][day][block]) {
+              gradeSchedules[g][day][block] = [];
+            }
+            gradeSchedules[g][day][block]!.push([teacher, subject]);
           }
         }
       }
@@ -757,7 +765,7 @@ function addStudyHalls(
           if (allFree) {
             teacherSchedules[teacher][day][block] = [group.name, 'Study Hall'];
             group.grades.forEach(g => {
-              gradeSchedules[g][day][block] = [teacher, 'Study Hall'];
+              gradeSchedules[g][day][block] = [[teacher, 'Study Hall']];
               gradeStudyHallDays.get(g)!.add(day);
               placedGrades.add(g);
             });
@@ -967,11 +975,12 @@ function redistributeOpenBlocks(
             const grades = parseGrades(gradeDisplay);
             if (grades.length === 0) continue;
 
-            // Check conflicts
+            // Check conflicts (slot is now [teacher, subject][] array)
             let hasConflict = false;
             for (const g of grades) {
-              const slot = gradeSchedules[g]?.[issueDay]?.[issueBlock];
-              if (slot && slot[1] !== 'OPEN' && slot[1] !== null) {
+              const slotArr = gradeSchedules[g]?.[issueDay]?.[issueBlock];
+              const firstEntry = slotArr && slotArr.length > 0 ? slotArr[0] : null;
+              if (firstEntry && firstEntry[1] !== 'OPEN' && firstEntry[1] !== null) {
                 hasConflict = true;
                 break;
               }
@@ -982,8 +991,9 @@ function redistributeOpenBlocks(
             for (const g of grades) {
               for (const b of BLOCKS) {
                 if (b === issueBlock) continue;
-                const slot = gradeSchedules[g]?.[issueDay]?.[b];
-                if (slot && slot[1] === subject) {
+                const slotArr = gradeSchedules[g]?.[issueDay]?.[b];
+                const firstEntry = slotArr && slotArr.length > 0 ? slotArr[0] : null;
+                if (firstEntry && firstEntry[1] === subject) {
                   hasConflict = true;
                   break;
                 }
@@ -998,7 +1008,7 @@ function redistributeOpenBlocks(
 
             grades.forEach(g => {
               gradeSchedules[g][targetDay][targetBlock] = null;
-              gradeSchedules[g][issueDay][issueBlock] = [teacher, subject];
+              gradeSchedules[g][issueDay][issueBlock] = [[teacher, subject]];
             });
 
             madeSwap = true;
@@ -1591,12 +1601,13 @@ export function reassignStudyHalls(
       }
     }
 
-    // Clear study halls from grade schedules
+    // Clear study halls from grade schedules (entry is now [teacher, subject][] array)
     for (const grade of Object.keys(gradeSchedules)) {
       for (const day of DAYS) {
         for (const block of BLOCKS) {
-          const entry = gradeSchedules[grade]?.[day]?.[block];
-          if (entry && entry[1] === 'Study Hall') {
+          const entryArr = gradeSchedules[grade]?.[day]?.[block];
+          const firstEntry = entryArr && entryArr.length > 0 ? entryArr[0] : null;
+          if (firstEntry && firstEntry[1] === 'Study Hall') {
             gradeSchedules[grade][day][block] = null;
           }
         }

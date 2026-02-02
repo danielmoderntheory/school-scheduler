@@ -57,6 +57,129 @@ function gradeToNum(grade: string): number {
   return match ? parseInt(match[1]) : 99
 }
 
+// Normalize grade schedule entry to array format
+// Handles both old format [teacher, subject] and new format [[teacher, subject], ...]
+function normalizeGradeEntry(entry: unknown): [string, string][] | null {
+  if (!entry) return null
+  // Already an array of arrays
+  if (Array.isArray(entry) && entry.length > 0 && Array.isArray(entry[0])) {
+    return entry as [string, string][]
+  }
+  // Old format: single [teacher, subject] tuple
+  if (Array.isArray(entry) && entry.length === 2 && typeof entry[0] === 'string') {
+    return [entry as [string, string]]
+  }
+  return null
+}
+
+// Get first entry from a grade schedule slot (for swap mode compatibility)
+// Returns [teacher, subject] or null
+function getFirstGradeEntry(entry: unknown): [string, string] | null {
+  const normalized = normalizeGradeEntry(entry)
+  return normalized && normalized.length > 0 ? normalized[0] : null
+}
+
+// Normalize entire grade schedules object (handles old and new formats)
+function normalizeGradeSchedules(
+  gradeSchedules: Record<string, GradeSchedule>
+): Record<string, GradeSchedule> {
+  const DAYS = ["Mon", "Tues", "Wed", "Thurs", "Fri"]
+  const normalized: Record<string, GradeSchedule> = {}
+
+  for (const [grade, schedule] of Object.entries(gradeSchedules)) {
+    normalized[grade] = {}
+    for (const day of DAYS) {
+      normalized[grade][day] = {}
+      for (let block = 1; block <= 5; block++) {
+        const entry = schedule?.[day]?.[block]
+        normalized[grade][day][block] = normalizeGradeEntry(entry)
+      }
+    }
+  }
+
+  return normalized
+}
+
+// Rebuild grade schedules from teacher schedules
+// Stores arrays of [teacher, subject] to support multiple electives at same slot
+function rebuildGradeSchedules(
+  teacherSchedules: Record<string, TeacherSchedule>,
+  gradeNames: string[]
+): Record<string, GradeSchedule> {
+  const DAYS = ["Mon", "Tues", "Wed", "Thurs", "Fri"]
+  const gradeSchedules: Record<string, GradeSchedule> = {}
+  const gradeSet = new Set(gradeNames)
+
+  // Initialize empty schedules for all grades
+  for (const grade of gradeNames) {
+    gradeSchedules[grade] = {}
+    for (const day of DAYS) {
+      gradeSchedules[grade][day] = {}
+      for (let block = 1; block <= 5; block++) {
+        gradeSchedules[grade][day][block] = null
+      }
+    }
+  }
+
+  // Helper to parse grades from grade_display
+  const parseGrades = (display: string): string[] => {
+    const grades: string[] = []
+    const rangeMatch = display.match(/(\d+)(?:st|nd|rd|th)?[-–](\d+)(?:st|nd|rd|th)?/i)
+    if (rangeMatch) {
+      const start = parseInt(rangeMatch[1])
+      const end = parseInt(rangeMatch[2])
+      for (const g of gradeNames) {
+        const num = parseInt(g.match(/(\d+)/)?.[1] || "0")
+        if (num >= start && num <= end) grades.push(g)
+      }
+    } else {
+      // Check for direct match first
+      if (gradeSet.has(display)) return [display]
+      // Single grade pattern
+      const singleMatch = display.match(/(\d+)(?:st|nd|rd|th)/i)
+      if (singleMatch) {
+        const num = parseInt(singleMatch[1])
+        for (const g of gradeNames) {
+          if (parseInt(g.match(/(\d+)/)?.[1] || "0") === num) grades.push(g)
+        }
+      }
+      // Kindergarten
+      if (display.toLowerCase().includes("kindergarten") || display === "K") {
+        for (const g of gradeNames) {
+          if (g.toLowerCase().includes("kindergarten") || g === "K") grades.push(g)
+        }
+      }
+    }
+    return grades
+  }
+
+  // Populate from teacher schedules - append to arrays for multiple entries
+  for (const [teacher, schedule] of Object.entries(teacherSchedules)) {
+    for (const day of DAYS) {
+      for (let block = 1; block <= 5; block++) {
+        const entry = schedule[day]?.[block]
+        if (!entry || entry[1] === "OPEN") continue
+
+        const gradeDisplay = entry[0]
+        const subject = entry[1]
+        const targetGrades = parseGrades(gradeDisplay)
+
+        for (const grade of targetGrades) {
+          if (gradeSchedules[grade]) {
+            // Initialize array if null, then push entry
+            if (!gradeSchedules[grade][day][block]) {
+              gradeSchedules[grade][day][block] = []
+            }
+            gradeSchedules[grade][day][block]!.push([teacher, subject])
+          }
+        }
+      }
+    }
+  }
+
+  return gradeSchedules
+}
+
 // Analyze a teacher's schedule to find their primary teaching grade(s)
 // Primary = grades they teach more than 30% of the time
 function analyzeTeacherGrades(schedule: TeacherSchedule): { primaryGrade: number; hasPrimary: boolean; gradeSpread: number } {
@@ -957,39 +1080,12 @@ export default function HistoryDetailPage() {
         ...selectedTeacherSchedules,  // Overwrite only selected teachers
       }
 
-      // DON'T rebuild grade schedules from scratch - that loses multi-grade elective mappings
-      // Instead: start with ORIGINAL grade schedules, then surgically update only selected teachers' slots
+      // Rebuild grade schedules from merged teacher schedules
+      // This is simpler and more reliable than surgical merging.
+      // When multiple teachers share a slot (electives), only one gets stored,
+      // but that's OK because we display "Elective" for such slots in grade view.
       const allGrades = Object.keys(originalOption.gradeSchedules)
-      const mergedGradeSchedules: Record<string, GradeSchedule> = JSON.parse(
-        JSON.stringify(originalOption.gradeSchedules)
-      )
-
-      // Step 1: Remove selected teachers from grade schedules (clear their old slots)
-      for (const grade of allGrades) {
-        for (const day of DAYS) {
-          for (let block = 1; block <= 5; block++) {
-            const entry = mergedGradeSchedules[grade]?.[day]?.[block]
-            if (entry && previewTeachers.has(entry[0])) {
-              // This slot was taught by a selected teacher - clear it
-              mergedGradeSchedules[grade][day][block] = null
-            }
-          }
-        }
-      }
-
-      // Step 2: Add selected teachers' NEW slots from preview grade schedules
-      const previewGradeSchedules = previewOption.gradeSchedules
-      for (const grade of allGrades) {
-        for (const day of DAYS) {
-          for (let block = 1; block <= 5; block++) {
-            const previewEntry = previewGradeSchedules[grade]?.[day]?.[block]
-            if (previewEntry && previewTeachers.has(previewEntry[0])) {
-              // This slot is taught by a selected teacher in preview - add it
-              mergedGradeSchedules[grade][day][block] = previewEntry
-            }
-          }
-        }
-      }
+      const mergedGradeSchedules = rebuildGradeSchedules(mergedTeacherSchedules, allGrades)
 
       // Merge study hall assignments: keep original, update only if teacher was selected
       const mergedStudyHalls = originalOption.studyHallAssignments.map(sh => {
@@ -1051,26 +1147,8 @@ export default function HistoryDetailPage() {
         console.log('[Save] ✗ PROBLEM:', changedTeachers.length, 'locked teachers have DIFFERENT schedules:', changedTeachers)
       }
 
-      // Also check grade schedules
-      console.log('[Save] Checking grade schedules:')
-      const allGradeNames = Object.keys(originalOption.gradeSchedules)
-      let gradesIdentical = true
-      const changedGrades: string[] = []
-
-      for (const grade of allGradeNames) {
-        const originalGS = JSON.stringify(originalOption.gradeSchedules[grade])
-        const mergedGS = JSON.stringify(mergedGradeSchedules[grade])
-        if (originalGS !== mergedGS) {
-          gradesIdentical = false
-          changedGrades.push(grade)
-        }
-      }
-
-      if (gradesIdentical) {
-        console.log('[Save] ✓ All grade schedules identical')
-      } else {
-        console.log('[Save] ✗ Grade schedules changed for:', changedGrades)
-      }
+      // Grade schedules are rebuilt from teacher schedules, so differences are expected
+      console.log('[Save] Grade schedules rebuilt from merged teacher schedules (differences expected)')
     }
 
     // If using current classes for regen, build updated stats BEFORE validation
@@ -1616,7 +1694,7 @@ export default function HistoryDetailPage() {
     for (const day of DAYS) {
       subjectsByDay[day] = new Set()
       for (const block of BLOCKS) {
-        const entry = gradeSchedule[day]?.[block]
+        const entry = getFirstGradeEntry(gradeSchedule[day]?.[block])
         if (entry && entry[1] !== "OPEN" && entry[1] !== "Study Hall") {
           if (!(day === source.day && block === source.block)) {
             subjectsByDay[day].add(entry[1])
@@ -1632,7 +1710,7 @@ export default function HistoryDetailPage() {
         if (day === source.day && block === source.block) continue
 
         const teacherEntry = teacherSchedule[day]?.[block]
-        const gradeEntry = gradeSchedule[day]?.[block]
+        const gradeEntry = getFirstGradeEntry(gradeSchedule[day]?.[block])
 
         // Teacher must have OPEN at this slot
         if (!teacherEntry || teacherEntry[1] !== "OPEN") continue
@@ -1654,7 +1732,7 @@ export default function HistoryDetailPage() {
         // Skip source cell
         if (day === source.day && block === source.block) continue
 
-        const gradeEntry = gradeSchedule[day]?.[block]
+        const gradeEntry = getFirstGradeEntry(gradeSchedule[day]?.[block])
 
         // Must be a class (not OPEN, Study Hall, or empty)
         if (!gradeEntry || gradeEntry[1] === "OPEN" || gradeEntry[1] === "Study Hall") continue
@@ -1711,7 +1789,7 @@ export default function HistoryDetailPage() {
     for (const day of DAYS) {
       subjectsByDay[day] = new Set()
       for (const block of BLOCKS) {
-        const entry = gradeSchedule[day]?.[block]
+        const entry = getFirstGradeEntry(gradeSchedule[day]?.[block])
         if (entry && entry[1] !== "OPEN" && entry[1] !== "Study Hall") {
           // Don't count the source cell's subject
           if (!(day === source.day && block === source.block)) {
@@ -1729,7 +1807,7 @@ export default function HistoryDetailPage() {
         if (day === source.day && block === source.block) continue
 
         const teacherEntry = teacherSchedule[day]?.[block]
-        const gradeEntry = gradeSchedule[day]?.[block]
+        const gradeEntry = getFirstGradeEntry(gradeSchedule[day]?.[block])
 
         // Teacher must have OPEN at this slot
         if (!teacherEntry || teacherEntry[1] !== "OPEN") continue
@@ -1751,7 +1829,7 @@ export default function HistoryDetailPage() {
         // Skip source cell
         if (day === source.day && block === source.block) continue
 
-        const gradeEntry = gradeSchedule[day]?.[block]
+        const gradeEntry = getFirstGradeEntry(gradeSchedule[day]?.[block])
 
         // Must be a class (not OPEN, Study Hall, or empty)
         if (!gradeEntry || gradeEntry[1] === "OPEN" || gradeEntry[1] === "Study Hall") continue
@@ -1957,10 +2035,11 @@ export default function HistoryDetailPage() {
       toast(`Study Hall reassigned: ${source.teacher} → ${target.teacher} (${target.day} B${target.block})`, { icon: "✓" })
     }
 
-    // Update working schedules
+    // Update working schedules (rebuild grade schedules from teacher schedules for array format)
+    const gradeNames = Object.keys(swapWorkingSchedules.gradeSchedules)
     setSwapWorkingSchedules({
       teacherSchedules: newTeacherSchedules,
-      gradeSchedules: newGradeSchedules,
+      gradeSchedules: rebuildGradeSchedules(newTeacherSchedules, gradeNames),
       studyHallAssignments: newStudyHallAssignments
     })
     setSwapCount(prev => prev + 1)
@@ -2009,11 +2088,12 @@ export default function HistoryDetailPage() {
     }
     newGradeSchedules[grade][target.day][target.block] = sourceGradeEntry
 
-    // Update working schedules
+    // Update working schedules (rebuild grade schedules from teacher schedules for array format)
+    const gradeNames = Object.keys(swapWorkingSchedules.gradeSchedules)
     setSwapWorkingSchedules({
       ...swapWorkingSchedules,
       teacherSchedules: newTeacherSchedules,
-      gradeSchedules: newGradeSchedules,
+      gradeSchedules: rebuildGradeSchedules(newTeacherSchedules, gradeNames),
     })
     setSwapCount(prev => prev + 1)
 
@@ -2052,7 +2132,7 @@ export default function HistoryDetailPage() {
     }
 
     // Check if this is Option 1 (move to OPEN) or Option 2 (swap with another class)
-    const targetGradeEntry = swapWorkingSchedules.gradeSchedules[grade]?.[target.day]?.[target.block]
+    const targetGradeEntry = getFirstGradeEntry(swapWorkingSchedules.gradeSchedules[grade]?.[target.day]?.[target.block])
     const isOption1 = !targetGradeEntry || targetGradeEntry[1] === "OPEN" || targetGradeEntry[1] === "Study Hall"
 
     let successMessage = ""
@@ -2115,11 +2195,12 @@ export default function HistoryDetailPage() {
       ]
     }
 
-    // Update working schedules
+    // Update working schedules (rebuild grade schedules from teacher schedules for array format)
+    const gradeNames = Object.keys(swapWorkingSchedules.gradeSchedules)
     setSwapWorkingSchedules({
       ...swapWorkingSchedules,
       teacherSchedules: newTeacherSchedules,
-      gradeSchedules: newGradeSchedules,
+      gradeSchedules: rebuildGradeSchedules(newTeacherSchedules, gradeNames),
     })
     setSwapCount(prev => prev + 1)
 
@@ -2150,6 +2231,7 @@ export default function HistoryDetailPage() {
     setSwapCount(0)
     setSelectedCell(null)
     setValidTargets([])
+    setValidationErrors([])
   }
 
   function exitSwapMode() {
@@ -2447,7 +2529,10 @@ export default function HistoryDetailPage() {
       newGradeSchedules[entry[0]][location.day][location.block] = null
     }
 
-    setWorkingSchedules({ teacherSchedules: newTeacherSchedules, gradeSchedules: newGradeSchedules })
+    setWorkingSchedules({
+      teacherSchedules: newTeacherSchedules,
+      gradeSchedules: rebuildGradeSchedules(newTeacherSchedules, Object.keys(workingSchedules.gradeSchedules))
+    })
     setSelectedFloatingBlock(blockId)
 
     // Clear any previous validation errors
@@ -2523,7 +2608,10 @@ export default function HistoryDetailPage() {
     newGradeSchedules[block.grade][location.day][location.block] = [location.teacher, block.subject]
 
     // Update state
-    setWorkingSchedules({ teacherSchedules: newTeacherSchedules, gradeSchedules: newGradeSchedules })
+    setWorkingSchedules({
+      teacherSchedules: newTeacherSchedules,
+      gradeSchedules: rebuildGradeSchedules(newTeacherSchedules, Object.keys(workingSchedules.gradeSchedules))
+    })
 
     // Update placements
     if (existingPlacement) {
@@ -2599,7 +2687,10 @@ export default function HistoryDetailPage() {
     }
     newGradeSchedules[block.grade][block.sourceDay][block.sourceBlock] = [block.sourceTeacher, block.subject]
 
-    setWorkingSchedules({ teacherSchedules: newTeacherSchedules, gradeSchedules: newGradeSchedules })
+    setWorkingSchedules({
+      teacherSchedules: newTeacherSchedules,
+      gradeSchedules: rebuildGradeSchedules(newTeacherSchedules, Object.keys(workingSchedules.gradeSchedules))
+    })
 
     // Remove the returned block from floating blocks (displaced block stays with its original source info)
     setFloatingBlocks(prev => prev.filter(b => b.id !== blockId))
@@ -2627,7 +2718,10 @@ export default function HistoryDetailPage() {
       newGradeSchedules[block.grade][placement.day][placement.block] = null
     }
 
-    setWorkingSchedules({ teacherSchedules: newTeacherSchedules, gradeSchedules: newGradeSchedules })
+    setWorkingSchedules({
+      teacherSchedules: newTeacherSchedules,
+      gradeSchedules: rebuildGradeSchedules(newTeacherSchedules, Object.keys(workingSchedules.gradeSchedules))
+    })
     setPendingPlacements(prev => prev.filter(p => p.blockId !== blockId))
     setSelectedFloatingBlock(blockId)
 
@@ -2720,27 +2814,11 @@ export default function HistoryDetailPage() {
               missingGrades.add(gradeDisplay)
               missingEntries.push({ teacher, day, block, grade: gradeDisplay, subject })
             }
-            continue
           }
-
-          // Check if at least one individual grade has a matching entry
-          let foundMatch = false
-          for (const g of individualGrades) {
-            const gradeSchedule = gradeSchedules[g]
-            if (!gradeSchedule) continue
-
-            const gradeEntry = gradeSchedule[day]?.[block]
-            if (gradeEntry && gradeEntry[0] === teacher && gradeEntry[1] === subject) {
-              foundMatch = true
-              break
-            }
-          }
-
-          // NOTE: We no longer validate teacher vs grade schedule consistency here.
+          // NOTE: We no longer validate teacher vs grade schedule consistency.
           // The grade schedule data model can only store ONE entry per [grade][day][block],
           // so when multiple classes share a slot (electives, study halls, split classes),
           // only one gets recorded. Teacher schedules are the source of truth.
-          // Mismatches are expected and not actual errors.
         }
       }
     }
@@ -2861,26 +2939,75 @@ export default function HistoryDetailPage() {
     }
 
     // 5. Check subject conflicts (same subject twice on same day for a grade)
-    for (const [grade, schedule] of Object.entries(workingSchedules.gradeSchedules)) {
-      for (const day of DAYS) {
-        const subjectsOnDay = new Map<string, CellLocation[]>()
+    // NOTE: Use teacherSchedules as source of truth (gradeSchedules can be incomplete)
+    const freeformGradeNames = Object.keys(workingSchedules.gradeSchedules)
 
+    // Helper to parse grades from grade_display for freeform validation
+    const parseFreeformGrades = (display: string): string[] => {
+      const grades: string[] = []
+      const rangeMatch = display.match(/(\d+)(?:st|nd|rd|th)?[-–](\d+)(?:st|nd|rd|th)?/i)
+      if (rangeMatch) {
+        const start = parseInt(rangeMatch[1])
+        const end = parseInt(rangeMatch[2])
+        for (const g of freeformGradeNames) {
+          const num = parseInt(g.match(/(\d+)/)?.[1] || "0")
+          if (num >= start && num <= end) grades.push(g)
+        }
+      } else {
+        const singleMatch = display.match(/(\d+)(?:st|nd|rd|th)/i)
+        if (singleMatch) {
+          const num = parseInt(singleMatch[1])
+          for (const g of freeformGradeNames) {
+            if (parseInt(g.match(/(\d+)/)?.[1] || "0") === num) grades.push(g)
+          }
+        }
+      }
+      return grades
+    }
+
+    // Build subject occurrences per grade per day from teacher schedules
+    const freeformSubjectMap = new Map<string, Map<string, Map<string, CellLocation[]>>>()
+    for (const grade of freeformGradeNames) {
+      freeformSubjectMap.set(grade, new Map())
+      for (const day of DAYS) {
+        freeformSubjectMap.get(grade)!.set(day, new Map())
+      }
+    }
+
+    for (const [teacher, schedule] of Object.entries(workingSchedules.teacherSchedules)) {
+      for (const day of DAYS) {
         for (let block = 1; block <= 5; block++) {
           const entry = schedule[day]?.[block]
           if (!entry || entry[1] === "OPEN" || entry[1] === "Study Hall") continue
 
+          const gradeDisplay = entry[0]
           const subject = entry[1]
-          if (!subjectsOnDay.has(subject)) {
-            subjectsOnDay.set(subject, [])
-          }
-          subjectsOnDay.get(subject)!.push({ teacher: entry[0], day, block, grade, subject })
-        }
+          const targetGrades = parseFreeformGrades(gradeDisplay)
 
-        for (const [subject, locations] of subjectsOnDay) {
-          if (locations.length > 1) {
+          for (const grade of targetGrades) {
+            const dayMap = freeformSubjectMap.get(grade)?.get(day)
+            if (dayMap) {
+              if (!dayMap.has(subject)) {
+                dayMap.set(subject, [])
+              }
+              dayMap.get(subject)!.push({ teacher, day, block, grade, subject })
+            }
+          }
+        }
+      }
+    }
+
+    // Check for duplicates - only flag if same subject at DIFFERENT blocks
+    // (Multiple teachers at same block = electives/co-teaching, which is valid)
+    for (const [grade, dayMap] of freeformSubjectMap) {
+      for (const [day, subjectMap] of dayMap) {
+        for (const [subject, locations] of subjectMap) {
+          // Get unique blocks where this subject occurs
+          const uniqueBlocks = new Set(locations.map((loc: CellLocation) => loc.block))
+          if (uniqueBlocks.size > 1) {
             errors.push({
               type: 'subject_conflict',
-              message: `[No Duplicate Subjects] ${grade} has ${subject} twice on ${day}`,
+              message: `[No Duplicate Subjects] ${grade} has ${subject} at ${uniqueBlocks.size} different times on ${day}`,
               cells: locations
             })
           }
@@ -3041,61 +3168,155 @@ export default function HistoryDetailPage() {
       }
     }
 
-    // 2. Check grade conflicts - no grade has two different classes at the same time
-    // (Study halls don't conflict with each other but do with regular classes)
-    for (const [grade, schedule] of Object.entries(option.gradeSchedules)) {
+    // 2. Check grade conflicts - no grade has two different non-elective classes at the same time
+    // NOTE: Use teacherSchedules as source of truth (gradeSchedules can be incomplete)
+    // Electives (multi-grade ranges like "6th-11th") sharing a slot is intentional - students choose
+    const gradeNames = Object.keys(option.gradeSchedules)
+
+    // Helper to check if a grade_display is a multi-grade elective range
+    const isElectiveRange = (display: string): boolean => {
+      return /\d+(?:st|nd|rd|th)?[-–]\d+(?:st|nd|rd|th)?/i.test(display)
+    }
+
+    // Helper to get grades from grade_display
+    const getGradesFromDisplay = (display: string): string[] => {
+      const grades: string[] = []
+      const rangeMatch = display.match(/(\d+)(?:st|nd|rd|th)?[-–](\d+)(?:st|nd|rd|th)?/i)
+      if (rangeMatch) {
+        const start = parseInt(rangeMatch[1])
+        const end = parseInt(rangeMatch[2])
+        for (const g of gradeNames) {
+          const num = parseInt(g.match(/(\d+)/)?.[1] || "0")
+          if (num >= start && num <= end) grades.push(g)
+        }
+      } else {
+        const singleMatch = display.match(/(\d+)(?:st|nd|rd|th)/i)
+        if (singleMatch) {
+          const num = parseInt(singleMatch[1])
+          for (const g of gradeNames) {
+            if (parseInt(g.match(/(\d+)/)?.[1] || "0") === num) grades.push(g)
+          }
+        }
+      }
+      return grades
+    }
+
+    // Build map of (grade, day, block) -> list of {teacher, subject, isElective}
+    const gradeSlotMap = new Map<string, Array<{ teacher: string; subject: string; isElective: boolean }>>()
+
+    for (const [teacher, schedule] of Object.entries(option.teacherSchedules)) {
       for (const day of DAYS) {
         for (let block = 1; block <= 5; block++) {
           const entry = schedule[day]?.[block]
-          if (!entry) continue
+          if (!entry || entry[1] === "OPEN" || entry[1] === "Study Hall") continue
 
-          // Also check if any other grade entry at this slot has the same grade
-          // (This shouldn't happen but catches merging bugs)
-          const teacher = entry[0]
+          const gradeDisplay = entry[0]
           const subject = entry[1]
+          const isElective = isElectiveRange(gradeDisplay)
+          const targetGrades = getGradesFromDisplay(gradeDisplay)
 
-          // Cross-check: find all teachers teaching this grade at this slot
-          const teachersAtSlot: string[] = []
-          for (const [t, tSchedule] of Object.entries(option.teacherSchedules)) {
-            const tEntry = tSchedule[day]?.[block]
-            if (tEntry && tEntry[0] === grade && tEntry[1] !== "OPEN" && tEntry[1] !== "Study Hall") {
-              teachersAtSlot.push(t)
+          for (const grade of targetGrades) {
+            const key = `${grade}|${day}|${block}`
+            if (!gradeSlotMap.has(key)) {
+              gradeSlotMap.set(key, [])
             }
-          }
-
-          // Skip study halls for conflict detection (multiple study halls at same slot is OK)
-          if (subject !== "Study Hall" && teachersAtSlot.length > 1) {
-            errors.push({
-              type: 'grade_conflict',
-              message: `[Grade Conflict] ${grade} has ${teachersAtSlot.length} classes at ${day} B${block}: ${teachersAtSlot.join(', ')}`,
-              cells: teachersAtSlot.map(t => ({ teacher: t, day, block, grade }))
-            })
+            gradeSlotMap.get(key)!.push({ teacher, subject, isElective })
           }
         }
       }
     }
 
-    // 3. Check subject conflicts - same subject twice on same day for a grade
-    for (const [grade, schedule] of Object.entries(option.gradeSchedules)) {
-      for (const day of DAYS) {
-        const subjectsOnDay = new Map<string, Array<{ teacher: string; block: number }>>()
+    // Check for conflicts: multiple non-elective classes at same slot
+    for (const [key, entries] of gradeSlotMap) {
+      const nonElectiveEntries = entries.filter(e => !e.isElective)
+      // If there are 2+ non-elective classes at same slot, that's a conflict
+      if (nonElectiveEntries.length > 1) {
+        const [grade, day, blockStr] = key.split('|')
+        const block = parseInt(blockStr)
+        errors.push({
+          type: 'grade_conflict',
+          message: `[Grade Conflict] ${grade} has ${nonElectiveEntries.length} non-elective classes at ${day} B${block}: ${nonElectiveEntries.map(e => e.subject).join(', ')}`,
+          cells: nonElectiveEntries.map(e => ({ teacher: e.teacher, day, block, grade }))
+        })
+      }
+      // If there's 1 non-elective and 1+ elective, that could also be a conflict
+      // (non-elective students have no choice), but this depends on school policy
+      // For now, only flag multiple non-electives
+    }
 
+    // 3. Check subject conflicts - same subject twice on same day for a grade
+    // NOTE: Use teacherSchedules as source of truth (gradeSchedules can be incomplete)
+    const availableGradeNames = Object.keys(option.gradeSchedules)
+
+    // Helper to parse grades from grade_display
+    const parseGradesFromDisplay = (display: string): string[] => {
+      const grades: string[] = []
+      const rangeMatch = display.match(/(\d+)(?:st|nd|rd|th)?[-–](\d+)(?:st|nd|rd|th)?/i)
+      if (rangeMatch) {
+        const start = parseInt(rangeMatch[1])
+        const end = parseInt(rangeMatch[2])
+        for (const g of availableGradeNames) {
+          const num = parseInt(g.match(/(\d+)/)?.[1] || "0")
+          if (num >= start && num <= end) grades.push(g)
+        }
+      } else {
+        const singleMatch = display.match(/(\d+)(?:st|nd|rd|th)/i)
+        if (singleMatch) {
+          const num = parseInt(singleMatch[1])
+          for (const g of availableGradeNames) {
+            if (parseInt(g.match(/(\d+)/)?.[1] || "0") === num) grades.push(g)
+          }
+        }
+      }
+      return grades
+    }
+
+    // Build subject occurrences per grade per day from teacher schedules
+    // Map: grade -> day -> subject -> [{teacher, block}]
+    const gradeSubjectMap = new Map<string, Map<string, Map<string, Array<{ teacher: string; block: number }>>>>()
+
+    for (const grade of availableGradeNames) {
+      gradeSubjectMap.set(grade, new Map())
+      for (const day of DAYS) {
+        gradeSubjectMap.get(grade)!.set(day, new Map())
+      }
+    }
+
+    for (const [teacher, schedule] of Object.entries(option.teacherSchedules)) {
+      for (const day of DAYS) {
         for (let block = 1; block <= 5; block++) {
           const entry = schedule[day]?.[block]
           if (!entry || entry[1] === "OPEN" || entry[1] === "Study Hall") continue
 
+          const gradeDisplay = entry[0]
           const subject = entry[1]
-          if (!subjectsOnDay.has(subject)) {
-            subjectsOnDay.set(subject, [])
-          }
-          subjectsOnDay.get(subject)!.push({ teacher: entry[0], block })
-        }
+          const targetGrades = parseGradesFromDisplay(gradeDisplay)
 
-        for (const [subject, occurrences] of subjectsOnDay) {
-          if (occurrences.length > 1) {
+          for (const grade of targetGrades) {
+            const dayMap = gradeSubjectMap.get(grade)?.get(day)
+            if (dayMap) {
+              if (!dayMap.has(subject)) {
+                dayMap.set(subject, [])
+              }
+              dayMap.get(subject)!.push({ teacher, block })
+            }
+          }
+        }
+      }
+    }
+
+    // Now check for duplicates - only flag if same subject at DIFFERENT blocks
+    // (Multiple teachers at same block = electives/co-teaching, which is valid)
+    for (const [grade, dayMap] of gradeSubjectMap) {
+      for (const [day, subjectMap] of dayMap) {
+        for (const [subject, occurrences] of subjectMap) {
+          // Get unique blocks where this subject occurs
+          const uniqueBlocks = new Set(occurrences.map(o => o.block))
+          if (uniqueBlocks.size > 1) {
+            // Subject appears at different blocks on same day - that's a conflict
             errors.push({
               type: 'subject_conflict',
-              message: `[Subject Conflict] ${grade} has ${subject} ${occurrences.length}x on ${day}`,
+              message: `[Subject Conflict] ${grade} has ${subject} at ${uniqueBlocks.size} different times on ${day}`,
               cells: occurrences.map(o => ({ teacher: o.teacher, day, block: o.block, grade, subject }))
             })
           }
@@ -3836,11 +4057,33 @@ export default function HistoryDetailPage() {
                           {validTargets.length} valid target{validTargets.length !== 1 ? 's' : ''} available
                         </span>
                       )}
+                      {validationErrors.length > 0 && (
+                        <span className="text-red-600 font-medium">
+                          {validationErrors.length} validation issue{validationErrors.length !== 1 ? 's' : ''}
+                        </span>
+                      )}
                     </div>
                     <span className="text-amber-600/70">
                       {generation.options.length === 1 ? "Will create Revision 2" : `Will update Revision ${viewingOption}`}
                     </span>
                   </div>
+                  {/* Validation errors warning */}
+                  {validationErrors.length > 0 && (
+                    <div className="mt-2 text-red-600 text-sm bg-red-50 border border-red-200 rounded px-3 py-2">
+                      <div className="flex items-center gap-2 font-medium mb-1">
+                        <AlertTriangle className="h-4 w-4 flex-shrink-0" />
+                        <span>Schedule conflicts detected:</span>
+                      </div>
+                      <ul className="text-xs space-y-0.5 ml-6">
+                        {validationErrors.slice(0, 5).map((error, idx) => (
+                          <li key={idx}>• {error.message}</li>
+                        ))}
+                        {validationErrors.length > 5 && (
+                          <li className="text-red-500">...and {validationErrors.length - 5} more</li>
+                        )}
+                      </ul>
+                    </div>
+                  )}
                 </div>
               )}
 
@@ -4492,6 +4735,7 @@ export default function HistoryDetailPage() {
                             validTargets={validTargets}
                             highlightedCells={highlightedCells}
                             onCellClick={handleCellClick}
+                            allTeacherSchedules={selectedResult?.teacherSchedules}
                           />
                         ))}
                 </div>
@@ -4712,7 +4956,20 @@ export default function HistoryDetailPage() {
               })()}
               <Button
                 variant={validationModal?.mode === 'review' ? 'default' : 'outline'}
-                onClick={() => setValidationModal(null)}
+                onClick={() => {
+                  if (validationModal?.mode === 'review') {
+                    setValidationModal(null)
+                  } else {
+                    // Switch to review mode and expand all failed checks
+                    const failedIndices = new Set<number>()
+                    validationModal?.checks.forEach((check, idx) => {
+                      if (check.status === 'failed' && check.errors && check.errors.length > 0) {
+                        failedIndices.add(idx)
+                      }
+                    })
+                    setValidationModal(prev => prev ? { ...prev, mode: 'review', expandedChecks: failedIndices } : null)
+                  }
+                }}
                 className="w-full sm:w-auto"
               >
                 {validationModal?.mode === 'review' ? 'Close' : 'Review Errors'}
