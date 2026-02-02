@@ -17,12 +17,13 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip"
 import { Info, AlertTriangle, ChevronDown, ChevronRight } from "lucide-react"
-import type { TeacherStat, StudyHallAssignment, GradeSchedule } from "@/lib/types"
+import type { TeacherStat, StudyHallAssignment, GradeSchedule, TeacherSchedule } from "@/lib/types"
 
 interface ScheduleStatsProps {
   stats: TeacherStat[]
   studyHallAssignments: StudyHallAssignment[]
   gradeSchedules?: Record<string, GradeSchedule>
+  teacherSchedules?: Record<string, TeacherSchedule>
   backToBackIssues: number
   studyHallsPlaced: number
   unscheduledClasses?: number
@@ -47,6 +48,7 @@ export function ScheduleStats({
   stats,
   studyHallAssignments,
   gradeSchedules,
+  teacherSchedules,
   backToBackIssues,
   studyHallsPlaced,
   unscheduledClasses = 0,
@@ -55,7 +57,9 @@ export function ScheduleStats({
 }: ScheduleStatsProps) {
   const [expanded, setExpanded] = useState(defaultExpanded)
 
-  // Calculate grade coverage from gradeSchedules
+  // Calculate grade coverage from teacherSchedules (more accurate than gradeSchedules)
+  // Teacher schedules are the source of truth - gradeSchedules can miss entries when
+  // multiple classes share a slot (electives, study halls, etc.)
   const DAYS = ['Mon', 'Tues', 'Wed', 'Thurs', 'Fri']
   const BLOCKS = [1, 2, 3, 4, 5]
   const BLOCKS_PER_WEEK = 25
@@ -65,11 +69,82 @@ export function ScheduleStats({
   let totalBlocksScheduled = 0
   let totalBlocksAvailable = 0
 
-  if (gradeSchedules) {
-    const gradeNames = Object.keys(gradeSchedules)
-    totalGrades = gradeNames.length
-    totalBlocksAvailable = totalGrades * BLOCKS_PER_WEEK
+  // Get grade list from gradeSchedules (still needed to know which grades exist)
+  const gradeNames = gradeSchedules ? Object.keys(gradeSchedules) : []
+  totalGrades = gradeNames.length
+  totalBlocksAvailable = totalGrades * BLOCKS_PER_WEEK
 
+  if (teacherSchedules && gradeNames.length > 0) {
+    // Build a set of filled slots per grade from teacher schedules
+    // Key: "grade|day|block", Value: true if any class is scheduled
+    const filledSlots: Record<string, Set<string>> = {}
+    for (const grade of gradeNames) {
+      filledSlots[grade] = new Set()
+    }
+
+    // Helper to parse grade names from grade_display string (e.g., "6th-11th Grade" -> ["6th Grade", "7th Grade", ...])
+    const parseGradeDisplay = (gradeDisplay: string): string[] => {
+      const grades: string[] = []
+      // Check for range pattern like "6th-11th" or "6th-8th"
+      const rangeMatch = gradeDisplay.match(/(\d+)(?:st|nd|rd|th)-(\d+)(?:st|nd|rd|th)/)
+      if (rangeMatch) {
+        const start = parseInt(rangeMatch[1])
+        const end = parseInt(rangeMatch[2])
+        for (let i = start; i <= end; i++) {
+          const suffix = i === 1 ? 'st' : i === 2 ? 'nd' : i === 3 ? 'rd' : 'th'
+          const gradeName = `${i}${suffix} Grade`
+          if (gradeNames.includes(gradeName)) {
+            grades.push(gradeName)
+          }
+        }
+      } else {
+        // Single grade pattern like "8th Grade"
+        const singleMatch = gradeDisplay.match(/(\d+)(?:st|nd|rd|th)\s*Grade/i)
+        if (singleMatch) {
+          const num = parseInt(singleMatch[1])
+          const suffix = num === 1 ? 'st' : num === 2 ? 'nd' : num === 3 ? 'rd' : 'th'
+          const gradeName = `${num}${suffix} Grade`
+          if (gradeNames.includes(gradeName)) {
+            grades.push(gradeName)
+          }
+        }
+      }
+      return grades
+    }
+
+    // Iterate through all teacher schedules
+    for (const teacher of Object.keys(teacherSchedules)) {
+      const schedule = teacherSchedules[teacher]
+      for (const day of DAYS) {
+        for (const block of BLOCKS) {
+          const entry = schedule?.[day]?.[block]
+          if (entry && entry[1] && entry[1] !== 'OPEN') {
+            const gradeDisplay = entry[0]
+            const subject = entry[1]
+
+            // Parse which grades this entry applies to
+            const targetGrades = parseGradeDisplay(gradeDisplay)
+
+            // Mark slot as filled for each target grade
+            for (const grade of targetGrades) {
+              const slotKey = `${day}|${block}`
+              filledSlots[grade].add(slotKey)
+            }
+          }
+        }
+      }
+    }
+
+    // Count total filled slots and grades that are full
+    for (const grade of gradeNames) {
+      const filledCount = filledSlots[grade].size
+      totalBlocksScheduled += filledCount
+      if (filledCount >= BLOCKS_PER_WEEK) {
+        gradesFullCount++
+      }
+    }
+  } else if (gradeSchedules) {
+    // Fallback to gradeSchedules if teacherSchedules not provided
     for (const grade of gradeNames) {
       const schedule = gradeSchedules[grade]
       let filledBlocks = 0
@@ -80,7 +155,6 @@ export function ScheduleStats({
           // Count as filled if it's not empty and not OPEN
           if (entry && entry[1] && entry[1] !== 'OPEN') {
             filledBlocks++
-            // Count all filled blocks (including Study Hall)
             totalBlocksScheduled++
           }
         }

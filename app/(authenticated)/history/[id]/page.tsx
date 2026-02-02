@@ -2736,24 +2736,11 @@ export default function HistoryDetailPage() {
             }
           }
 
-          if (!foundMatch && individualGrades.length > 0) {
-            // Skip data mismatch check for multi-grade ranges (like "6th-11th Grade")
-            // These are typically electives where multiple teachers teach different subjects
-            // at the same time slot for the same grade range - that's expected behavior
-            if (individualGrades.length === 1) {
-              // Only check for data mismatch on single-grade entries
-              const firstGradeSchedule = gradeSchedules[individualGrades[0]]
-              const firstGradeEntry = firstGradeSchedule?.[day]?.[block]
-              if (firstGradeEntry && (firstGradeEntry[0] !== teacher || firstGradeEntry[1] !== subject)) {
-                errors.push({
-                  type: 'grade_conflict',
-                  message: `[Data Mismatch] ${teacher} shows ${gradeDisplay}/${subject} at ${day} B${block} but grade schedule shows ${firstGradeEntry[0]}/${firstGradeEntry[1]}`,
-                  cells: [{ teacher, day, block, grade: gradeDisplay, subject }]
-                })
-              }
-            }
-            // Multi-grade entries (electives) don't need mismatch validation
-          }
+          // NOTE: We no longer validate teacher vs grade schedule consistency here.
+          // The grade schedule data model can only store ONE entry per [grade][day][block],
+          // so when multiple classes share a slot (electives, study halls, split classes),
+          // only one gets recorded. Teacher schedules are the source of truth.
+          // Mismatches are expected and not actual errors.
         }
       }
     }
@@ -3758,6 +3745,7 @@ export default function HistoryDetailPage() {
                     stats={selectedResult.teacherStats}
                     studyHallAssignments={selectedResult.studyHallAssignments}
                     gradeSchedules={selectedResult.gradeSchedules}
+                    teacherSchedules={selectedResult.teacherSchedules}
                     backToBackIssues={selectedResult.backToBackIssues}
                     studyHallsPlaced={selectedResult.studyHallsPlaced}
                     defaultExpanded={isNewGeneration}
