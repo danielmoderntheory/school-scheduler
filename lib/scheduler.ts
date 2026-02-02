@@ -734,6 +734,43 @@ function addStudyHalls(
   const placedGrades = new Set<string>(); // Track which grades have study halls
   const failedGroups: { name: string; grades: string[] }[] = []; // Groups that couldn't be placed
 
+  // Helper to check if a grade display string includes a specific grade
+  function gradeDisplayIncludesGrade(gradeDisplay: string, targetGrade: string): boolean {
+    const targetNum = gradeToNumber(targetGrade);
+    if (targetNum < 0) return gradeDisplay === targetGrade; // Exact match fallback
+
+    // Check for comma-separated list like "6th Grade, 7th Grade"
+    if (gradeDisplay.includes(',')) {
+      const parts = gradeDisplay.split(',').map(p => p.trim());
+      return parts.some(part => gradeToNumber(part) === targetNum);
+    }
+
+    // Check for range pattern like "6th-11th" or "6th-11th Grade"
+    const rangeMatch = gradeDisplay.match(/(\d+)(?:st|nd|rd|th)?[-–](\d+)/);
+    if (rangeMatch) {
+      const start = parseInt(rangeMatch[1]);
+      const end = parseInt(rangeMatch[2]);
+      return targetNum >= start && targetNum <= end;
+    }
+
+    // Single grade
+    return gradeToNumber(gradeDisplay) === targetNum;
+  }
+
+  // Helper to check if a grade is free at a specific slot using teacherSchedules (source of truth)
+  function isGradeFreeAtSlot(grade: string, day: string, block: number): boolean {
+    for (const [, schedule] of Object.entries(teacherSchedules)) {
+      const entry = schedule?.[day]?.[block];
+      if (entry && entry[1] && entry[1] !== 'OPEN' && entry[1] !== 'Study Hall') {
+        // Check if this entry includes the target grade
+        if (gradeDisplayIncludesGrade(entry[0], grade)) {
+          return false; // Grade has a class at this slot
+        }
+      }
+    }
+    return true; // No teacher is teaching this grade at this slot
+  }
+
   // Helper to try placing a specific group with a specific teacher
   function tryPlaceGroup(
     group: { name: string; grades: string[] },
@@ -750,9 +787,8 @@ function addStudyHalls(
         for (const block of blocksToTry) {
           if (teacherSchedules[teacher]?.[day]?.[block] !== null) continue;
 
-          const allFree = group.grades.every(g =>
-            gradeSchedules[g]?.[day]?.[block] === null
-          );
+          // Check if all grades are free using teacherSchedules (source of truth)
+          const allFree = group.grades.every(g => isGradeFreeAtSlot(g, day, block));
 
           if (allFree) {
             teacherSchedules[teacher][day][block] = [group.name, 'Study Hall'];
@@ -1561,6 +1597,7 @@ export function reassignStudyHalls(
 
   // Check if study hall grades are configured
   const studyHallGrades = getStudyHallGrades(rules);
+  console.log(`[reassignStudyHalls] Configured study hall grades: ${studyHallGrades.join(', ')} (${studyHallGrades.length} total)`);
   if (studyHallGrades.length === 0) {
     return {
       success: false,
@@ -1611,6 +1648,51 @@ export function reassignStudyHalls(
     });
     const shPlaced = shAssignments.filter(sh => sh.teacher !== null).length;
     const shTotal = shAssignments.length;
+
+    // DEBUG: Log attempt details
+    console.log(`[reassignStudyHalls] Attempt ${attempt + 1}/${maxAttempts}: placed ${shPlaced}/${shTotal} study halls`);
+    if (shPlaced < shTotal) {
+      const unplaced = shAssignments.filter(sh => sh.teacher === null);
+      console.log(`  Unplaced groups: ${unplaced.map(sh => sh.group).join(', ')}`);
+
+      // Check why each grade couldn't be placed
+      for (const sh of unplaced) {
+        const grade = sh.group;
+        console.log(`  Checking why ${grade} couldn't be placed:`);
+
+        // Check grade's free slots in gradeSchedules
+        const gradeSchedule = gradeSchedules[grade];
+        const gradeFreeSlots: string[] = [];
+        for (const day of DAYS) {
+          for (const block of BLOCKS) {
+            if (gradeSchedule?.[day]?.[block] === null) {
+              gradeFreeSlots.push(`${day} B${block}`);
+            }
+          }
+        }
+        console.log(`    ${grade} free slots in gradeSchedules: ${gradeFreeSlots.length > 0 ? gradeFreeSlots.join(', ') : 'NONE!'}`);
+
+        // Check eligible teacher open slots
+        for (const teacherName of eligible) {
+          const teacherOpenSlots: string[] = [];
+          const schedule = teacherSchedules[teacherName];
+          if (schedule) {
+            for (const day of DAYS) {
+              for (const block of BLOCKS) {
+                if (schedule[day]?.[block] === null) {
+                  teacherOpenSlots.push(`${day} B${block}`);
+                }
+              }
+            }
+          }
+          if (teacherOpenSlots.length > 0) {
+            // Check overlap with grade free slots
+            const overlap = teacherOpenSlots.filter(s => gradeFreeSlots.includes(s));
+            console.log(`    ${teacherName}: ${teacherOpenSlots.length} open (overlap with grade: ${overlap.length > 0 ? overlap.join(', ') : 'NONE'})`);
+          }
+        }
+      }
+    }
 
     if (shPlaced === 0) {
       continue; // Try next seed

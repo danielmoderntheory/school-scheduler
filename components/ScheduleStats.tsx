@@ -18,6 +18,7 @@ import {
 } from "@/components/ui/tooltip"
 import { Info, AlertTriangle, ChevronDown, ChevronRight } from "lucide-react"
 import type { TeacherStat, StudyHallAssignment, GradeSchedule, TeacherSchedule } from "@/lib/types"
+import { parseGradeDisplayToNames } from "@/lib/grade-utils"
 
 interface ScheduleStatsProps {
   stats: TeacherStat[]
@@ -90,45 +91,8 @@ export function ScheduleStats({
       filledSlots[grade] = new Set()
     }
 
-    // Helper to parse grade names from grade_display string (e.g., "6th-11th Grade" -> ["6th Grade", "7th Grade", ...])
-    const parseGradeDisplay = (gradeDisplay: string): string[] => {
-      const grades: string[] = []
-
-      // Check for Kindergarten first
-      if (gradeDisplay.toLowerCase().includes('kindergarten') || gradeDisplay === 'K') {
-        const kGrade = gradeNames.find(g => g.toLowerCase().includes('kindergarten') || g === 'K')
-        if (kGrade) {
-          grades.push(kGrade)
-        }
-        return grades
-      }
-
-      // Check for range pattern like "6th-11th" or "6th-8th"
-      const rangeMatch = gradeDisplay.match(/(\d+)(?:st|nd|rd|th)-(\d+)(?:st|nd|rd|th)/)
-      if (rangeMatch) {
-        const start = parseInt(rangeMatch[1])
-        const end = parseInt(rangeMatch[2])
-        for (let i = start; i <= end; i++) {
-          const suffix = i === 1 ? 'st' : i === 2 ? 'nd' : i === 3 ? 'rd' : 'th'
-          const gradeName = `${i}${suffix} Grade`
-          if (gradeNames.includes(gradeName)) {
-            grades.push(gradeName)
-          }
-        }
-      } else {
-        // Single grade pattern like "8th Grade"
-        const singleMatch = gradeDisplay.match(/(\d+)(?:st|nd|rd|th)\s*Grade/i)
-        if (singleMatch) {
-          const num = parseInt(singleMatch[1])
-          const suffix = num === 1 ? 'st' : num === 2 ? 'nd' : num === 3 ? 'rd' : 'th'
-          const gradeName = `${num}${suffix} Grade`
-          if (gradeNames.includes(gradeName)) {
-            grades.push(gradeName)
-          }
-        }
-      }
-      return grades
-    }
+    // Use shared helper for grade parsing (imported from @/lib/grade-utils)
+    const parseGradeDisplay = (gradeDisplay: string) => parseGradeDisplayToNames(gradeDisplay, gradeNames)
 
     // Iterate through all teacher schedules
     for (const teacher of Object.keys(teacherSchedules)) {

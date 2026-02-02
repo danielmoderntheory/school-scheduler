@@ -36,10 +36,15 @@ import { Label } from "@/components/ui/label"
 import Link from "next/link"
 import type { ScheduleOption, TeacherSchedule, GradeSchedule, Teacher, FloatingBlock, PendingPlacement, ValidationError, CellLocation, ClassEntry } from "@/lib/types"
 import { parseClassesFromSnapshot, parseTeachersFromSnapshot, parseRulesFromSnapshot, hasValidSnapshots, detectClassChanges, type GenerationStats, type ChangeDetectionResult, type CurrentClass } from "@/lib/snapshot-utils"
+import { parseGradeDisplayToNumbers, gradesOverlap, gradeNumToDisplay, isClassElective, shouldIgnoreGradeConflict } from "@/lib/grade-utils"
 import toast from "react-hot-toast"
 import { generateSchedules, reassignStudyHalls } from "@/lib/scheduler"
 import { generateSchedulesRemote } from "@/lib/scheduler-remote"
 import { useGeneration } from "@/lib/generation-context"
+
+// Note: Grade and elective helper functions are imported from @/lib/grade-utils:
+// parseGradeDisplayToNumbers, gradesOverlap, gradeNumToDisplay,
+// isClassElective, shouldIgnoreGradeConflict
 
 // Sort grades: Kindergarten first, then by grade number
 function gradeSort(a: string, b: string): number {
@@ -78,15 +83,45 @@ function rebuildGradeSchedules(
   }
 
   // Helper to parse grade names from grade_display string (e.g., "6th-11th Grade" -> ["6th Grade", "7th Grade", ...])
-  // Same logic as ScheduleStats.tsx
+  // Same logic as ScheduleStats.tsx - handles: Kindergarten, comma-separated lists, range patterns, single grades
   const parseGradeDisplay = (gradeDisplay: string): string[] => {
     const grades: string[] = []
 
-    // Check for Kindergarten first
+    // Check for Kindergarten (can appear alone or in a comma-separated list)
     if (gradeDisplay.toLowerCase().includes('kindergarten') || gradeDisplay === 'K') {
       const kGrade = gradeNames.find(g => g.toLowerCase().includes('kindergarten') || g === 'K')
       if (kGrade) {
         grades.push(kGrade)
+      }
+      // If ONLY kindergarten, return early
+      if (!gradeDisplay.includes(',')) {
+        return grades
+      }
+    }
+
+    // Check for comma-separated list like "6th Grade, 7th Grade" or "K, 1st, 2nd"
+    if (gradeDisplay.includes(',')) {
+      const parts = gradeDisplay.split(',').map(p => p.trim())
+      for (const part of parts) {
+        // Skip if already handled kindergarten
+        if (part.toLowerCase().includes('kindergarten') || part === 'K') {
+          continue
+        }
+        // Try exact match first
+        if (gradeNames.includes(part)) {
+          grades.push(part)
+          continue
+        }
+        // Extract grade number and build standard format
+        const numMatch = part.match(/(\d+)/)
+        if (numMatch) {
+          const num = parseInt(numMatch[1])
+          const suffix = num === 1 ? 'st' : num === 2 ? 'nd' : num === 3 ? 'rd' : 'th'
+          const gradeName = `${num}${suffix} Grade`
+          if (gradeNames.includes(gradeName) && !grades.includes(gradeName)) {
+            grades.push(gradeName)
+          }
+        }
       }
       return grades
     }
@@ -136,6 +171,10 @@ function rebuildGradeSchedules(
   }
 
   // Scan all teacher schedules and populate grade schedules
+  // TWO PASSES: First multi-grade (electives), then single-grade (required classes)
+  // This ensures required single-grade classes take priority over electives
+
+  // Pass 1: Multi-grade entries (electives) - these can be overwritten
   for (const [teacher, schedule] of Object.entries(teacherSchedules)) {
     for (const day of DAYS) {
       for (let block = 1; block <= 5; block++) {
@@ -144,13 +183,34 @@ function rebuildGradeSchedules(
 
         const gradeDisplay = entry[0]
         const subject = entry[1]
-
-        // Parse the grade display to get all applicable grades
         const targetGrades = parseGradeDisplay(gradeDisplay)
 
-        // Add this entry to each target grade's schedule
-        for (const grade of targetGrades) {
-          newGradeSchedules[grade][day][block] = [teacher, subject]
+        // Only process multi-grade entries in this pass
+        if (targetGrades.length > 1) {
+          for (const grade of targetGrades) {
+            newGradeSchedules[grade][day][block] = [teacher, subject]
+          }
+        }
+      }
+    }
+  }
+
+  // Pass 2: Single-grade entries (required classes) - these take priority
+  for (const [teacher, schedule] of Object.entries(teacherSchedules)) {
+    for (const day of DAYS) {
+      for (let block = 1; block <= 5; block++) {
+        const entry = schedule[day]?.[block]
+        if (!entry || entry[1] === "OPEN") continue
+
+        const gradeDisplay = entry[0]
+        const subject = entry[1]
+        const targetGrades = parseGradeDisplay(gradeDisplay)
+
+        // Only process single-grade entries in this pass (overwrites electives)
+        if (targetGrades.length === 1) {
+          for (const grade of targetGrades) {
+            newGradeSchedules[grade][day][block] = [teacher, subject]
+          }
         }
       }
     }
@@ -266,7 +326,7 @@ export default function HistoryDetailPage() {
 
   // Repair mode state - diagnose and fix schedule issues
   type RepairIssue = {
-    type: 'orphan_entry' | 'missing_session' | 'grade_mismatch' | 'phantom_grade' | 'unknown_class'
+    type: 'orphan_entry' | 'missing_session' | 'grade_mismatch' | 'phantom_grade' | 'unknown_class' | 'grade_gap' | 'elective_slot_conflict'
     severity: 'error' | 'warning' | 'info'
     teacher: string
     day?: string
@@ -291,6 +351,8 @@ export default function HistoryDetailPage() {
     totalMissingSessions: number
     orphanAnalysis: 'extra' | 'possibly_unlinked' | 'none'
     orphanGuidance: string
+    // Elective slot conflicts
+    electiveSlotConflicts: number
   } | null>(null)
   const [repairPreview, setRepairPreview] = useState<{
     teacherSchedules: Record<string, TeacherSchedule>
@@ -388,10 +450,18 @@ export default function HistoryDetailPage() {
       const { day, block: blockNum } = placement
 
       // Check grade conflict - is this grade scheduled elsewhere at the same time?
+      // Use gradesOverlap() to handle multi-grade classes like "6th-11th Grade"
+      // In freeform mode, Study Halls are legitimate blocks that cannot be ignored
+      // Exception: Two electives CAN share the same slot (students choose which to attend)
+      const classesSnapshot = generation?.stats?.classes_snapshot
       for (const [teacher, sched] of Object.entries(workingSchedules.teacherSchedules)) {
         if (teacher === placement.teacher) continue
         const entry = (sched as TeacherSchedule)[day]?.[blockNum]
-        if (entry && entry[0] === block.grade && entry[1] !== "OPEN" && entry[1] !== "Study Hall") {
+        if (entry && gradesOverlap(entry[0], block.grade) && entry[1] !== "OPEN") {
+          // Skip conflict if both classes are electives (they can share the slot)
+          if (shouldIgnoreGradeConflict(teacher, entry[1], block.sourceTeacher || placement.teacher, block.subject, classesSnapshot)) {
+            continue
+          }
           conflicts.push({
             blockId: block.id,
             placement,
@@ -406,11 +476,12 @@ export default function HistoryDetailPage() {
       }
 
       // Check subject conflict - same subject on same day for same grade
+      // Use gradesOverlap() to handle multi-grade classes
       for (const [teacher, sched] of Object.entries(workingSchedules.teacherSchedules)) {
         for (let b = 1; b <= 5; b++) {
           if (teacher === placement.teacher && b === blockNum) continue
           const entry = (sched as TeacherSchedule)[day]?.[b]
-          if (entry && entry[0] === block.grade && entry[1] === block.subject) {
+          if (entry && gradesOverlap(entry[0], block.grade) && entry[1] === block.subject) {
             // Only add if not already added for grade conflict
             if (!conflicts.some(c => c.blockId === block.id)) {
               conflicts.push({
@@ -566,6 +637,244 @@ export default function HistoryDetailPage() {
         const result = detectClassChanges(generation.stats!.classes_snapshot!, currentClasses)
         setClassChanges(result)
         setDismissedForOptions(new Set()) // Reset dismissed state when generation changes
+
+        // DEBUG: Compare per-grade slot counts between snapshot and current classes
+        const gradesSnapshot = generation.stats?.grades_snapshot || []
+        const validGradeNames = gradesSnapshot.map(g => g.display_name)
+
+        // Use global helpers for grade parsing
+        const numToName = (n: number) => {
+          if (n === 0) return validGradeNames.find(g => g.toLowerCase().includes('kindergarten')) || 'Kindergarten'
+          return gradeNumToDisplay(n)
+        }
+
+        // Calculate slots per grade from SNAPSHOT
+        const snapshotPerGrade = new Map<string, number>()
+        const snapshotClasses = parseClassesFromSnapshot(generation.stats!.classes_snapshot!)
+        for (const cls of snapshotClasses) {
+          const gradeNums = parseGradeDisplayToNumbers(cls.gradeDisplay || cls.grade)
+          for (const num of gradeNums) {
+            const name = numToName(num)
+            if (validGradeNames.includes(name)) {
+              snapshotPerGrade.set(name, (snapshotPerGrade.get(name) || 0) + cls.daysPerWeek)
+            }
+          }
+        }
+
+        // Calculate slots per grade from CURRENT DB
+        const currentPerGrade = new Map<string, number>()
+        for (const cls of currentClasses) {
+          const gradeDisplay = cls.grades?.map(g => g.display_name).join(', ') || cls.grade?.display_name || ''
+          const gradeNums = parseGradeDisplayToNumbers(gradeDisplay)
+          for (const num of gradeNums) {
+            const name = numToName(num)
+            if (validGradeNames.includes(name)) {
+              currentPerGrade.set(name, (currentPerGrade.get(name) || 0) + cls.days_per_week)
+            }
+          }
+        }
+
+        // Log comparison
+        console.log('[Class Comparison] Snapshot vs Current DB - Sessions per grade:')
+        let totalSnapshot = 0, totalCurrent = 0
+        for (const grade of validGradeNames) {
+          const snap = snapshotPerGrade.get(grade) || 0
+          const curr = currentPerGrade.get(grade) || 0
+          totalSnapshot += Math.min(snap, 25) // Cap at 25 for total calculation
+          totalCurrent += Math.min(curr, 25)
+          const match = snap === curr ? '✓' : '⚠️ MISMATCH'
+          console.log(`  ${grade}: snapshot=${snap}, current=${curr} ${match}`)
+        }
+        console.log(`  TOTAL (capped at 25/grade): snapshot=${totalSnapshot}/300, current=${totalCurrent}/300`)
+
+        // Also check: how many UNIQUE time slots does each grade have in the CURRENT schedule?
+        const savedOpt = generation.options?.[0] // Check first option
+        if (savedOpt) {
+          console.log('[Schedule Check] Actual filled slots per grade in saved schedule:')
+          let totalFilled = 0
+          for (const grade of validGradeNames) {
+            let filled = 0
+            const schedule = savedOpt.gradeSchedules[grade]
+            if (schedule) {
+              for (const day of ['Mon', 'Tues', 'Wed', 'Thurs', 'Fri']) {
+                for (let block = 1; block <= 5; block++) {
+                  const entry = schedule[day]?.[block]
+                  if (entry && entry[1] && entry[1] !== 'OPEN') {
+                    filled++
+                  }
+                }
+              }
+            }
+            totalFilled += filled
+            const status = filled === 25 ? '✓' : `⚠️ (${25 - filled} empty)`
+            console.log(`  ${grade}: ${filled}/25 ${status}`)
+          }
+          console.log(`  TOTAL: ${totalFilled}/300`)
+
+          // LINE-BY-LINE CLASS CHECK: For each class in snapshot, verify it has correct sessions in teacherSchedules
+          console.log('[Line-by-Line Class Check] Verifying each snapshot class has scheduled sessions:')
+          const DAYS = ['Mon', 'Tues', 'Wed', 'Thurs', 'Fri']
+          const missingClasses: Array<{ teacher: string; grade: string; subject: string; expected: number; found: number; locations: string[] }> = []
+
+          // Helper to check grade overlap
+          const gradesOverlap = (a: string, b: string): boolean => {
+            if (a === b) return true
+            const parseNums = (s: string): number[] => {
+              const nums: number[] = []
+              if (s.toLowerCase().includes('kindergarten') || s === 'K') { nums.push(0); return nums }
+              if (s.includes(',')) {
+                for (const p of s.split(',').map(x => x.trim())) {
+                  if (p.toLowerCase().includes('kindergarten') || p === 'K') nums.push(0)
+                  else { const m = p.match(/(\d+)/); if (m) nums.push(parseInt(m[1])) }
+                }
+                return nums
+              }
+              const range = s.match(/(\d+)(?:st|nd|rd|th)?[-–](\d+)/)
+              if (range) { for (let i = parseInt(range[1]); i <= parseInt(range[2]); i++) nums.push(i); return nums }
+              const single = s.match(/(\d+)/)
+              if (single) nums.push(parseInt(single[1]))
+              return nums
+            }
+            const numsA = parseNums(a), numsB = parseNums(b)
+            return numsA.some(n => numsB.includes(n))
+          }
+
+          for (const cls of snapshotClasses) {
+            if (!cls.teacher || !cls.subject) continue
+
+            let foundCount = 0
+            const locations: string[] = []
+            const teacherSchedule = savedOpt.teacherSchedules[cls.teacher]
+
+            if (teacherSchedule) {
+              for (const day of DAYS) {
+                for (let block = 1; block <= 5; block++) {
+                  const entry = teacherSchedule[day]?.[block]
+                  if (entry && entry[1] === cls.subject) {
+                    // Check if grades overlap
+                    if (gradesOverlap(entry[0], cls.gradeDisplay || cls.grade)) {
+                      foundCount++
+                      locations.push(`${day} B${block}`)
+                    }
+                  }
+                }
+              }
+            }
+
+            if (foundCount !== cls.daysPerWeek) {
+              missingClasses.push({
+                teacher: cls.teacher,
+                grade: cls.gradeDisplay || cls.grade,
+                subject: cls.subject,
+                expected: cls.daysPerWeek,
+                found: foundCount,
+                locations
+              })
+            }
+          }
+
+          if (missingClasses.length === 0) {
+            console.log('  ✓ All classes have correct number of scheduled sessions')
+          } else {
+            console.log(`  ⚠️ ${missingClasses.length} classes with WRONG session count:`)
+            for (const c of missingClasses) {
+              const status = c.found < c.expected ? 'MISSING' : 'EXTRA'
+              console.log(`    ${c.teacher} / ${c.grade} / ${c.subject}: ${c.found}/${c.expected} sessions (${status} ${Math.abs(c.expected - c.found)})`)
+              if (c.locations.length > 0) {
+                console.log(`      Found at: ${c.locations.join(', ')}`)
+              }
+            }
+          }
+
+          // DEBUG: Check all Study Hall entries in teacherSchedules vs gradeSchedules
+          console.log('[Study Hall Check] All Study Halls in teacherSchedules:')
+          const studyHallEntries: Array<{ teacher: string; day: string; block: number; gradeDisplay: string }> = []
+
+          for (const [teacher, schedule] of Object.entries(savedOpt.teacherSchedules)) {
+            for (const day of DAYS) {
+              for (let block = 1; block <= 5; block++) {
+                const entry = schedule[day]?.[block]
+                if (entry && entry[1] === 'Study Hall') {
+                  const gradeDisplay = entry[0]
+                  studyHallEntries.push({ teacher, day, block, gradeDisplay })
+                  console.log(`  ${teacher} @ ${day} B${block}: "${gradeDisplay}" / Study Hall`)
+                }
+              }
+            }
+          }
+
+          console.log(`[Study Hall Check] Found ${studyHallEntries.length} Study Hall entries in teacherSchedules`)
+          console.log('[Study Hall Check] Verifying each appears in gradeSchedules:')
+
+          for (const sh of studyHallEntries) {
+            // Parse the grade from the study hall entry
+            const gradeNums = parseGradeDisplayToNumbers(sh.gradeDisplay)
+
+            for (const gradeNum of gradeNums) {
+              const gradeName = numToName(gradeNum)
+              const gradeSchedule = savedOpt.gradeSchedules[gradeName]
+              const gradeEntry = gradeSchedule?.[sh.day]?.[sh.block]
+
+              const inGradeSchedule = gradeEntry && gradeEntry[1] === 'Study Hall'
+              const status = inGradeSchedule ? '✓' : '⚠️ MISSING'
+
+              console.log(`  ${sh.teacher}/${sh.gradeDisplay} @ ${sh.day} B${sh.block} → ${gradeName}: ${status}`)
+              if (!inGradeSchedule && gradeEntry) {
+                console.log(`    Instead found: "${gradeEntry[0]}" / "${gradeEntry[1]}"`)
+              } else if (!inGradeSchedule && !gradeEntry) {
+                console.log(`    Slot is empty (null/undefined)`)
+              }
+            }
+          }
+
+          // Also check: which grades have Study Hall in their gradeSchedules?
+          console.log('[Study Hall Check] Study Halls found in gradeSchedules:')
+          for (const grade of validGradeNames) {
+            const gradeSchedule = savedOpt.gradeSchedules[grade]
+            if (!gradeSchedule) continue
+            for (const day of DAYS) {
+              for (let block = 1; block <= 5; block++) {
+                const entry = gradeSchedule[day]?.[block]
+                if (entry && entry[1] === 'Study Hall') {
+                  console.log(`  ${grade} @ ${day} B${block}: ${entry[0]} / Study Hall`)
+                }
+              }
+            }
+          }
+
+          // Check for GRADE CONFLICTS: multiple teachers teaching same grade at same time
+          console.log('[Grade Conflict Check] Looking for slots with multiple teachers for same grade:')
+          const conflictSlots = [
+            { day: 'Mon', block: 4, grade: '7th Grade' },
+            { day: 'Thurs', block: 5, grade: '8th Grade' },
+            { day: 'Fri', block: 1, grade: '10th Grade' }
+          ]
+          for (const slot of conflictSlots) {
+            console.log(`  ${slot.grade} @ ${slot.day} B${slot.block}:`)
+            const teachersAtSlot: string[] = []
+            for (const [teacher, schedule] of Object.entries(savedOpt.teacherSchedules)) {
+              const entry = schedule[slot.day]?.[slot.block]
+              if (entry && entry[1] && entry[1] !== 'OPEN') {
+                // Check if this entry includes the grade
+                const entryGrades = parseGradeDisplayToNumbers(entry[0])
+                const slotGradeNum = slot.grade.toLowerCase().includes('kindergarten') ? 0 : parseInt(slot.grade.match(/(\d+)/)?.[1] || '0')
+                if (entryGrades.includes(slotGradeNum)) {
+                  teachersAtSlot.push(`${teacher}: "${entry[0]}" / ${entry[1]}`)
+                }
+              }
+            }
+            if (teachersAtSlot.length > 1) {
+              console.log(`    ⚠️ CONFLICT: ${teachersAtSlot.length} teachers for this grade:`)
+              for (const t of teachersAtSlot) {
+                console.log(`      - ${t}`)
+              }
+            } else if (teachersAtSlot.length === 1) {
+              console.log(`    ✓ Single teacher: ${teachersAtSlot[0]}`)
+            } else {
+              console.log(`    ✓ No teacher scheduled`)
+            }
+          }
+        }
       } catch (error) {
         console.error('Error detecting class changes:', error)
       }
@@ -1204,6 +1513,10 @@ export default function HistoryDetailPage() {
     console.log('[Save] - previewTeachers.size:', previewTeachers.size)
     console.log('[Save] - condition check:', previewType === 'regen' && previewTeachers.size > 0)
 
+    console.log('[Save] Entering merge/save logic...')
+
+    try {
+
     if (previewType === 'regen' && previewTeachers.size > 0) {
       const DAYS = ["Mon", "Tues", "Wed", "Thurs", "Fri"]
 
@@ -1426,15 +1739,18 @@ export default function HistoryDetailPage() {
 
     // Always rebuild gradeSchedules from teacherSchedules before saving
     // teacherSchedules is the source of truth - this ensures consistency and fixes any corruption
+    console.log('[Save] About to rebuild gradeSchedules')
     const rebuiltGradeSchedules = rebuildGradeSchedules(
       optionToSave.teacherSchedules,
       statsForValidation?.grades_snapshot,
       selectedResult.gradeSchedules // Fallback for grade keys
     )
+    console.log('[Save] gradeSchedules rebuilt successfully')
     optionToSave = {
       ...optionToSave,
       gradeSchedules: rebuiltGradeSchedules,
     }
+    console.log('[Save] optionToSave updated with rebuilt gradeSchedules')
 
     // Define the save logic
     const doSave = async () => {
@@ -1514,7 +1830,13 @@ export default function HistoryDetailPage() {
 
     // Run validation with visual modal on the MERGED option, then save if passed
     // Use statsForValidation which has updated class snapshots when using current classes
+    console.log('[Save] About to call runValidationWithModal')
     runValidationWithModal(optionToSave, statsForValidation, doSave)
+    console.log('[Save] runValidationWithModal called')
+
+    } catch (error) {
+      console.error('[Save] ERROR in handleKeepPreview:', error)
+    }
   }
 
   function handleDiscardPreview() {
@@ -1563,6 +1885,23 @@ export default function HistoryDetailPage() {
     const seed = Math.floor(Math.random() * 2147483647)
     setStudyHallSeed(seed)
 
+    // DEBUG: Log study halls BEFORE reassignment
+    console.log('[Study Hall Reassign] BEFORE - Study halls in teacherSchedules:')
+    const DAYS = ['Mon', 'Tues', 'Wed', 'Thurs', 'Fri']
+    const beforeStudyHalls: string[] = []
+    for (const [teacher, schedule] of Object.entries(currentOption.teacherSchedules)) {
+      for (const day of DAYS) {
+        for (let block = 1; block <= 5; block++) {
+          const entry = schedule[day]?.[block]
+          if (entry && entry[1] === 'Study Hall') {
+            beforeStudyHalls.push(`${teacher} @ ${day} B${block}: ${entry[0]} / Study Hall`)
+            console.log(`  ${teacher} @ ${day} B${block}: "${entry[0]}" / Study Hall`)
+          }
+        }
+      }
+    }
+    console.log(`[Study Hall Reassign] Total BEFORE: ${beforeStudyHalls.length}`)
+
     const result = reassignStudyHalls(currentOption, teachers, seed, rules)
 
     if (!result.success) {
@@ -1579,6 +1918,54 @@ export default function HistoryDetailPage() {
     if (!result.newOption) {
       toast.error("Could not reassign study halls")
       return
+    }
+
+    // DEBUG: Log study halls AFTER reassignment
+    console.log('[Study Hall Reassign] AFTER - Study halls in new teacherSchedules:')
+    const afterStudyHalls: string[] = []
+    for (const [teacher, schedule] of Object.entries(result.newOption.teacherSchedules)) {
+      for (const day of DAYS) {
+        for (let block = 1; block <= 5; block++) {
+          const entry = schedule[day]?.[block]
+          if (entry && entry[1] === 'Study Hall') {
+            afterStudyHalls.push(`${teacher} @ ${day} B${block}: ${entry[0]} / Study Hall`)
+            console.log(`  ${teacher} @ ${day} B${block}: "${entry[0]}" / Study Hall`)
+          }
+        }
+      }
+    }
+    console.log(`[Study Hall Reassign] Total AFTER: ${afterStudyHalls.length}`)
+
+    // Check for conflicts in the new study hall assignments
+    console.log('[Study Hall Reassign] Checking for grade conflicts in new assignments:')
+    const gradesSnapshot = generation.stats?.grades_snapshot || []
+    const validGradeNames = gradesSnapshot.map((g: { display_name: string }) => g.display_name)
+    let conflictsFound = 0
+    for (const sh of afterStudyHalls) {
+      // Parse the study hall entry
+      const match = sh.match(/(\w+) @ (\w+) B(\d+): "([^"]+)" \/ Study Hall/)
+      if (!match) continue
+      const [, shTeacher, day, blockStr, gradeDisplay] = match
+      const block = parseInt(blockStr)
+
+      // Check if any other teacher has a class for this grade at this time
+      for (const [teacher, schedule] of Object.entries(result.newOption.teacherSchedules)) {
+        if (teacher === shTeacher) continue
+        const entry = schedule[day]?.[block]
+        if (entry && entry[1] && entry[1] !== 'OPEN' && entry[1] !== 'Study Hall') {
+          // Check grade overlap
+          const entryGrade = entry[0]
+          if (entryGrade.includes(gradeDisplay.replace(' Grade', '')) || gradeDisplay.includes(entryGrade.replace(' Grade', ''))) {
+            console.log(`  ⚠️ CONFLICT: ${shTeacher}'s ${gradeDisplay} Study Hall @ ${day} B${block} conflicts with ${teacher}'s ${entry[0]}/${entry[1]}`)
+            conflictsFound++
+          }
+        }
+      }
+    }
+    if (conflictsFound === 0) {
+      console.log('  ✓ No conflicts found in new study hall assignments')
+    } else {
+      console.log(`  ⚠️ ${conflictsFound} conflicts found!`)
     }
 
     // Validate the full schedule
@@ -2961,37 +3348,37 @@ export default function HistoryDetailPage() {
       const { day, block: blockNum } = placement
 
       // Check grade conflict - find the OTHER class that has the same grade at this time
+      // Use gradesOverlap() to handle multi-grade classes like "6th-11th Grade"
+      // In freeform mode, Study Halls are legitimate blocks (just another class)
+      // Exception: Two electives can share slots (use shouldIgnoreGradeConflict helper)
+      const classesSnapshot = generation?.stats?.classes_snapshot
       for (const [teacher, sched] of Object.entries(schedules.teacherSchedules)) {
         if (teacher === placement.teacher) continue // Skip our placement
         const entry = (sched as TeacherSchedule)[day]?.[blockNum]
-        if (entry && entry[0] === block.grade && entry[1] !== "OPEN" && entry[1] !== "Study Hall") {
-          // Check if both are electives - electives can share slots
-          const isElective = generation?.stats?.classes_snapshot?.some(
-            c => c.teacher_name === teacher && c.subject_name === entry[1] && c.is_elective
-          )
-          const blockIsElective = generation?.stats?.classes_snapshot?.some(
-            c => c.teacher_name === block.sourceTeacher && c.subject_name === block.subject && c.is_elective
-          )
-          if (!isElective || !blockIsElective) {
-            const key = `${teacher}-${day}-${blockNum}`
-            if (!seenBlockers.has(key)) {
-              seenBlockers.add(key)
-              blockers.push({
-                blocker: { teacher, day, block: blockNum, grade: entry[0], subject: entry[1], entry },
-                blockedPlacement: placement,
-                reason: `${entry[0]} ${entry[1]} conflicts with ${block.grade} at same time`
-              })
-            }
+        if (entry && gradesOverlap(entry[0], block.grade) && entry[1] !== "OPEN") {
+          // Skip if both classes are electives (they can share the slot)
+          if (shouldIgnoreGradeConflict(teacher, entry[1], block.sourceTeacher || placement.teacher, block.subject, classesSnapshot)) {
+            continue
+          }
+          const key = `${teacher}-${day}-${blockNum}`
+          if (!seenBlockers.has(key)) {
+            seenBlockers.add(key)
+            blockers.push({
+              blocker: { teacher, day, block: blockNum, grade: entry[0], subject: entry[1], entry },
+              blockedPlacement: placement,
+              reason: `${entry[0]} ${entry[1]} conflicts with ${block.grade} at same time`
+            })
           }
         }
       }
 
       // Check subject conflict - find the OTHER class that has same subject on same day for same grade
+      // Use gradesOverlap() to handle multi-grade classes
       for (const [teacher, sched] of Object.entries(schedules.teacherSchedules)) {
         for (let b = 1; b <= 5; b++) {
           if (teacher === placement.teacher && b === blockNum) continue // Skip our placement
           const entry = (sched as TeacherSchedule)[day]?.[b]
-          if (entry && entry[0] === block.grade && entry[1] === block.subject) {
+          if (entry && gradesOverlap(entry[0], block.grade) && entry[1] === block.subject) {
             const key = `${teacher}-${day}-${b}`
             if (!seenBlockers.has(key)) {
               seenBlockers.add(key)
@@ -3104,39 +3491,12 @@ export default function HistoryDetailPage() {
         // Moving a class away from its fixed slot would be caught by validation
       }
 
-      // Helper: check if two grade displays overlap (share any common grades)
-      // e.g., "6th Grade" overlaps with "6th-8th Grade"
-      function gradesOverlap(gradeA: string, gradeB: string): boolean {
-        if (gradeA === gradeB) return true
-
-        // Parse grades from each display
-        const parseGrades = (display: string): number[] => {
-          const grades: number[] = []
-          if (display.toLowerCase().includes('kindergarten') || display === 'K') {
-            grades.push(0)
-            return grades
-          }
-          const rangeMatch = display.match(/(\d+)(?:st|nd|rd|th)?[-–](\d+)/)
-          if (rangeMatch) {
-            const start = parseInt(rangeMatch[1])
-            const end = parseInt(rangeMatch[2])
-            for (let i = start; i <= end; i++) grades.push(i)
-            return grades
-          }
-          const singleMatch = display.match(/(\d+)/)
-          if (singleMatch) grades.push(parseInt(singleMatch[1]))
-          return grades
-        }
-
-        const gradesA = parseGrades(gradeA)
-        const gradesB = parseGrades(gradeB)
-        return gradesA.some(g => gradesB.includes(g))
-      }
-
       // Check grade conflict - overlapping grade at same time on another teacher
+      // Uses global gradesOverlap() helper for multi-grade class detection
+      // In freeform mode, Study Halls are legitimate blocks (just another class)
       for (const [t, sched] of Object.entries(newTeacherSchedules)) {
         const entry = (sched as TeacherSchedule)[day]?.[blockNum]
-        if (entry && entry[1] !== "OPEN" && entry[1] !== "Study Hall") {
+        if (entry && entry[1] !== "OPEN") {
           if (gradesOverlap(entry[0], grade)) {
             return false
           }
@@ -3640,12 +4000,19 @@ export default function HistoryDetailPage() {
       const { day, block } = placement
 
       // Check for multiple placements at same grade/slot (excluding Study Halls)
+      // Use gradesOverlap() to handle multi-grade classes like "6th-11th Grade"
+      const classesSnapshot = generation?.stats?.classes_snapshot
       const otherPlacementsAtSlot = pendingPlacements.filter(p => {
         if (p === placement) return false
         const otherBlock = floatingBlocks.find(b => b.id === p.blockId)
         // Skip Study Halls
         if (otherBlock?.subject === "Study Hall") return false
-        return otherBlock && otherBlock.grade === grade && p.day === day && p.block === block
+        if (!otherBlock || !gradesOverlap(otherBlock.grade, grade) || p.day !== day || p.block !== block) return false
+        // Skip if both are electives (they can share the slot)
+        if (shouldIgnoreGradeConflict(otherBlock.sourceTeacher || p.teacher, otherBlock.subject, placedBlock.sourceTeacher || placement.teacher, placedBlock.subject, classesSnapshot)) {
+          return false
+        }
+        return true
       })
       if (otherPlacementsAtSlot.length > 0) {
         // Only report once per conflict set
@@ -3715,10 +4082,10 @@ export default function HistoryDetailPage() {
         const placedBlock = floatingBlocks.find(b => b.id === placement.blockId)
         if (!placedBlock || placedBlock.subject === "Study Hall") continue
 
-        // Find the class definition for this placement
+        // Find the class definition for this placement (using gradesOverlap for multi-grade support)
         const classDef = freeformClasses.find(c =>
           c.teacher === placement.teacher &&
-          c.grade === placedBlock.grade &&
+          gradesOverlap(c.gradeDisplay || c.grade, placedBlock.grade) &&
           c.subject === placedBlock.subject
         )
 
@@ -3742,10 +4109,10 @@ export default function HistoryDetailPage() {
         const placedBlock = floatingBlocks.find(b => b.id === placement.blockId)
         if (!placedBlock || placedBlock.subject === "Study Hall") continue
 
-        // Find the class definition
+        // Find the class definition (using gradesOverlap for multi-grade support)
         const classDef = freeformClasses.find(c =>
           c.teacher === placement.teacher &&
-          c.grade === placedBlock.grade &&
+          gradesOverlap(c.gradeDisplay || c.grade, placedBlock.grade) &&
           c.subject === placedBlock.subject
         )
 
@@ -3879,9 +4246,7 @@ export default function HistoryDetailPage() {
           const grade = entry[0]
           const subject = entry[1]
           // Check if this is an elective (from classes snapshot)
-          const isElective = stats?.classes_snapshot?.some(
-            c => c.teacher_name === teacher && c.subject_name === subject && c.is_elective
-          ) ?? false
+          const isElective = isClassElective(teacher, subject, stats?.classes_snapshot)
 
           if (!gradeTeachers.has(grade)) {
             gradeTeachers.set(grade, [])
@@ -3965,51 +4330,9 @@ export default function HistoryDetailPage() {
       if (stats.classes_snapshot) {
         const classes = parseClassesFromSnapshot(stats.classes_snapshot)
 
-        // Helper: check if two grade displays overlap (share any common grades)
-        // e.g., "6th Grade" overlaps with "6th-8th Grade"
-        function gradesOverlapValidation(gradeA: string, gradeB: string): boolean {
-          if (gradeA === gradeB) return true
-
-          const parseGrades = (display: string): number[] => {
-            const grades: number[] = []
-            if (display.toLowerCase().includes('kindergarten') || display === 'K') {
-              grades.push(0)
-              return grades
-            }
-            // Handle comma-separated list like "K, 1st, 2nd, 3rd"
-            if (display.includes(',')) {
-              const parts = display.split(',').map(p => p.trim())
-              for (const part of parts) {
-                if (part.toLowerCase().includes('kindergarten') || part === 'K') {
-                  grades.push(0)
-                } else {
-                  const num = part.match(/(\d+)/)
-                  if (num) grades.push(parseInt(num[1]))
-                }
-              }
-              return grades
-            }
-            // Handle range pattern like "6th-8th"
-            const rangeMatch = display.match(/(\d+)(?:st|nd|rd|th)?[-–](\d+)/)
-            if (rangeMatch) {
-              const start = parseInt(rangeMatch[1])
-              const end = parseInt(rangeMatch[2])
-              for (let i = start; i <= end; i++) grades.push(i)
-              return grades
-            }
-            // Single grade
-            const singleMatch = display.match(/(\d+)/)
-            if (singleMatch) grades.push(parseInt(singleMatch[1]))
-            return grades
-          }
-
-          const gradesA = parseGrades(gradeA)
-          const gradesB = parseGrades(gradeB)
-          return gradesA.some(g => gradesB.includes(g))
-        }
-
         // Helper: check if a schedule entry matches a class definition
         // A match requires: same teacher, same subject, and grades overlap
+        // Uses global gradesOverlap() helper
         function entryMatchesClass(
           teacher: string,
           entryGrade: string,
@@ -4018,7 +4341,7 @@ export default function HistoryDetailPage() {
         ): boolean {
           if (cls.teacher !== teacher || cls.subject !== entrySubject) return false
           // Check if entry's grade overlaps with class's grades
-          return gradesOverlapValidation(entryGrade, cls.gradeDisplay || cls.grade)
+          return gradesOverlap(entryGrade, cls.gradeDisplay || cls.grade)
         }
 
         // Track all teaching entries and whether they've been matched
@@ -4226,10 +4549,8 @@ export default function HistoryDetailPage() {
               const entry = teacherSchedule[day]?.[block]
               if (!entry || entry[1] !== cls.subject) continue
 
-              const classGrades = cls.grades || [cls.grade]
-              const entryMatches = classGrades.some(g =>
-                entry[0] === g || entry[0]?.includes(g) || g?.includes(entry[0])
-              ) || entry[0] === cls.gradeDisplay
+              // Check if entry's grade overlaps with class's grades (using global helper)
+              const entryMatches = gradesOverlap(entry[0], cls.gradeDisplay || cls.grade)
 
               if (!entryMatches) continue
 
@@ -4275,7 +4596,8 @@ export default function HistoryDetailPage() {
         summary: "No snapshot data available for analysis",
         totalMissingSessions: 0,
         orphanAnalysis: 'none',
-        orphanGuidance: ''
+        orphanGuidance: '',
+        electiveSlotConflicts: 0
       }
     }
 
@@ -4284,50 +4606,9 @@ export default function HistoryDetailPage() {
     const classes = parseClassesFromSnapshot(stats.classes_snapshot)
     const validGradeNames = stats.grades_snapshot.map(g => g.display_name)
 
-    // Helper: check if two grade displays overlap (share any common grades)
-    function gradesOverlapRepair(gradeA: string, gradeB: string): boolean {
-      if (gradeA === gradeB) return true
-
-      const parseGrades = (display: string): number[] => {
-        const grades: number[] = []
-        if (display.toLowerCase().includes('kindergarten') || display === 'K') {
-          grades.push(0)
-          return grades
-        }
-        // Handle comma-separated list like "K, 1st, 2nd, 3rd"
-        if (display.includes(',')) {
-          const parts = display.split(',').map(p => p.trim())
-          for (const part of parts) {
-            if (part.toLowerCase().includes('kindergarten') || part === 'K') {
-              grades.push(0)
-            } else {
-              const num = part.match(/(\d+)/)
-              if (num) grades.push(parseInt(num[1]))
-            }
-          }
-          return grades
-        }
-        // Handle range pattern like "6th-8th"
-        const rangeMatch = display.match(/(\d+)(?:st|nd|rd|th)?[-–](\d+)/)
-        if (rangeMatch) {
-          const start = parseInt(rangeMatch[1])
-          const end = parseInt(rangeMatch[2])
-          for (let i = start; i <= end; i++) grades.push(i)
-          return grades
-        }
-        // Single grade
-        const singleMatch = display.match(/(\d+)/)
-        if (singleMatch) grades.push(parseInt(singleMatch[1]))
-        return grades
-      }
-
-      const gradesA = parseGrades(gradeA)
-      const gradesB = parseGrades(gradeB)
-      return gradesA.some(g => gradesB.includes(g))
-    }
-
     // Helper: check if a schedule entry matches a class definition
     // A match requires: same teacher, same subject, and grades overlap
+    // Uses global gradesOverlap() helper
     function entryMatchesClass(
       teacher: string,
       entryGrade: string,
@@ -4336,7 +4617,7 @@ export default function HistoryDetailPage() {
     ): boolean {
       if (cls.teacher !== teacher || cls.subject !== entrySubject) return false
       // Check if entry's grade overlaps with class's grades
-      return gradesOverlapRepair(entryGrade, cls.gradeDisplay || cls.grade)
+      return gradesOverlap(entryGrade, cls.gradeDisplay || cls.grade)
     }
 
     // Track session counts per class (using unique class identifier)
@@ -4400,8 +4681,19 @@ export default function HistoryDetailPage() {
     }
 
     // Check for missing sessions (classes not fully scheduled)
-    for (const [, { cls, foundCount }] of classSessionCounts) {
+    console.log('[Repair Analysis] Class session counts:')
+    const underScheduled: Array<{ teacher: string; grade: string; subject: string; expected: number; found: number; missing: number }> = []
+    for (const [key, { cls, foundCount }] of classSessionCounts) {
       if (foundCount < cls.daysPerWeek) {
+        const missing = cls.daysPerWeek - foundCount
+        underScheduled.push({
+          teacher: cls.teacher,
+          grade: cls.gradeDisplay || cls.grade,
+          subject: cls.subject,
+          expected: cls.daysPerWeek,
+          found: foundCount,
+          missing
+        })
         issues.push({
           type: 'missing_session',
           severity: 'error',
@@ -4428,6 +4720,18 @@ export default function HistoryDetailPage() {
       }
     }
 
+    // Log under-scheduled classes summary
+    if (underScheduled.length > 0) {
+      console.log('[Repair Analysis] ⚠️ UNDER-SCHEDULED CLASSES:')
+      const totalMissing = underScheduled.reduce((sum, c) => sum + c.missing, 0)
+      console.log(`  Total: ${underScheduled.length} classes missing ${totalMissing} sessions`)
+      for (const c of underScheduled) {
+        console.log(`  - ${c.teacher} / ${c.grade} / ${c.subject}: ${c.found}/${c.expected} sessions (missing ${c.missing})`)
+      }
+    } else {
+      console.log('[Repair Analysis] ✓ All classes fully scheduled')
+    }
+
     // Check for phantom grades in gradeSchedules KEYS
     // These are invalid grade names that shouldn't exist as keys
     // (Range patterns in teacherSchedules ENTRIES are valid if they match a class - handled by orphan detection)
@@ -4445,6 +4749,245 @@ export default function HistoryDetailPage() {
           gradeDisplay: grade,
           description: `Phantom grade key "${grade}" in gradeSchedules (not in grades snapshot)`,
           canFix: true
+        })
+      }
+    }
+
+    // NEW: Diagnose per-grade slot counts
+    // 1. Calculate expected sessions per grade from classes_snapshot
+    // Uses global parseGradeDisplayToNumbers() and gradeNumToDisplay() helpers
+    const expectedPerGrade = new Map<string, number>()
+    const numToGradeName = (n: number): string => {
+      if (n === 0) return validGradeNames.find(g => g.toLowerCase().includes('kindergarten')) || 'Kindergarten'
+      return gradeNumToDisplay(n)
+    }
+
+    // Log multi-grade classes specifically (likely source of issues for grades 6-11)
+    console.log('[Repair Analysis] Multi-grade classes in snapshot:')
+    const multiGradeClasses = classes.filter(cls => {
+      const gradeNums = parseGradeDisplayToNumbers(cls.gradeDisplay || cls.grade)
+      return gradeNums.length > 1
+    })
+    for (const cls of multiGradeClasses) {
+      const gradeNums = parseGradeDisplayToNumbers(cls.gradeDisplay || cls.grade)
+      console.log(`  - ${cls.teacher} / ${cls.gradeDisplay || cls.grade} / ${cls.subject}: ${cls.daysPerWeek}x/week (covers grades: ${gradeNums.join(', ')})`)
+    }
+    if (multiGradeClasses.length === 0) {
+      console.log('  (none)')
+    }
+
+    // Check: for each multi-grade class, how many sessions are actually in teacherSchedules?
+    console.log('[Repair Analysis] Multi-grade class session verification:')
+    for (const cls of multiGradeClasses) {
+      let foundCount = 0
+      const locations: string[] = []
+      for (const [teacher, schedule] of Object.entries(option.teacherSchedules)) {
+        if (teacher !== cls.teacher) continue
+        for (const day of DAYS) {
+          for (let block = 1; block <= 5; block++) {
+            const entry = schedule[day]?.[block]
+            if (entry && entry[1] === cls.subject) {
+              // Check if grades overlap (using global helper)
+              if (gradesOverlap(entry[0], cls.gradeDisplay || cls.grade)) {
+                foundCount++
+                locations.push(`${day} B${block}: "${entry[0]}"`)
+              }
+            }
+          }
+        }
+      }
+      const status = foundCount === cls.daysPerWeek ? '✓' : foundCount < cls.daysPerWeek ? '⚠️ UNDER' : '⚠️ OVER'
+      console.log(`  ${cls.teacher}/${cls.gradeDisplay}/${cls.subject}: ${foundCount}/${cls.daysPerWeek} ${status}`)
+      if (foundCount !== cls.daysPerWeek) {
+        console.log(`    Found at: ${locations.join(', ')}`)
+      }
+    }
+
+    for (const cls of classes) {
+      const gradeNums = parseGradeDisplayToNumbers(cls.gradeDisplay || cls.grade)
+      for (const num of gradeNums) {
+        const gradeName = numToGradeName(num)
+        if (validGradeNames.includes(gradeName)) {
+          expectedPerGrade.set(gradeName, (expectedPerGrade.get(gradeName) || 0) + cls.daysPerWeek)
+        }
+      }
+    }
+
+    // 2. Count actual filled slots per grade from gradeSchedules
+    const actualPerGrade = new Map<string, number>()
+    for (const grade of validGradeNames) {
+      let count = 0
+      const schedule = option.gradeSchedules[grade]
+      if (schedule) {
+        for (const day of DAYS) {
+          for (let block = 1; block <= 5; block++) {
+            const entry = schedule[day]?.[block]
+            if (entry && entry[1] && entry[1] !== 'OPEN') {
+              count++
+            }
+          }
+        }
+      }
+      actualPerGrade.set(grade, count)
+    }
+
+    // 3. Log comparison and flag mismatches
+    console.log('[Repair Analysis] Per-grade session analysis:')
+    for (const grade of validGradeNames) {
+      const expected = expectedPerGrade.get(grade) || 0
+      const actual = actualPerGrade.get(grade) || 0
+      const status = actual === expected ? '✓' : actual < expected ? '⚠️ UNDER' : '⚠️ OVER'
+      console.log(`  ${grade}: expected=${expected}, actual=${actual} ${status}`)
+
+      // If actual < expected, list the missing slots
+      if (actual < expected) {
+        const schedule = option.gradeSchedules[grade]
+        const emptySlots: string[] = []
+        for (const day of DAYS) {
+          for (let block = 1; block <= 5; block++) {
+            const entry = schedule?.[day]?.[block]
+            if (!entry || !entry[1] || entry[1] === 'OPEN') {
+              emptySlots.push(`${day} B${block}`)
+            }
+          }
+        }
+        console.log(`    Empty slots: ${emptySlots.join(', ')}`)
+
+        // Check teacherSchedules to see if any teacher HAS a class for this grade at these empty slots
+        for (const slot of emptySlots) {
+          const [slotDay, slotBlock] = [slot.split(' ')[0], parseInt(slot.split('B')[1])]
+          let foundTeacher: string | null = null
+          for (const [teacher, teacherSchedule] of Object.entries(option.teacherSchedules)) {
+            const entry = teacherSchedule[slotDay]?.[slotBlock]
+            if (entry && entry[1] !== 'OPEN' && entry[1] !== 'Study Hall') {
+              const entryGradeNums = parseGradeDisplayToNumbers(entry[0])
+              const gradeNum = validGradeNames.indexOf(grade) <= 0 ? 0 : parseInt(grade.match(/(\d+)/)?.[1] || '0')
+              if (entryGradeNums.includes(gradeNum)) {
+                foundTeacher = `${teacher} -> ${entry[0]}/${entry[1]}`
+              }
+            }
+          }
+          if (foundTeacher) {
+            console.log(`    ${slot}: FOUND in teacherSchedules but missing in gradeSchedules! ${foundTeacher}`)
+          } else {
+            console.log(`    ${slot}: NOT found in any teacher's schedule`)
+          }
+        }
+
+        issues.push({
+          type: 'grade_gap',
+          severity: 'warning',
+          teacher: '',
+          gradeDisplay: grade,
+          expected: `${expected} sessions`,
+          found: `${actual} sessions`,
+          description: `Grade "${grade}" has ${25 - actual} empty slots (expected ${expected} from snapshot, found ${actual})`,
+          canFix: false
+        })
+      }
+    }
+
+    // NEW: Analyze elective slot conflicts
+    // Elective slots for grades 6-11: Mon B5, Wed B5, Fri B1
+    // If a single-grade (non-elective) class is scheduled in these slots,
+    // it conflicts with the electives that run at the same time
+    const electiveSlots = [
+      { day: 'Mon', block: 5 },
+      { day: 'Wed', block: 5 },
+      { day: 'Fri', block: 1 }
+    ]
+    const electiveGrades = [6, 7, 8, 9, 10, 11]
+
+    console.log('[Repair Analysis] Checking for regular classes in elective slots (Mon B5, Wed B5, Fri B1):')
+    const electiveSlotConflicts: Array<{
+      teacher: string
+      day: string
+      block: number
+      grade: string
+      subject: string
+      conflictingElectives: Array<{ teacher: string; subject: string; gradeDisplay: string }>
+    }> = []
+
+    for (const slot of electiveSlots) {
+      // Find all classes at this slot
+      const classesAtSlot: Array<{
+        teacher: string
+        gradeDisplay: string
+        subject: string
+        gradeNums: number[]
+        isElective: boolean
+      }> = []
+
+      for (const [teacher, schedule] of Object.entries(option.teacherSchedules)) {
+        const entry = schedule[slot.day]?.[slot.block]
+        if (entry && entry[1] && entry[1] !== 'OPEN' && entry[1] !== 'Study Hall') {
+          const gradeNums = parseGradeDisplayToNumbers(entry[0])
+          // Check if this class is marked as elective (use shared helper)
+          const isElective = isClassElective(teacher, entry[1], stats?.classes_snapshot)
+          classesAtSlot.push({
+            teacher,
+            gradeDisplay: entry[0],
+            subject: entry[1],
+            gradeNums,
+            isElective
+          })
+        }
+      }
+
+      // Find electives at this slot (multi-grade classes marked as elective)
+      const electives = classesAtSlot.filter(c => c.isElective && c.gradeNums.length > 1)
+
+      // Find single-grade non-elective classes in elective grades at this slot
+      const singleGradeRegularClasses = classesAtSlot.filter(c =>
+        !c.isElective &&
+        c.gradeNums.length === 1 &&
+        electiveGrades.includes(c.gradeNums[0])
+      )
+
+      // If there are both electives and single-grade regular classes at same slot,
+      // that's a conflict - students can't be in both places
+      if (electives.length > 0 && singleGradeRegularClasses.length > 0) {
+        for (const regular of singleGradeRegularClasses) {
+          // Check if this regular class's grade is covered by any of the electives
+          const conflictingElectives = electives.filter(elec =>
+            elec.gradeNums.includes(regular.gradeNums[0])
+          )
+          if (conflictingElectives.length > 0) {
+            electiveSlotConflicts.push({
+              teacher: regular.teacher,
+              day: slot.day,
+              block: slot.block,
+              grade: numToGradeName(regular.gradeNums[0]),
+              subject: regular.subject,
+              conflictingElectives: conflictingElectives.map(e => ({
+                teacher: e.teacher,
+                subject: e.subject,
+                gradeDisplay: e.gradeDisplay
+              }))
+            })
+            console.log(`  ⚠️ CONFLICT: ${regular.teacher}/${numToGradeName(regular.gradeNums[0])}/${regular.subject} at ${slot.day} B${slot.block}`)
+            console.log(`     Conflicts with electives: ${conflictingElectives.map(e => `${e.teacher}/${e.gradeDisplay}/${e.subject}`).join(', ')}`)
+          }
+        }
+      }
+    }
+
+    if (electiveSlotConflicts.length === 0) {
+      console.log('  ✓ No elective slot conflicts found')
+    } else {
+      console.log(`  Found ${electiveSlotConflicts.length} elective slot conflicts`)
+      // Add issues for each conflict
+      for (const conflict of electiveSlotConflicts) {
+        issues.push({
+          type: 'elective_slot_conflict',
+          severity: 'warning',
+          teacher: conflict.teacher,
+          day: conflict.day,
+          block: conflict.block,
+          gradeDisplay: conflict.grade,
+          subject: conflict.subject,
+          description: `ELECTIVE CONFLICT: ${conflict.teacher}/${conflict.grade}/${conflict.subject} at ${conflict.day} B${conflict.block} conflicts with ${conflict.conflictingElectives.map(e => `${e.teacher}/${e.subject}`).join(', ')}`,
+          canFix: false
         })
       }
     }
@@ -4500,46 +5043,10 @@ export default function HistoryDetailPage() {
       // New fields for orphan correlation
       totalMissingSessions,
       orphanAnalysis,
-      orphanGuidance
+      orphanGuidance,
+      // Elective slot conflicts
+      electiveSlotConflicts: electiveSlotConflicts.length
     }
-  }
-
-  // Helper to parse grade display into individual grade names
-  function parseGradeDisplayToNames(gradeDisplay: string, validGradeNames: string[]): string[] {
-    const grades: string[] = []
-
-    if (gradeDisplay.toLowerCase().includes('kindergarten') || gradeDisplay === 'K') {
-      const kGrade = validGradeNames.find(g => g.toLowerCase().includes('kindergarten') || g === 'K')
-      if (kGrade) grades.push(kGrade)
-      return grades
-    }
-
-    const rangeMatch = gradeDisplay.match(/(\d+)(?:st|nd|rd|th)?[-–](\d+)(?:st|nd|rd|th)?/)
-    if (rangeMatch) {
-      const start = parseInt(rangeMatch[1])
-      const end = parseInt(rangeMatch[2])
-      for (let i = start; i <= end; i++) {
-        const suffix = i === 1 ? 'st' : i === 2 ? 'nd' : i === 3 ? 'rd' : 'th'
-        const gradeName = `${i}${suffix} Grade`
-        if (validGradeNames.includes(gradeName)) grades.push(gradeName)
-      }
-      return grades
-    }
-
-    if (validGradeNames.includes(gradeDisplay)) {
-      grades.push(gradeDisplay)
-      return grades
-    }
-
-    const singleMatch = gradeDisplay.match(/(\d+)(?:st|nd|rd|th)/)
-    if (singleMatch) {
-      const num = parseInt(singleMatch[1])
-      const suffix = num === 1 ? 'st' : num === 2 ? 'nd' : num === 3 ? 'rd' : 'th'
-      const gradeName = `${num}${suffix} Grade`
-      if (validGradeNames.includes(gradeName)) grades.push(gradeName)
-    }
-
-    return grades
   }
 
   function handleStartRepairMode() {
