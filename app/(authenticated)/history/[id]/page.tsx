@@ -133,7 +133,7 @@ export default function HistoryDetailPage() {
   const { setIsGenerating: setGlobalGenerating } = useGeneration()
   const [generation, setGeneration] = useState<Generation | null>(null)
   const [loading, setLoading] = useState(true)
-  const [selectedOption, setSelectedOption] = useState("1")
+  const [viewingOption, setViewingOption] = useState("1")
   const [viewMode, setViewMode] = useState<"teacher" | "grade">("teacher")
   const [saving, setSaving] = useState(false)
 
@@ -240,7 +240,7 @@ export default function HistoryDetailPage() {
     setSelectedFloatingBlock(null)
     setValidationErrors([])
     setWorkingSchedules(null)
-  }, [selectedOption])
+  }, [viewingOption])
 
   async function loadGeneration() {
     try {
@@ -249,7 +249,7 @@ export default function HistoryDetailPage() {
         const data = await res.json()
         setGeneration(data)
         if (data.selected_option) {
-          setSelectedOption(data.selected_option.toString())
+          setViewingOption(data.selected_option.toString())
         }
       } else {
         toast.error("Schedule not found")
@@ -265,9 +265,9 @@ export default function HistoryDetailPage() {
   useEffect(() => {
     if (generation) {
       const shortId = generation.id.slice(0, 8)
-      document.title = `${generation.quarter?.name || 'Schedule'} Rev ${selectedOption} - ${shortId}`
+      document.title = `${generation.quarter?.name || 'Schedule'} Rev ${viewingOption} - ${shortId}`
     }
-  }, [generation, selectedOption])
+  }, [generation, viewingOption])
 
   // Detect class changes when generation loads
   useEffect(() => {
@@ -411,7 +411,7 @@ export default function HistoryDetailPage() {
   }
 
   async function handleRegenerate() {
-    if (!generation || !selectedResult) return
+    if (!generation || !generation.options || generation.options.length === 0) return
 
     if (selectedForRegen.size === 0) {
       toast.error("Select at least one teacher to regenerate")
@@ -432,6 +432,8 @@ export default function HistoryDetailPage() {
       let grades: string[] = [] // All grade names from database - initialize to empty
       // Rules ALWAYS come from snapshot - they are locked to what was used when schedule was generated
       const rules = parseRulesFromSnapshot(generation.stats!.rules_snapshot || [])
+      // Stats for validation - use updated snapshots when using current classes
+      let statsForRegenValidation = generation.stats
 
       if (useCurrentClasses) {
         // Fetch current teachers, classes, and grades from database (but NOT rules - those stay from snapshot)
@@ -486,6 +488,48 @@ export default function HistoryDetailPage() {
             fixedSlots: fixedSlots.length > 0 ? fixedSlots : undefined,
           }
         })
+
+        // Build updated stats for validation with current class configuration
+        const gradesMap = new Map(gradesRaw.map((g: { id: string; name: string; display_name: string }) => [g.id, g]))
+        const classesSnapshot = classesRaw.map((c: CurrentClass & { grade_ids?: string[] }) => {
+          const gradeIds = c.grade_ids?.length ? c.grade_ids : (c.grade?.id ? [c.grade.id] : [])
+          const gradesArray = gradeIds.map((gid: string) => {
+            const g = gradesMap.get(gid) as { id: string; name: string; display_name: string } | undefined
+            return g ? { id: g.id, name: g.name, display_name: g.display_name } : null
+          }).filter(Boolean)
+          return {
+            teacher_id: c.teacher?.id || null,
+            teacher_name: c.teacher?.name || null,
+            grade_id: c.grade?.id || null,
+            grade_ids: gradeIds,
+            grades: gradesArray,
+            is_elective: c.is_elective || false,
+            subject_id: c.subject?.id || null,
+            subject_name: c.subject?.name || null,
+            days_per_week: c.days_per_week,
+            restrictions: (c.restrictions || []).map((r) => ({
+              restriction_type: r.restriction_type,
+              value: r.value,
+            })),
+          }
+        })
+        const teachersSnapshot = teachersRaw.map((t: { id: string; name: string; status: string; can_supervise_study_hall: boolean }) => ({
+          id: t.id,
+          name: t.name,
+          status: t.status,
+          canSuperviseStudyHall: t.can_supervise_study_hall,
+        }))
+        const gradesSnapshot = gradesRaw.map((g: { id: string; name: string; display_name: string }) => ({
+          id: g.id,
+          name: g.name,
+          display_name: g.display_name,
+        }))
+        statsForRegenValidation = {
+          ...generation.stats,
+          classes_snapshot: classesSnapshot,
+          teachers_snapshot: teachersSnapshot,
+          grades_snapshot: gradesSnapshot,
+        }
       } else {
         // Parse data from snapshots
         teachers = parseTeachersFromSnapshot(generation.stats!.teachers_snapshot!)
@@ -494,17 +538,38 @@ export default function HistoryDetailPage() {
         grades = (generation.stats!.grades_snapshot || []).map((g: { display_name: string }) => g.display_name)
       }
 
+      // Debug: log classes for selected teachers being sent to solver
+      const selectedTeacherClasses = classes.filter(c => selectedForRegen.has(c.teacher))
+      console.log('[Regen] Classes for SELECTED teachers sent to solver:',
+        selectedTeacherClasses.map(c => ({
+          teacher: c.teacher,
+          grade: c.gradeDisplay || c.grade,
+          subject: c.subject,
+          daysPerWeek: c.daysPerWeek
+        }))
+      )
+
+      // Get the ACTUAL original schedule from generation.options (NOT selectedResult which could be a preview)
+      const actualOriginalSchedule = generation.options[parseInt(viewingOption) - 1]
+      if (!actualOriginalSchedule) {
+        toast.error("Could not find original schedule")
+        return
+      }
+
       // Build locked teacher schedules (all teachers EXCEPT those selected for regen)
+      // IMPORTANT: Deep copy to prevent mutation of the original schedule
+      // IMPORTANT: Use actualOriginalSchedule, NOT selectedResult (which could be a previous preview)
       const lockedSchedules: Record<string, TeacherSchedule> = {}
-      for (const teacher of Object.keys(selectedResult.teacherSchedules)) {
+      for (const teacher of Object.keys(actualOriginalSchedule.teacherSchedules)) {
         if (!selectedForRegen.has(teacher)) {
-          lockedSchedules[teacher] = selectedResult.teacherSchedules[teacher]
+          lockedSchedules[teacher] = JSON.parse(JSON.stringify(actualOriginalSchedule.teacherSchedules[teacher]))
         }
       }
+      console.log('[Regen] Built lockedSchedules from actualOriginalSchedule (generation.options), NOT selectedResult')
 
       // Find which regenerated teachers had study halls in the original schedule
       // These teachers must be assigned study halls again
-      const teachersNeedingStudyHalls = (selectedResult.studyHallAssignments || [])
+      const teachersNeedingStudyHalls = (actualOriginalSchedule.studyHallAssignments || [])
         .filter(sh => sh.teacher && selectedForRegen.has(sh.teacher))
         .map(sh => sh.teacher as string)
 
@@ -539,7 +604,7 @@ export default function HistoryDetailPage() {
 
       // Helper to check if result matches preview or original
       const checkForMatches = (schedules: Record<string, TeacherSchedule>) => {
-        const matchesOriginal = schedulesMatch(schedules, selectedResult.teacherSchedules)
+        const matchesOriginal = schedulesMatch(schedules, actualOriginalSchedule.teacherSchedules)
         const matchesPreview = previewOption && schedulesMatch(schedules, previewOption.teacherSchedules)
         return { matchesOriginal, matchesPreview }
       }
@@ -727,7 +792,20 @@ export default function HistoryDetailPage() {
       }
 
       // Validate the full schedule to catch any logic errors
-      const scheduleErrors = validateFullSchedule(newOption, generation.stats)
+      // Use statsForRegenValidation which has updated class config when using current classes
+      console.log('[Regen Validation] useCurrentClasses:', useCurrentClasses)
+      const selectedTeacherSnapshotClasses = statsForRegenValidation?.classes_snapshot?.filter(
+        c => selectedForRegen.has(c.teacher_name || '')
+      ) || []
+      console.log('[Regen Validation] Classes for SELECTED teachers in validation snapshot:',
+        selectedTeacherSnapshotClasses.map(c => ({
+          teacher: c.teacher_name,
+          grade: c.grades?.map(g => g.display_name).join(', ') || 'none',
+          subject: c.subject_name,
+          days_per_week: c.days_per_week
+        }))
+      )
+      const scheduleErrors = validateFullSchedule(newOption, statsForRegenValidation)
 
       // CRITICAL: Validate that locked teachers were preserved correctly
       const lockedTeacherErrors: ValidationError[] = []
@@ -768,10 +846,45 @@ export default function HistoryDetailPage() {
         console.error(`[Regen] CRITICAL: ${lockedTeacherErrors.length} locked teacher modifications detected!`, lockedTeacherErrors)
       }
 
-      const allErrors = [...scheduleErrors, ...lockedTeacherErrors]
+      // Filter errors to only show those involving regenerated teachers
+      // (locked teachers' errors already existed and aren't relevant to this preview)
+      const relevantScheduleErrors = scheduleErrors.filter(error => {
+        // Check if any cell involves a regenerated teacher
+        if (error.cells && error.cells.length > 0) {
+          return error.cells.some(cell => selectedForRegen.has(cell.teacher))
+        }
+        // For session_count errors, parse teacher from message format: "[Session Count] Teacher/Grade/Subject: ..."
+        if (error.type === 'session_count') {
+          const match = error.message.match(/\[Session Count\] ([^/]+)\//)
+          if (match) {
+            return selectedForRegen.has(match[1])
+          }
+        }
+        // For study_hall_coverage, include it (it's a global concern)
+        if (error.type === 'study_hall_coverage') {
+          return true
+        }
+        // For back_to_back, parse teacher from message
+        if (error.type === 'back_to_back') {
+          const match = error.message.match(/\[Back-to-Back\] ([^:]+):/)
+          if (match) {
+            return selectedForRegen.has(match[1])
+          }
+        }
+        return false
+      })
+
+      const allErrors = [...relevantScheduleErrors, ...lockedTeacherErrors]
+
+      // Log session count errors specifically for debugging
+      const sessionErrors = relevantScheduleErrors.filter(e => e.type === 'session_count')
+      if (sessionErrors.length > 0) {
+        console.log('[Regen Validation] Session count errors (for selected teachers):', sessionErrors.map(e => e.message))
+      }
+
       if (allErrors.length > 0) {
         setValidationErrors(allErrors)
-        console.warn('[Regen] Validation errors found:', allErrors)
+        console.warn('[Regen] Validation errors found (filtered to selected teachers):', allErrors)
         toast.error(`${allErrors.length} validation issue${allErrors.length !== 1 ? 's' : ''} detected - review before applying`)
       } else {
         setValidationErrors([])
@@ -792,7 +905,243 @@ export default function HistoryDetailPage() {
   }
 
   async function handleKeepPreview(saveAsNew: boolean = false) {
-    if (!generation || !previewOption) return
+    // Debug logging BEFORE early return to catch silent failures
+    console.log('[Save] handleKeepPreview called')
+    console.log('[Save] - generation exists:', !!generation)
+    console.log('[Save] - previewOption exists:', !!previewOption)
+    console.log('[Save] - selectedResult exists:', !!selectedResult)
+
+    if (!generation || !previewOption || !selectedResult) {
+      console.log('[Save] Early return - missing required data')
+      return
+    }
+
+    // For regen mode, build a merged option that ONLY takes selected teachers from preview
+    // and keeps EVERYTHING ELSE from the original (safeguard against solver bugs)
+    let optionToSave: ScheduleOption = previewOption
+
+    // Debug logging to diagnose merge issues
+    console.log('[Save] Proceeding with save:')
+    console.log('[Save] - previewType:', previewType)
+    console.log('[Save] - previewTeachers:', Array.from(previewTeachers))
+    console.log('[Save] - previewTeachers.size:', previewTeachers.size)
+    console.log('[Save] - condition check:', previewType === 'regen' && previewTeachers.size > 0)
+
+    if (previewType === 'regen' && previewTeachers.size > 0) {
+      const DAYS = ["Mon", "Tues", "Wed", "Thurs", "Fri"]
+
+      // Get the ACTUAL original option from the database (not selectedResult which could be preview)
+      const actualOriginal = generation.options[parseInt(viewingOption) - 1]
+      if (!actualOriginal) {
+        console.log('[Save] ERROR: Could not find original option in generation.options')
+        return
+      }
+
+      // Start with a COMPLETE deep copy of the original option
+      const originalOption: ScheduleOption = JSON.parse(JSON.stringify(actualOriginal))
+      console.log('[Save] Using actualOriginal from generation.options, NOT selectedResult (which could be preview)')
+
+      // CUT only the selected teachers' schedules from the preview
+      const selectedTeacherSchedules: Record<string, TeacherSchedule> = {}
+      for (const teacher of previewTeachers) {
+        if (previewOption.teacherSchedules[teacher]) {
+          selectedTeacherSchedules[teacher] = JSON.parse(
+            JSON.stringify(previewOption.teacherSchedules[teacher])
+          )
+        }
+      }
+
+      // Merge: original + selected teachers from preview
+      const mergedTeacherSchedules: Record<string, TeacherSchedule> = {
+        ...originalOption.teacherSchedules,
+        ...selectedTeacherSchedules,  // Overwrite only selected teachers
+      }
+
+      // DON'T rebuild grade schedules from scratch - that loses multi-grade elective mappings
+      // Instead: start with ORIGINAL grade schedules, then surgically update only selected teachers' slots
+      const allGrades = Object.keys(originalOption.gradeSchedules)
+      const mergedGradeSchedules: Record<string, GradeSchedule> = JSON.parse(
+        JSON.stringify(originalOption.gradeSchedules)
+      )
+
+      // Step 1: Remove selected teachers from grade schedules (clear their old slots)
+      for (const grade of allGrades) {
+        for (const day of DAYS) {
+          for (let block = 1; block <= 5; block++) {
+            const entry = mergedGradeSchedules[grade]?.[day]?.[block]
+            if (entry && previewTeachers.has(entry[0])) {
+              // This slot was taught by a selected teacher - clear it
+              mergedGradeSchedules[grade][day][block] = null
+            }
+          }
+        }
+      }
+
+      // Step 2: Add selected teachers' NEW slots from preview grade schedules
+      const previewGradeSchedules = previewOption.gradeSchedules
+      for (const grade of allGrades) {
+        for (const day of DAYS) {
+          for (let block = 1; block <= 5; block++) {
+            const previewEntry = previewGradeSchedules[grade]?.[day]?.[block]
+            if (previewEntry && previewTeachers.has(previewEntry[0])) {
+              // This slot is taught by a selected teacher in preview - add it
+              mergedGradeSchedules[grade][day][block] = previewEntry
+            }
+          }
+        }
+      }
+
+      // Merge study hall assignments: keep original, update only if teacher was selected
+      const mergedStudyHalls = originalOption.studyHallAssignments.map(sh => {
+        if (sh.teacher && previewTeachers.has(sh.teacher)) {
+          // Find the updated study hall for this group from preview
+          const previewSh = previewOption.studyHallAssignments.find(
+            psh => psh.group === sh.group && previewTeachers.has(psh.teacher || '')
+          )
+          return previewSh || sh
+        }
+        return sh
+      })
+
+      // Merge teacher stats: keep original, update only selected teachers
+      const mergedTeacherStats = originalOption.teacherStats.map(stat => {
+        if (previewTeachers.has(stat.teacher)) {
+          const previewStat = previewOption.teacherStats.find(ps => ps.teacher === stat.teacher)
+          return previewStat || stat
+        }
+        return stat
+      })
+
+      // Build merged option starting from ORIGINAL, replacing only what changed
+      optionToSave = {
+        ...originalOption,
+        teacherSchedules: mergedTeacherSchedules,
+        gradeSchedules: mergedGradeSchedules,
+        studyHallAssignments: mergedStudyHalls,
+        teacherStats: mergedTeacherStats,
+      }
+
+      console.log('[Save] Built merged option - CUT only these teachers from preview:', Array.from(previewTeachers))
+
+      // Debug: Compare ALL locked teachers across original, preview, and merged
+      const allTeachers = Object.keys(originalOption.teacherSchedules)
+      const lockedTeacherNames = allTeachers.filter(t => !previewTeachers.has(t))
+
+      console.log('[Save] Checking ALL locked teachers:')
+      let allIdentical = true
+      const changedTeachers: string[] = []
+
+      for (const teacher of lockedTeacherNames) {
+        const originalSchedule = JSON.stringify(originalOption.teacherSchedules[teacher])
+        const mergedSchedule = JSON.stringify(mergedTeacherSchedules[teacher])
+        const isIdentical = originalSchedule === mergedSchedule
+
+        if (!isIdentical) {
+          allIdentical = false
+          changedTeachers.push(teacher)
+          console.log(`[Save] MISMATCH for ${teacher}:`)
+          console.log(`[Save] - Original:`, originalOption.teacherSchedules[teacher])
+          console.log(`[Save] - Merged:`, mergedTeacherSchedules[teacher])
+        }
+      }
+
+      if (allIdentical) {
+        console.log('[Save] ✓ All', lockedTeacherNames.length, 'locked teachers have identical Original and Merged schedules')
+      } else {
+        console.log('[Save] ✗ PROBLEM:', changedTeachers.length, 'locked teachers have DIFFERENT schedules:', changedTeachers)
+      }
+
+      // Also check grade schedules
+      console.log('[Save] Checking grade schedules:')
+      const allGradeNames = Object.keys(originalOption.gradeSchedules)
+      let gradesIdentical = true
+      const changedGrades: string[] = []
+
+      for (const grade of allGradeNames) {
+        const originalGS = JSON.stringify(originalOption.gradeSchedules[grade])
+        const mergedGS = JSON.stringify(mergedGradeSchedules[grade])
+        if (originalGS !== mergedGS) {
+          gradesIdentical = false
+          changedGrades.push(grade)
+        }
+      }
+
+      if (gradesIdentical) {
+        console.log('[Save] ✓ All grade schedules identical')
+      } else {
+        console.log('[Save] ✗ Grade schedules changed for:', changedGrades)
+      }
+    }
+
+    // If using current classes for regen, build updated stats BEFORE validation
+    // so validation checks against the new class configuration
+    let statsForValidation = generation.stats
+    if (useCurrentClasses && previewType === 'regen') {
+      try {
+        // Fetch current data to create new snapshots (excluding rules - those stay from original)
+        const [classesRes, teachersRes, gradesRes] = await Promise.all([
+          fetch(`/api/classes?quarter_id=${generation.quarter_id}`),
+          fetch('/api/teachers'),
+          fetch('/api/grades'),
+        ])
+
+        const classesRaw = await classesRes.json()
+        const teachersRaw = await teachersRes.json()
+        const gradesRaw = await gradesRes.json()
+
+        // Build new snapshots
+        const gradesMap = new Map(gradesRaw.map((g: { id: string; name: string; display_name: string }) => [g.id, g]))
+
+        const classesSnapshot = classesRaw.map((c: CurrentClass & { grade_ids?: string[] }) => {
+          const gradeIds = c.grade_ids?.length ? c.grade_ids : (c.grade?.id ? [c.grade.id] : [])
+          const gradesArray = gradeIds.map((gid: string) => {
+            const g = gradesMap.get(gid) as { id: string; name: string; display_name: string } | undefined
+            return g ? { id: g.id, name: g.name, display_name: g.display_name } : null
+          }).filter(Boolean)
+
+          return {
+            teacher_id: c.teacher?.id || null,
+            teacher_name: c.teacher?.name || null,
+            grade_id: c.grade?.id || null,
+            grade_ids: gradeIds,
+            grades: gradesArray,
+            is_elective: c.is_elective || false,
+            subject_id: c.subject?.id || null,
+            subject_name: c.subject?.name || null,
+            days_per_week: c.days_per_week,
+            restrictions: (c.restrictions || []).map((r) => ({
+              restriction_type: r.restriction_type,
+              value: r.value,
+            })),
+          }
+        })
+
+        const teachersSnapshot = teachersRaw.map((t: { id: string; name: string; status: string; can_supervise_study_hall: boolean }) => ({
+          id: t.id,
+          name: t.name,
+          status: t.status,
+          canSuperviseStudyHall: t.can_supervise_study_hall,
+        }))
+
+        const gradesSnapshot = gradesRaw.map((g: { id: string; name: string; display_name: string }) => ({
+          id: g.id,
+          name: g.name,
+          display_name: g.display_name,
+        }))
+
+        // Update class/teacher/grade snapshots but keep rules_snapshot unchanged
+        statsForValidation = {
+          ...generation.stats,
+          classes_snapshot: classesSnapshot,
+          teachers_snapshot: teachersSnapshot,
+          grades_snapshot: gradesSnapshot,
+          // rules_snapshot intentionally NOT updated - stays from original generation
+        }
+      } catch (error) {
+        console.error('Failed to build updated snapshots for validation:', error)
+        // Continue with original stats
+      }
+    }
 
     // Define the save logic
     const doSave = async () => {
@@ -801,10 +1150,10 @@ export default function HistoryDetailPage() {
 
       if (!saveAsNew) {
         // Update current option in place
-        const optionIndex = parseInt(selectedOption) - 1
+        const optionIndex = parseInt(viewingOption) - 1
         updatedOptions = [...generation.options]
         updatedOptions[optionIndex] = {
-          ...previewOption,
+          ...optionToSave,
           optionNumber: optionIndex + 1,
         }
         successMessage = previewType === "study-hall"
@@ -814,81 +1163,14 @@ export default function HistoryDetailPage() {
         // Save as new option
         const newOptionNumber = generation.options.length + 1
         updatedOptions = [...generation.options, {
-          ...previewOption,
+          ...optionToSave,
           optionNumber: newOptionNumber,
         }]
         successMessage = `Saved as Rev ${newOptionNumber}`
       }
 
-      // If we used current classes for regeneration, update the class/teacher/grade snapshots
-      // NOTE: We do NOT update rules_snapshot - rules are locked to what was used when schedule was generated
-      let updatedStats = generation.stats
-      if (useCurrentClasses && previewType === 'regen') {
-        try {
-          // Fetch current data to create new snapshots (excluding rules - those stay from original)
-          const [classesRes, teachersRes, gradesRes] = await Promise.all([
-            fetch(`/api/classes?quarter_id=${generation.quarter_id}`),
-            fetch('/api/teachers'),
-            fetch('/api/grades'),
-          ])
-
-          const classesRaw = await classesRes.json()
-          const teachersRaw = await teachersRes.json()
-          const gradesRaw = await gradesRes.json()
-
-          // Build new snapshots
-          const gradesMap = new Map(gradesRaw.map((g: { id: string; name: string; display_name: string }) => [g.id, g]))
-
-          const classesSnapshot = classesRaw.map((c: CurrentClass & { grade_ids?: string[] }) => {
-            const gradeIds = c.grade_ids?.length ? c.grade_ids : (c.grade?.id ? [c.grade.id] : [])
-            const gradesArray = gradeIds.map((gid: string) => {
-              const g = gradesMap.get(gid) as { id: string; name: string; display_name: string } | undefined
-              return g ? { id: g.id, name: g.name, display_name: g.display_name } : null
-            }).filter(Boolean)
-
-            return {
-              teacher_id: c.teacher?.id || null,
-              teacher_name: c.teacher?.name || null,
-              grade_id: c.grade?.id || null,
-              grade_ids: gradeIds,
-              grades: gradesArray,
-              is_elective: c.is_elective || false,
-              subject_id: c.subject?.id || null,
-              subject_name: c.subject?.name || null,
-              days_per_week: c.days_per_week,
-              restrictions: (c.restrictions || []).map((r) => ({
-                restriction_type: r.restriction_type,
-                value: r.value,
-              })),
-            }
-          })
-
-          const teachersSnapshot = teachersRaw.map((t: { id: string; name: string; status: string; can_supervise_study_hall: boolean }) => ({
-            id: t.id,
-            name: t.name,
-            status: t.status,
-            canSuperviseStudyHall: t.can_supervise_study_hall,
-          }))
-
-          const gradesSnapshot = gradesRaw.map((g: { id: string; name: string; display_name: string }) => ({
-            id: g.id,
-            name: g.name,
-            display_name: g.display_name,
-          }))
-
-          // Update class/teacher/grade snapshots but keep rules_snapshot unchanged
-          updatedStats = {
-            ...generation.stats,
-            classes_snapshot: classesSnapshot,
-            teachers_snapshot: teachersSnapshot,
-            grades_snapshot: gradesSnapshot,
-            // rules_snapshot intentionally NOT updated - stays from original generation
-          }
-        } catch (error) {
-          console.error('Failed to update snapshots:', error)
-          // Continue without updating snapshots
-        }
-      }
+      // Use the pre-built stats (with updated snapshots if using current classes)
+      const updatedStats = statsForValidation
 
       const newOptionNumber = saveAsNew ? generation.options.length + 1 : null
       const updateRes = await fetch(`/api/history/${id}`, {
@@ -909,7 +1191,7 @@ export default function HistoryDetailPage() {
           ...(newOptionNumber && { selected_option: newOptionNumber }),
         })
         if (saveAsNew) {
-          setSelectedOption(newOptionNumber!.toString())
+          setViewingOption(newOptionNumber!.toString())
         }
         setPreviewOption(null)
         setPreviewType(null)
@@ -929,8 +1211,9 @@ export default function HistoryDetailPage() {
       }
     }
 
-    // Run validation with visual modal, then save if passed
-    runValidationWithModal(previewOption, generation.stats, doSave)
+    // Run validation with visual modal on the MERGED option, then save if passed
+    // Use statsForValidation which has updated class snapshots when using current classes
+    runValidationWithModal(optionToSave, statsForValidation, doSave)
   }
 
   function handleDiscardPreview() {
@@ -963,7 +1246,7 @@ export default function HistoryDetailPage() {
 
   function generateStudyHallArrangement() {
     // Always use the current saved option, not a previous preview
-    const currentOption = generation?.options?.[parseInt(selectedOption) - 1]
+    const currentOption = generation?.options?.[parseInt(viewingOption) - 1]
     if (!generation || !currentOption) return
 
     // Use snapshot teachers (not live DB)
@@ -1034,29 +1317,61 @@ export default function HistoryDetailPage() {
         .filter((_, i) => i !== optionIndex)
         .map((opt, i) => ({ ...opt, optionNumber: i + 1 }))
 
-      // Save to the server
+      // Check if we're deleting the PRIMARY revision (generation.selected_option)
+      const primaryRevision = generation.selected_option || 1
+      let newPrimaryRevision: number | undefined = undefined
+
+      if (primaryRevision === optionNum) {
+        // Deleting the primary - pick a new one (prefer previous, fall back to first)
+        if (optionIndex > 0) {
+          newPrimaryRevision = optionIndex // Previous option (now renumbered)
+        } else {
+          newPrimaryRevision = 1 // First remaining option
+        }
+        console.log('[Delete] Deleting PRIMARY revision, new primary will be:', newPrimaryRevision)
+      } else if (primaryRevision > optionNum) {
+        // Primary is after deleted option - adjust the number
+        newPrimaryRevision = primaryRevision - 1
+        console.log('[Delete] Primary revision adjusted from', primaryRevision, 'to', newPrimaryRevision)
+      }
+
+      // Save to the server (include selected_option if it changed)
       const updateRes = await fetch(`/api/history/${id}`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ options: updatedOptions }),
+        body: JSON.stringify({
+          options: updatedOptions,
+          ...(newPrimaryRevision !== undefined && { selected_option: newPrimaryRevision }),
+        }),
       })
 
       if (updateRes.ok) {
-        setGeneration({ ...generation, options: updatedOptions })
-        const currentSelection = parseInt(selectedOption)
+        setGeneration({
+          ...generation,
+          options: updatedOptions,
+          ...(newPrimaryRevision !== undefined && { selected_option: newPrimaryRevision }),
+        })
+        const currentSelection = parseInt(viewingOption)
+        console.log('[Delete] Deleted option:', optionNum, 'Current tab:', currentSelection)
+        console.log('[Delete] Remaining options count:', updatedOptions.length)
         if (currentSelection === optionNum) {
-          // Deleted the selected option - select nearest revision
+          // Deleted the viewed tab - switch to nearest revision
           // Prefer previous option (smaller number), fall back to next
+          let newSelection: string
           if (optionIndex > 0) {
-            // There's an option before the deleted one
-            setSelectedOption(optionIndex.toString())
+            // There's an option before the deleted one - select it
+            newSelection = optionIndex.toString()
           } else {
             // No option before, select the first one (was second, now first)
-            setSelectedOption("1")
+            newSelection = "1"
           }
+          console.log('[Delete] Deleted viewed tab, switching to:', newSelection)
+          setViewingOption(newSelection)
         } else if (currentSelection > optionNum) {
-          // Adjust selection if we deleted an earlier option
-          setSelectedOption((currentSelection - 1).toString())
+          // Adjust tab selection if we deleted an earlier option
+          const newSelection = (currentSelection - 1).toString()
+          console.log('[Delete] Deleted earlier option, adjusting tab to:', newSelection)
+          setViewingOption(newSelection)
         }
         toast.success(`Deleted Revision ${optionNum}`)
       } else {
@@ -1200,7 +1515,7 @@ export default function HistoryDetailPage() {
       if (updateRes.ok) {
         setGeneration({ ...generation, options: updatedOptions })
         // Switch to the new revision
-        setSelectedOption(updatedOptions.length.toString())
+        setViewingOption(updatedOptions.length.toString())
         toast.success(`Created Revision ${updatedOptions.length}`)
       } else {
         toast.error("Failed to duplicate revision")
@@ -1214,7 +1529,7 @@ export default function HistoryDetailPage() {
   async function handleMarkAsSelected() {
     if (!generation) return
 
-    const optionNum = parseInt(selectedOption)
+    const optionNum = parseInt(viewingOption)
 
     try {
       const updateRes = await fetch(`/api/history/${id}`, {
@@ -1850,11 +2165,11 @@ export default function HistoryDetailPage() {
   async function handleApplySwap(createNew: boolean = false) {
     if (!generation || !selectedResult || !swapWorkingSchedules || swapCount === 0) return
 
-    const optionIndex = parseInt(selectedOption) - 1
+    const optionIndex = parseInt(viewingOption) - 1
 
     // Save current state for undo
     const previousOptions: ScheduleOption[] = JSON.parse(JSON.stringify(generation.options))
-    const previousSelectedOption = selectedOption
+    const previousSelectedOption = viewingOption
 
     // Create updated option with working schedules
     const DAYS = ["Mon", "Tues", "Wed", "Thurs", "Fri"]
@@ -1908,7 +2223,7 @@ export default function HistoryDetailPage() {
       } else {
         updatedOptions = [...generation.options]
         updatedOptions[optionIndex] = updatedOption
-        successMessage = `Applied ${swapCount} swap${swapCount !== 1 ? 's' : ''} to Rev ${selectedOption}`
+        successMessage = `Applied ${swapCount} swap${swapCount !== 1 ? 's' : ''} to Rev ${viewingOption}`
       }
 
       try {
@@ -1929,7 +2244,7 @@ export default function HistoryDetailPage() {
             ...(newOptionNum && { selected_option: newOptionNum }),
           })
           if (newOptionNumber) {
-            setSelectedOption(newOptionNumber)
+            setViewingOption(newOptionNumber)
           }
           exitSwapMode()
 
@@ -1952,7 +2267,7 @@ export default function HistoryDetailPage() {
                       })
                       if (undoRes.ok) {
                         setGeneration((prev) => prev ? { ...prev, options: previousOptions } : prev)
-                        setSelectedOption(previousSelectedOption)
+                        setViewingOption(previousSelectedOption)
                         toast.success("Changes undone")
                       } else {
                         toast.error("Failed to undo")
@@ -3018,11 +3333,11 @@ export default function HistoryDetailPage() {
       return
     }
 
-    const optionIndex = parseInt(selectedOption) - 1
+    const optionIndex = parseInt(viewingOption) - 1
 
     // Save current state for undo
     const previousOptions: ScheduleOption[] = JSON.parse(JSON.stringify(generation.options))
-    const previousSelectedOption = selectedOption
+    const previousSelectedOption = viewingOption
 
     // Build updated option with working schedules
     const DAYS = ["Mon", "Tues", "Wed", "Thurs", "Fri"]
@@ -3123,14 +3438,14 @@ export default function HistoryDetailPage() {
 
           // Switch to the new option if created
           if (createNew) {
-            setSelectedOption(String(newOptionIndex))
+            setViewingOption(String(newOptionIndex))
           }
 
           // Show success toast with undo
           const moveCount = floatingBlocks.length
           const message = createNew
             ? `Created Rev ${newOptionIndex} with ${moveCount} change${moveCount !== 1 ? 's' : ''}`
-            : `Applied ${moveCount} change${moveCount !== 1 ? 's' : ''} to Rev ${selectedOption}`
+            : `Applied ${moveCount} change${moveCount !== 1 ? 's' : ''} to Rev ${viewingOption}`
 
           // Dismiss any existing undo toast
           if (undoToastId.current) toast.dismiss(undoToastId.current)
@@ -3152,7 +3467,7 @@ export default function HistoryDetailPage() {
                       if (undoRes.ok) {
                         setGeneration((prev) => prev ? { ...prev, options: previousOptions } : prev)
                         if (createNew) {
-                          setSelectedOption(previousSelectedOption)
+                          setViewingOption(previousSelectedOption)
                         }
                         toast.success("Changes undone")
                       } else {
@@ -3188,9 +3503,15 @@ export default function HistoryDetailPage() {
     runValidationWithModal(updatedOption, generation.stats, doSave)
   }
 
-  // Show preview if available and toggled on, otherwise show selected option
-  const currentOption = generation?.options?.[parseInt(selectedOption) - 1]
-  const selectedResult = (previewOption && showingPreview) ? previewOption : currentOption
+  // TWO DISTINCT CONCEPTS - DO NOT CONFUSE:
+  // 1. savedOption: The ACTUAL saved schedule from generation.options (what's in the database)
+  // 2. displayedOption: What's currently being SHOWN to the user (could be preview or saved)
+  const savedOption = generation?.options?.[parseInt(viewingOption) - 1] || null
+  const displayedOption = (previewOption && showingPreview) ? previewOption : savedOption
+
+  // Legacy alias - gradually migrate usages to savedOption or displayedOption as appropriate
+  const selectedResult = displayedOption
+  const currentOption = savedOption
 
   if (loading) {
     return (
@@ -3278,7 +3599,7 @@ export default function HistoryDetailPage() {
             <div className="flex flex-col gap-1">
               <div className="inline-flex rounded-lg bg-gray-100 p-1">
                 {generation.options.map((opt, i) => {
-                  const isThisOption = selectedOption === (i + 1).toString()
+                  const isThisOption = viewingOption === (i + 1).toString()
                   const isActive = isThisOption && (!previewOption || !showingPreview)
                   const shPlaced = opt?.studyHallsPlaced ?? 0
                   const shTotal = opt?.studyHallAssignments?.length || 6
@@ -3295,7 +3616,7 @@ export default function HistoryDetailPage() {
                         if (previewOption && isThisOption) {
                           setShowingPreview(false)
                         } else {
-                          setSelectedOption((i + 1).toString())
+                          setViewingOption((i + 1).toString())
                         }
                       }}
                       disabled={!isClickable}
@@ -3329,7 +3650,7 @@ export default function HistoryDetailPage() {
               {!previewOption && !regenMode && !swapMode && !freeformMode && !studyHallMode && (
                 <>
                   <a
-                    href={`/api/export?generation_id=${id}&option=${selectedOption}&format=xlsx`}
+                    href={`/api/export?generation_id=${id}&option=${viewingOption}&format=xlsx`}
                     download
                   >
                     <Button variant="outline" size="sm" className="gap-1">
@@ -3338,7 +3659,7 @@ export default function HistoryDetailPage() {
                     </Button>
                   </a>
                   <a
-                    href={`/api/export?generation_id=${id}&option=${selectedOption}&format=csv`}
+                    href={`/api/export?generation_id=${id}&option=${viewingOption}&format=csv`}
                     download
                   >
                     <Button variant="outline" size="sm" className="gap-1">
@@ -3405,7 +3726,7 @@ export default function HistoryDetailPage() {
                     <Copy className="h-4 w-4 mr-2" />
                     Duplicate Revision
                   </DropdownMenuItem>
-                  {generation.selected_option !== parseInt(selectedOption) && !previewOption && (
+                  {generation.selected_option !== parseInt(viewingOption) && !previewOption && (
                     <DropdownMenuItem onClick={handleMarkAsSelected}>
                       <Star className="h-4 w-4 mr-2" />
                       Mark as Selected
@@ -3415,11 +3736,11 @@ export default function HistoryDetailPage() {
                     <>
                       <DropdownMenuSeparator />
                       <DropdownMenuItem
-                        onClick={() => handleDeleteOption(parseInt(selectedOption) - 1)}
+                        onClick={() => handleDeleteOption(parseInt(viewingOption) - 1)}
                         className="text-red-600 focus:text-red-600"
                       >
                         <Trash2 className="h-4 w-4 mr-2" />
-                        Delete Revision {selectedOption}
+                        Delete Revision {viewingOption}
                       </DropdownMenuItem>
                     </>
                   )}
@@ -3529,7 +3850,7 @@ export default function HistoryDetailPage() {
                       )}
                     </div>
                     <span className="text-amber-600/70">
-                      {generation.options.length === 1 ? "Will create Revision 2" : `Will update Revision ${selectedOption}`}
+                      {generation.options.length === 1 ? "Will create Revision 2" : `Will update Revision ${viewingOption}`}
                     </span>
                   </div>
                 </div>
@@ -3619,7 +3940,7 @@ export default function HistoryDetailPage() {
                       )}
                     </div>
                     <span className="text-indigo-600/70">
-                      {generation.options.length === 1 ? "Will create Revision 2" : `Will update Revision ${selectedOption}`}
+                      {generation.options.length === 1 ? "Will create Revision 2" : `Will update Revision ${viewingOption}`}
                     </span>
                   </div>
                   {/* Validation errors list */}
@@ -3718,7 +4039,7 @@ export default function HistoryDetailPage() {
                     )}
                     {previewOption && (
                       <span className="text-violet-600/70">
-                        {generation.options.length === 1 ? "Will create Revision 2" : `Will update Revision ${selectedOption}`}
+                        {generation.options.length === 1 ? "Will create Revision 2" : `Will update Revision ${viewingOption}`}
                       </span>
                     )}
                   </div>
@@ -3931,7 +4252,7 @@ export default function HistoryDetailPage() {
                         )}
                         {previewOption && (
                           <span className="text-sky-600/70">
-                            {generation.options.length === 1 ? "Will create Revision 2" : `Will update Revision ${selectedOption}`}
+                            {generation.options.length === 1 ? "Will create Revision 2" : `Will update Revision ${viewingOption}`}
                           </span>
                         )}
                       </div>
@@ -4082,7 +4403,9 @@ export default function HistoryDetailPage() {
                                     ? workingSchedules.teacherSchedules[teacher]
                                     : swapMode && swapWorkingSchedules && showingPreview
                                       ? swapWorkingSchedules.teacherSchedules[teacher]
-                                      : schedule
+                                      : previewOption && previewType === "regen" && showingPreview
+                                        ? previewOption.teacherSchedules[teacher]
+                                        : schedule
                                 }
                                 type="teacher"
                                 name={teacher}
@@ -4161,7 +4484,13 @@ export default function HistoryDetailPage() {
                             </div>
                           )
                         })
-                    : Object.entries(swapMode && swapWorkingSchedules && showingPreview ? swapWorkingSchedules.gradeSchedules : selectedResult.gradeSchedules)
+                    : Object.entries(
+                        swapMode && swapWorkingSchedules && showingPreview
+                          ? swapWorkingSchedules.gradeSchedules
+                          : previewOption && previewType === "regen" && showingPreview
+                            ? previewOption.gradeSchedules
+                            : selectedResult.gradeSchedules
+                      )
                         .filter(([grade]) => !grade.includes("Elective"))
                         .sort(([a], [b]) => gradeSort(a, b))
                         .map(([grade, schedule]) => (
