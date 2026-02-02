@@ -2798,11 +2798,7 @@ export default function HistoryDetailPage() {
           entry: targetEntry,
           isDisplaced: true  // Picked up via chain = displaced
         }
-
-        // Remove from grade schedule
-        if (newGradeSchedules[targetEntry[0]]?.[location.day]?.[location.block]) {
-          newGradeSchedules[targetEntry[0]][location.day][location.block] = null
-        }
+        // Note: Don't update gradeSchedules directly - it will be rebuilt from teacherSchedules on save
       }
     }
 
@@ -2814,25 +2810,20 @@ export default function HistoryDetailPage() {
       if (oldEntry) {
         newTeacherSchedules[existingPlacement.teacher][existingPlacement.day][existingPlacement.block] = [oldEntry[0], "OPEN"]
       }
-
-      // Remove from grade schedule at old location
-      if (newGradeSchedules[block.grade]?.[existingPlacement.day]?.[existingPlacement.block]) {
-        newGradeSchedules[block.grade][existingPlacement.day][existingPlacement.block] = null
-      }
+      // Note: Don't update gradeSchedules directly - it will be rebuilt from teacherSchedules on save
     }
 
-    // Place the selected block at new location
+    // Place the selected block at new location (teacherSchedules only - gradeSchedules rebuilt on save)
     newTeacherSchedules[location.teacher][location.day][location.block] = block.entry
 
-    if (!newGradeSchedules[block.grade]) {
-      newGradeSchedules[block.grade] = {}
-    }
-    if (!newGradeSchedules[block.grade][location.day]) {
-      newGradeSchedules[block.grade][location.day] = {}
-    }
-    newGradeSchedules[block.grade][location.day][location.block] = [location.teacher, block.subject]
+    // Note: Removed gradeSchedules updates here - they were creating phantom grade keys
+    // like "6th-7th Grade". gradeSchedules will be properly rebuilt from teacherSchedules on save.
+    // For now, just keep the working gradeSchedules as-is for display purposes
+    // Note: We intentionally do NOT update gradeSchedules during freeform mode
+    // This prevents creating phantom grade keys like "6th-7th Grade"
+    // gradeSchedules will be properly rebuilt from teacherSchedules on save
 
-    // Update state
+    // Update state (gradeSchedules unchanged during freeform - rebuilt on save)
     setWorkingSchedules({ teacherSchedules: newTeacherSchedules, gradeSchedules: newGradeSchedules })
 
     // Update placements
@@ -2873,12 +2864,10 @@ export default function HistoryDetailPage() {
     const newTeacherSchedules = JSON.parse(JSON.stringify(workingSchedules.teacherSchedules))
     const newGradeSchedules = JSON.parse(JSON.stringify(workingSchedules.gradeSchedules))
 
-    // If it was placed, clear that location
+    // If it was placed, clear that location (teacherSchedules only - gradeSchedules rebuilt on save)
     if (placement) {
       newTeacherSchedules[placement.teacher][placement.day][placement.block] = [block.grade, "OPEN"]
-      if (newGradeSchedules[block.grade]?.[placement.day]?.[placement.block]) {
-        newGradeSchedules[block.grade][placement.day][placement.block] = null
-      }
+      // Skip gradeSchedules update - rebuilt on save
       setPendingPlacements(prev => prev.filter(p => p.blockId !== blockId))
     }
 
@@ -2891,24 +2880,15 @@ export default function HistoryDetailPage() {
       // Find the floating block that was placed there
       const occupyingBlock = floatingBlocks.find(b => b.id === occupyingPlacement.blockId)
       if (occupyingBlock) {
-        // Clear this block from grade schedules at current location
-        if (newGradeSchedules[occupyingBlock.grade]?.[block.sourceDay]?.[block.sourceBlock]) {
-          newGradeSchedules[occupyingBlock.grade][block.sourceDay][block.sourceBlock] = null
-        }
+        // Skip gradeSchedules update - rebuilt on save
         // Remove its placement - it becomes unplaced again (stays in floatingBlocks)
         setPendingPlacements(prev => prev.filter(p => p.blockId !== occupyingPlacement.blockId))
       }
     }
 
-    // Restore to original location
+    // Restore to original location (teacherSchedules only - gradeSchedules rebuilt on save)
     newTeacherSchedules[block.sourceTeacher][block.sourceDay][block.sourceBlock] = block.entry
-    if (!newGradeSchedules[block.grade]) {
-      newGradeSchedules[block.grade] = {}
-    }
-    if (!newGradeSchedules[block.grade][block.sourceDay]) {
-      newGradeSchedules[block.grade][block.sourceDay] = {}
-    }
-    newGradeSchedules[block.grade][block.sourceDay][block.sourceBlock] = [block.sourceTeacher, block.subject]
+    // Skip gradeSchedules update - this prevents creating phantom grade keys
 
     setWorkingSchedules({ teacherSchedules: newTeacherSchedules, gradeSchedules: newGradeSchedules })
 
@@ -3036,7 +3016,8 @@ export default function HistoryDetailPage() {
       blockedPlacement: PendingPlacement
       reason: string
     }>,
-    seed: number = 0
+    seed: number = 0,
+    classes?: ClassEntry[] // Pass freeformClasses to check restrictions
   ): {
     movedBlockers: Array<{ from: { teacher: string; day: string; block: number }; to: { teacher: string; day: string; block: number }; grade: string; subject: string }>
     schedules: typeof schedules
@@ -3050,6 +3031,44 @@ export default function HistoryDetailPage() {
     const newTeacherSchedules = JSON.parse(JSON.stringify(schedules.teacherSchedules))
     const newGradeSchedules = JSON.parse(JSON.stringify(schedules.gradeSchedules))
 
+    // Build a map of class restrictions for quick lookup
+    const classRestrictions = new Map<string, {
+      availableDays?: string[]
+      availableBlocks?: number[]
+      fixedSlots?: [string, number][]
+    }>()
+    if (classes) {
+      for (const cls of classes) {
+        if (cls.teacher && cls.subject) {
+          const key = `${cls.teacher}|${cls.subject}`
+          // Merge restrictions if same teacher+subject has multiple entries (different grades)
+          const existing = classRestrictions.get(key)
+          if (existing) {
+            // Take the most restrictive (intersection) for days/blocks
+            if (cls.availableDays && existing.availableDays) {
+              existing.availableDays = existing.availableDays.filter(d => cls.availableDays!.includes(d))
+            } else if (cls.availableDays) {
+              existing.availableDays = cls.availableDays
+            }
+            if (cls.availableBlocks && existing.availableBlocks) {
+              existing.availableBlocks = existing.availableBlocks.filter(b => cls.availableBlocks!.includes(b))
+            } else if (cls.availableBlocks) {
+              existing.availableBlocks = cls.availableBlocks
+            }
+            if (cls.fixedSlots) {
+              existing.fixedSlots = [...(existing.fixedSlots || []), ...cls.fixedSlots]
+            }
+          } else {
+            classRestrictions.set(key, {
+              availableDays: cls.availableDays,
+              availableBlocks: cls.availableBlocks,
+              fixedSlots: cls.fixedSlots
+            })
+          }
+        }
+      }
+    }
+
     // Clear blockers from their current positions (only in teacherSchedules - gradeSchedules will be rebuilt)
     for (const { blocker } of blockers) {
       newTeacherSchedules[blocker.teacher][blocker.day][blocker.block] = [blocker.grade, "OPEN"]
@@ -3061,20 +3080,71 @@ export default function HistoryDetailPage() {
       const currentEntry = newTeacherSchedules[teacher]?.[day]?.[blockNum]
       if (currentEntry && currentEntry[1] !== "OPEN") return false
 
-      // Check grade conflict - same grade at same time on another teacher
+      // Check class restrictions (availableDays, availableBlocks)
+      const restrictionKey = `${teacher}|${subject}`
+      const restrictions = classRestrictions.get(restrictionKey)
+      if (restrictions) {
+        // Check available days
+        if (restrictions.availableDays && restrictions.availableDays.length > 0) {
+          if (!restrictions.availableDays.includes(day)) {
+            return false
+          }
+        }
+        // Check available blocks
+        if (restrictions.availableBlocks && restrictions.availableBlocks.length > 0) {
+          if (!restrictions.availableBlocks.includes(blockNum)) {
+            return false
+          }
+        }
+        // Note: We don't enforce fixedSlots here - those are for specific placements
+        // Moving a class away from its fixed slot would be caught by validation
+      }
+
+      // Helper: check if two grade displays overlap (share any common grades)
+      // e.g., "6th Grade" overlaps with "6th-8th Grade"
+      function gradesOverlap(gradeA: string, gradeB: string): boolean {
+        if (gradeA === gradeB) return true
+
+        // Parse grades from each display
+        const parseGrades = (display: string): number[] => {
+          const grades: number[] = []
+          if (display.toLowerCase().includes('kindergarten') || display === 'K') {
+            grades.push(0)
+            return grades
+          }
+          const rangeMatch = display.match(/(\d+)(?:st|nd|rd|th)?[-–](\d+)/)
+          if (rangeMatch) {
+            const start = parseInt(rangeMatch[1])
+            const end = parseInt(rangeMatch[2])
+            for (let i = start; i <= end; i++) grades.push(i)
+            return grades
+          }
+          const singleMatch = display.match(/(\d+)/)
+          if (singleMatch) grades.push(parseInt(singleMatch[1]))
+          return grades
+        }
+
+        const gradesA = parseGrades(gradeA)
+        const gradesB = parseGrades(gradeB)
+        return gradesA.some(g => gradesB.includes(g))
+      }
+
+      // Check grade conflict - overlapping grade at same time on another teacher
       for (const [t, sched] of Object.entries(newTeacherSchedules)) {
         const entry = (sched as TeacherSchedule)[day]?.[blockNum]
-        if (entry && entry[0] === grade && entry[1] !== "OPEN" && entry[1] !== "Study Hall") {
-          return false
+        if (entry && entry[1] !== "OPEN" && entry[1] !== "Study Hall") {
+          if (gradesOverlap(entry[0], grade)) {
+            return false
+          }
         }
       }
 
-      // Check subject conflict - same subject on same day for same grade
+      // Check subject conflict - same subject on same day for overlapping grade
       for (const [, sched] of Object.entries(newTeacherSchedules)) {
         for (let b = 1; b <= 5; b++) {
           if (b === blockNum) continue
           const entry = (sched as TeacherSchedule)[day]?.[b]
-          if (entry && entry[0] === grade && entry[1] === subject) {
+          if (entry && entry[1] === subject && gradesOverlap(entry[0], grade)) {
             return false
           }
         }
@@ -3214,13 +3284,14 @@ export default function HistoryDetailPage() {
     const result = findConflictResolution(
       workingSchedules,
       blockers,
-      attemptIndex * 17 + Date.now() % 1000
+      attemptIndex * 17 + Date.now() % 1000,
+      freeformClasses || undefined
     )
 
     if (!result) {
       const msg = singleConflictBlockId
-        ? "Couldn't find an alternative position for this conflict."
-        : `Found ${blockers.length} blocking class${blockers.length !== 1 ? 'es' : ''} but couldn't find alternative positions.`
+        ? "Couldn't find an alternative position for this conflict. The blocking class may have day/block restrictions."
+        : `Found ${blockers.length} blocking class${blockers.length !== 1 ? 'es' : ''} but couldn't find alternative positions (may have restrictions).`
       toast.error(msg)
       // Only update validation errors for unfixable ones
       if (!singleConflictBlockId) {
@@ -3272,11 +3343,12 @@ export default function HistoryDetailPage() {
     const result = findConflictResolution(
       restoredSchedules,
       conflictResolution.blockersList,
-      (conflictResolution.attemptIndex + 1) * 17 + Date.now() % 1000
+      (conflictResolution.attemptIndex + 1) * 17 + Date.now() % 1000,
+      freeformClasses || undefined
     )
 
     if (!result) {
-      toast.error("No more alternative positions found")
+      toast.error("No more alternative positions found (may have day/block restrictions)")
       return
     }
 
@@ -3362,12 +3434,10 @@ export default function HistoryDetailPage() {
       if (newGradeSchedules[moved.grade]?.[moved.to.day]?.[moved.to.block]) {
         newGradeSchedules[moved.grade][moved.to.day][moved.to.block] = null
       }
-      // Restore to original position
+      // Restore to original position (teacherSchedules only - gradeSchedules rebuilt on save)
       const entry: [string, string] = [moved.grade, moved.subject]
       newTeacherSchedules[moved.from.teacher][moved.from.day][moved.from.block] = entry
-      if (!newGradeSchedules[moved.grade]) newGradeSchedules[moved.grade] = {}
-      if (!newGradeSchedules[moved.grade][moved.from.day]) newGradeSchedules[moved.grade][moved.from.day] = {}
-      newGradeSchedules[moved.grade][moved.from.day][moved.from.block] = [moved.from.teacher, moved.subject]
+      // Skip gradeSchedules update - prevents creating phantom grade keys
     }
 
     setWorkingSchedules({ teacherSchedules: newTeacherSchedules, gradeSchedules: newGradeSchedules })
