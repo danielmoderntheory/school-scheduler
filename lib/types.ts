@@ -94,6 +94,7 @@ export interface ScheduleOption {
   gradeSchedules: Record<string, GradeSchedule>;
   studyHallAssignments: StudyHallAssignment[];
   teacherStats: TeacherStat[];
+  builtWithSnapshotVersion?: number; // Timestamp of snapshot this option was built with
 }
 
 // Lightweight solution for alternative browsing (no stats computed)

@@ -1,7 +1,7 @@
 "use client"
 
 import { useState, useEffect, useRef } from "react"
-import { useParams, useSearchParams } from "next/navigation"
+import { useParams, useSearchParams, useRouter } from "next/navigation"
 import { Button } from "@/components/ui/button"
 import { ScheduleGrid } from "@/components/ScheduleGrid"
 import { ScheduleStats } from "@/components/ScheduleStats"
@@ -128,6 +128,7 @@ interface Generation {
 export default function HistoryDetailPage() {
   const params = useParams()
   const searchParams = useSearchParams()
+  const router = useRouter()
   const id = params.id as string
   const isNewGeneration = searchParams.get('new') === 'true'
   const { setIsGenerating: setGlobalGenerating } = useGeneration()
@@ -207,6 +208,17 @@ export default function HistoryDetailPage() {
   useEffect(() => {
     loadGeneration()
   }, [id])
+
+  // Remove 'new' query param after initial view so shared URLs don't include it
+  // Wait for generation to load so the UI has applied defaultExpanded first
+  useEffect(() => {
+    if (isNewGeneration && generation) {
+      const timer = setTimeout(() => {
+        router.replace(`/history/${id}`, { scroll: false })
+      }, 100)
+      return () => clearTimeout(timer)
+    }
+  }, [isNewGeneration, generation, id, router])
 
   // Check if user is authenticated (for public view mode)
   useEffect(() => {
@@ -393,7 +405,7 @@ export default function HistoryDetailPage() {
 
   function enterRegenMode(skipChangesCheck = false) {
     // If changes detected and not dismissed, show dialog first
-    if (!skipChangesCheck && classChanges?.hasChanges && !dismissedForOptions.has(viewingOption)) {
+    if (!skipChangesCheck && optionNeedsChanges && !dismissedForOptions.has(viewingOption)) {
       setPendingModeEntry('regen')
       setShowChangesDialog(true)
       return
@@ -1147,11 +1159,15 @@ export default function HistoryDetailPage() {
         }))
 
         // Update class/teacher/grade snapshots but keep rules_snapshot unchanged
+        // Only set NEW snapshotVersion if one doesn't exist (first time applying changes)
+        // If snapshotVersion exists, this is alignment - reuse existing version
+        const existingVersion = generation.stats?.snapshotVersion
         statsForValidation = {
           ...generation.stats,
           classes_snapshot: classesSnapshot,
           teachers_snapshot: teachersSnapshot,
           grades_snapshot: gradesSnapshot,
+          snapshotVersion: existingVersion || Date.now(), // Keep existing or set new
           // rules_snapshot intentionally NOT updated - stays from original generation
         }
       } catch (error) {
@@ -1165,6 +1181,9 @@ export default function HistoryDetailPage() {
       let updatedOptions: ScheduleOption[]
       let successMessage: string
 
+      // If using current classes, mark this option as built with the new snapshot version
+      const snapshotVersion = useCurrentClasses ? statsForValidation?.snapshotVersion : undefined
+
       if (!saveAsNew) {
         // Update current option in place
         const optionIndex = parseInt(viewingOption) - 1
@@ -1172,6 +1191,7 @@ export default function HistoryDetailPage() {
         updatedOptions[optionIndex] = {
           ...optionToSave,
           optionNumber: optionIndex + 1,
+          ...(snapshotVersion && { builtWithSnapshotVersion: snapshotVersion }),
         }
         successMessage = previewType === "study-hall"
           ? `Study halls reassigned for Rev ${optionIndex + 1}`
@@ -1182,6 +1202,7 @@ export default function HistoryDetailPage() {
         updatedOptions = [...generation.options, {
           ...optionToSave,
           optionNumber: newOptionNumber,
+          ...(snapshotVersion && { builtWithSnapshotVersion: snapshotVersion }),
         }]
         successMessage = `Saved as Rev ${newOptionNumber}`
       }
@@ -1217,10 +1238,8 @@ export default function HistoryDetailPage() {
         setRegenMode(false)
         setSelectedForRegen(new Set())
         setUseCurrentClasses(false)
-        // Re-check for changes (should now show none if snapshots were updated)
+        // Remove from dismissed set since changes were actually applied
         if (useCurrentClasses) {
-          setClassChanges(null) // Clear changes since we just updated snapshots
-          // Remove this option from dismissed set since changes were applied
           setDismissedForOptions(prev => {
             const next = new Set(prev)
             next.delete(viewingOption)
@@ -1251,7 +1270,7 @@ export default function HistoryDetailPage() {
 
   function enterStudyHallMode(skipChangesCheck = false) {
     // If changes detected and not dismissed, show dialog first
-    if (!skipChangesCheck && classChanges?.hasChanges && !dismissedForOptions.has(viewingOption)) {
+    if (!skipChangesCheck && optionNeedsChanges && !dismissedForOptions.has(viewingOption)) {
       setPendingModeEntry('studyHall')
       setShowChangesDialog(true)
       return
@@ -2156,7 +2175,7 @@ export default function HistoryDetailPage() {
   function enterSwapMode(skipChangesCheck = false) {
     if (!selectedResult) return
     // If changes detected and not dismissed, show dialog first
-    if (!skipChangesCheck && classChanges?.hasChanges && !dismissedForOptions.has(viewingOption)) {
+    if (!skipChangesCheck && optionNeedsChanges && !dismissedForOptions.has(viewingOption)) {
       setPendingModeEntry('swap')
       setShowChangesDialog(true)
       return
@@ -2392,7 +2411,7 @@ export default function HistoryDetailPage() {
     if (!selectedResult || !generation) return
 
     // If changes detected and not dismissed, show dialog first
-    if (!skipChangesCheck && classChanges?.hasChanges && !dismissedForOptions.has(viewingOption)) {
+    if (!skipChangesCheck && optionNeedsChanges && !dismissedForOptions.has(viewingOption)) {
       setPendingModeEntry('freeform')
       setShowChangesDialog(true)
       return
@@ -2666,29 +2685,52 @@ export default function HistoryDetailPage() {
   }
 
   /**
-   * Shared validation: Check teacher-grade schedule consistency.
-   * Every teacher schedule entry should have a matching grade schedule entry.
-   * This catches bugs where grade parsing fails and grades are missing entirely.
+   * Shared validation: Check that grade displays in teacher schedules are parseable.
+   * This catches bugs where grade parsing fails or unknown grades appear.
+   *
+   * Note: Teacher schedules are the source of truth. We no longer validate against
+   * gradeSchedules since they can only store one entry per slot (missing electives, etc.)
    */
   function validateScheduleConsistency(
     teacherSchedules: Record<string, TeacherSchedule>,
-    gradeSchedules: Record<string, GradeSchedule>
+    knownGrades?: string[]
   ): ValidationError[] {
     const errors: ValidationError[] = []
     const DAYS = ["Mon", "Tues", "Wed", "Thurs", "Fri"]
-    const availableGrades = new Set(Object.keys(gradeSchedules))
 
-    // Helper to parse a grade display into individual grades
-    // e.g., "6th-11th Grade" -> ["6th Grade", "7th Grade", ..., "11th Grade"]
-    function parseGradeDisplay(display: string): string[] {
+    // Build available grades set from provided list, or derive from teacher schedules
+    const availableGrades = new Set<string>()
+    if (knownGrades && knownGrades.length > 0) {
+      knownGrades.forEach(g => availableGrades.add(g))
+    } else {
+      // Derive from teacher schedules - collect all unique grade displays
+      for (const schedule of Object.values(teacherSchedules)) {
+        for (const day of DAYS) {
+          for (let block = 1; block <= 5; block++) {
+            const entry = schedule[day]?.[block]
+            if (entry && entry[0] && entry[1] !== "OPEN" && entry[1] !== "Study Hall") {
+              availableGrades.add(entry[0])
+            }
+          }
+        }
+      }
+    }
+
+    // If no known grades, skip validation (can't determine what's valid)
+    if (availableGrades.size === 0) {
+      return errors
+    }
+
+    // Helper to check if a grade display is parseable
+    function isValidGradeDisplay(display: string): boolean {
       // Direct match
-      if (availableGrades.has(display)) return [display]
+      if (availableGrades.has(display)) return true
 
       // Check for Kindergarten variations
       if (display.toLowerCase().includes('kindergarten') || display === 'K') {
         for (const g of availableGrades) {
           if (g.toLowerCase().includes('kindergarten') || g === 'K') {
-            return [g]
+            return true
           }
         }
       }
@@ -2698,14 +2740,12 @@ export default function HistoryDetailPage() {
       if (rangeMatch) {
         const start = parseInt(rangeMatch[1])
         const end = parseInt(rangeMatch[2])
-        const matched: string[] = []
         for (const g of availableGrades) {
           const num = gradeToNum(g)
           if (num >= start && num <= end) {
-            matched.push(g)
+            return true
           }
         }
-        if (matched.length > 0) return matched
       }
 
       // Check for single grade number
@@ -2713,12 +2753,11 @@ export default function HistoryDetailPage() {
       if (singleMatch) {
         const num = parseInt(singleMatch[1])
         for (const g of availableGrades) {
-          if (gradeToNum(g) === num) return [g]
+          if (gradeToNum(g) === num) return true
         }
       }
 
-      // Study Hall entries don't need grade validation
-      return []
+      return false
     }
 
     const missingGrades = new Set<string>()
@@ -2733,36 +2772,13 @@ export default function HistoryDetailPage() {
           const gradeDisplay = entry[0]
           const subject = entry[1]
 
-          // Parse grade display into individual grades
-          const individualGrades = parseGradeDisplay(gradeDisplay)
-
-          if (individualGrades.length === 0) {
+          if (!isValidGradeDisplay(gradeDisplay)) {
             // Couldn't parse - this is a real issue (unless it's an elective)
             if (!gradeDisplay.toLowerCase().includes('elective')) {
               missingGrades.add(gradeDisplay)
               missingEntries.push({ teacher, day, block, grade: gradeDisplay, subject })
             }
-            continue
           }
-
-          // Check if at least one individual grade has a matching entry
-          let foundMatch = false
-          for (const g of individualGrades) {
-            const gradeSchedule = gradeSchedules[g]
-            if (!gradeSchedule) continue
-
-            const gradeEntry = gradeSchedule[day]?.[block]
-            if (gradeEntry && gradeEntry[0] === teacher && gradeEntry[1] === subject) {
-              foundMatch = true
-              break
-            }
-          }
-
-          // NOTE: We no longer validate teacher vs grade schedule consistency here.
-          // The grade schedule data model can only store ONE entry per [grade][day][block],
-          // so when multiple classes share a slot (electives, study halls, split classes),
-          // only one gets recorded. Teacher schedules are the source of truth.
-          // Mismatches are expected and not actual errors.
         }
       }
     }
@@ -2772,7 +2788,7 @@ export default function HistoryDetailPage() {
       const gradeList = Array.from(missingGrades).sort(gradeSort).join(', ')
       errors.push({
         type: 'grade_conflict',
-        message: `[Missing Grades] Grade schedules missing for: ${gradeList} (${missingEntries.length} entries affected)`,
+        message: `[Unknown Grades] Unrecognized grades in schedule: ${gradeList} (${missingEntries.length} entries affected)`,
         cells: missingEntries.slice(0, 10) // Limit to first 10 cells to avoid huge error
       })
     }
@@ -2883,22 +2899,37 @@ export default function HistoryDetailPage() {
     }
 
     // 5. Check subject conflicts (same subject twice on same day for a grade)
-    for (const [grade, schedule] of Object.entries(workingSchedules.gradeSchedules)) {
-      for (const day of DAYS) {
-        const subjectsOnDay = new Map<string, CellLocation[]>()
+    // Built from teacher schedules (source of truth)
+    const gradeSubjectsByDay = new Map<string, Map<string, Map<string, CellLocation[]>>>()
 
+    for (const [teacher, schedule] of Object.entries(workingSchedules.teacherSchedules)) {
+      for (const day of DAYS) {
         for (let block = 1; block <= 5; block++) {
           const entry = schedule[day]?.[block]
           if (!entry || entry[1] === "OPEN" || entry[1] === "Study Hall") continue
 
+          const grade = entry[0]
           const subject = entry[1]
-          if (!subjectsOnDay.has(subject)) {
-            subjectsOnDay.set(subject, [])
-          }
-          subjectsOnDay.get(subject)!.push({ teacher: entry[0], day, block, grade, subject })
-        }
 
-        for (const [subject, locations] of subjectsOnDay) {
+          if (!gradeSubjectsByDay.has(grade)) {
+            gradeSubjectsByDay.set(grade, new Map())
+          }
+          const dayMap = gradeSubjectsByDay.get(grade)!
+          if (!dayMap.has(day)) {
+            dayMap.set(day, new Map())
+          }
+          const subjectMap = dayMap.get(day)!
+          if (!subjectMap.has(subject)) {
+            subjectMap.set(subject, [])
+          }
+          subjectMap.get(subject)!.push({ teacher, day, block, grade, subject })
+        }
+      }
+    }
+
+    for (const [grade, dayMap] of gradeSubjectsByDay) {
+      for (const [day, subjectMap] of dayMap) {
+        for (const [subject, locations] of subjectMap) {
           // Only flag if same subject at DIFFERENT blocks (multiple teachers at same block = electives, which is valid)
           const uniqueBlocks = new Set(locations.map(loc => loc.block))
           if (uniqueBlocks.size > 1) {
@@ -3019,9 +3050,11 @@ export default function HistoryDetailPage() {
     }
 
     // 9. Check teacher-grade consistency (shared validation)
+    // Use grades from stats snapshot if available
+    const knownGrades = generation?.stats?.grades_snapshot?.map(g => g.display_name)
     const consistencyErrors = validateScheduleConsistency(
       workingSchedules.teacherSchedules,
-      workingSchedules.gradeSchedules
+      knownGrades
     )
     errors.push(...consistencyErrors)
 
@@ -3066,33 +3099,40 @@ export default function HistoryDetailPage() {
     }
 
     // 2. Check grade conflicts - no grade has two different classes at the same time
-    // (Study halls don't conflict with each other but do with regular classes)
-    for (const [grade, schedule] of Object.entries(option.gradeSchedules)) {
-      for (const day of DAYS) {
-        for (let block = 1; block <= 5; block++) {
+    // Built from teacher schedules (source of truth) - a grade conflict is when the same grade
+    // appears with different non-elective teachers at the same day/block
+    // (Study halls and electives don't conflict)
+    for (const day of DAYS) {
+      for (let block = 1; block <= 5; block++) {
+        // Build a map of grade -> teachers at this slot
+        const gradeTeachers = new Map<string, Array<{ teacher: string; subject: string; isElective: boolean }>>()
+
+        for (const [teacher, schedule] of Object.entries(option.teacherSchedules)) {
           const entry = schedule[day]?.[block]
-          if (!entry) continue
+          if (!entry || entry[1] === "OPEN" || entry[1] === "Study Hall") continue
 
-          // Also check if any other grade entry at this slot has the same grade
-          // (This shouldn't happen but catches merging bugs)
-          const teacher = entry[0]
+          const grade = entry[0]
           const subject = entry[1]
+          // Check if this is an elective (from classes snapshot)
+          const isElective = stats?.classes_snapshot?.some(
+            c => c.teacher_name === teacher && c.subject_name === subject && c.is_elective
+          ) ?? false
 
-          // Cross-check: find all teachers teaching this grade at this slot
-          const teachersAtSlot: string[] = []
-          for (const [t, tSchedule] of Object.entries(option.teacherSchedules)) {
-            const tEntry = tSchedule[day]?.[block]
-            if (tEntry && tEntry[0] === grade && tEntry[1] !== "OPEN" && tEntry[1] !== "Study Hall") {
-              teachersAtSlot.push(t)
-            }
+          if (!gradeTeachers.has(grade)) {
+            gradeTeachers.set(grade, [])
           }
+          gradeTeachers.get(grade)!.push({ teacher, subject, isElective })
+        }
 
-          // Skip study halls for conflict detection (multiple study halls at same slot is OK)
-          if (subject !== "Study Hall" && teachersAtSlot.length > 1) {
+        // Check each grade for conflicts
+        for (const [grade, teachers] of gradeTeachers) {
+          // Filter to non-elective classes only
+          const nonElectives = teachers.filter(t => !t.isElective)
+          if (nonElectives.length > 1) {
             errors.push({
               type: 'grade_conflict',
-              message: `[Grade Conflict] ${grade} has ${teachersAtSlot.length} classes at ${day} B${block}: ${teachersAtSlot.join(', ')}`,
-              cells: teachersAtSlot.map(t => ({ teacher: t, day, block, grade }))
+              message: `[Grade Conflict] ${grade} has ${nonElectives.length} classes at ${day} B${block}: ${nonElectives.map(t => t.teacher).join(', ')}`,
+              cells: nonElectives.map(t => ({ teacher: t.teacher, day, block, grade }))
             })
           }
         }
@@ -3100,22 +3140,38 @@ export default function HistoryDetailPage() {
     }
 
     // 3. Check subject conflicts - same subject twice on same day for a grade
-    for (const [grade, schedule] of Object.entries(option.gradeSchedules)) {
-      for (const day of DAYS) {
-        const subjectsOnDay = new Map<string, Array<{ teacher: string; block: number }>>()
+    // Built from teacher schedules (source of truth)
+    // Group by grade, then by day, then count subjects
+    const gradeSubjectsByDay = new Map<string, Map<string, Map<string, Array<{ teacher: string; block: number }>>>>()
 
+    for (const [teacher, schedule] of Object.entries(option.teacherSchedules)) {
+      for (const day of DAYS) {
         for (let block = 1; block <= 5; block++) {
           const entry = schedule[day]?.[block]
           if (!entry || entry[1] === "OPEN" || entry[1] === "Study Hall") continue
 
+          const grade = entry[0]
           const subject = entry[1]
-          if (!subjectsOnDay.has(subject)) {
-            subjectsOnDay.set(subject, [])
-          }
-          subjectsOnDay.get(subject)!.push({ teacher: entry[0], block })
-        }
 
-        for (const [subject, occurrences] of subjectsOnDay) {
+          if (!gradeSubjectsByDay.has(grade)) {
+            gradeSubjectsByDay.set(grade, new Map())
+          }
+          const dayMap = gradeSubjectsByDay.get(grade)!
+          if (!dayMap.has(day)) {
+            dayMap.set(day, new Map())
+          }
+          const subjectMap = dayMap.get(day)!
+          if (!subjectMap.has(subject)) {
+            subjectMap.set(subject, [])
+          }
+          subjectMap.get(subject)!.push({ teacher, block })
+        }
+      }
+    }
+
+    for (const [grade, dayMap] of gradeSubjectsByDay) {
+      for (const [day, subjectMap] of dayMap) {
+        for (const [subject, occurrences] of subjectMap) {
           // Only flag if same subject at DIFFERENT blocks (multiple teachers at same block = electives, which is valid)
           const uniqueBlocks = new Set(occurrences.map(o => o.block))
           if (uniqueBlocks.size > 1) {
@@ -3130,9 +3186,11 @@ export default function HistoryDetailPage() {
     }
 
     // 4. Check teacher-grade consistency (shared validation)
+    // Use grades from stats snapshot if available
+    const knownGrades = stats?.grades_snapshot?.map(g => g.display_name)
     const consistencyErrors = validateScheduleConsistency(
       option.teacherSchedules,
-      option.gradeSchedules
+      knownGrades
     )
     errors.push(...consistencyErrors)
 
@@ -3526,6 +3584,18 @@ export default function HistoryDetailPage() {
   const selectedResult = displayedOption
   const currentOption = savedOption
 
+  // Check if current option needs class changes applied
+  // Two scenarios:
+  // 1. snapshotNeedsUpdate: DB has changed, snapshot needs to be updated (first revision to apply)
+  // 2. optionNeedsAlignment: Snapshot already updated, this revision needs to align to it
+  const snapshotNeedsUpdate = !generation?.stats?.snapshotVersion && (classChanges?.hasChanges || false)
+  const optionNeedsAlignment = (() => {
+    if (!generation?.stats?.snapshotVersion) return false
+    const optionVersion = savedOption?.builtWithSnapshotVersion
+    return optionVersion !== generation.stats.snapshotVersion
+  })()
+  const optionNeedsChanges = snapshotNeedsUpdate || optionNeedsAlignment
+
   if (loading || isPublicView === null) {
     return (
       <div className="flex items-center justify-center p-12">
@@ -3821,16 +3891,20 @@ export default function HistoryDetailPage() {
               )}
 
               {/* Class Changes Indicator - small button that opens dialog */}
-              {classChanges?.hasChanges && !dismissedForOptions.has(viewingOption) && !regenMode && !swapMode && !freeformMode && !studyHallMode && (
+              {optionNeedsChanges && !dismissedForOptions.has(viewingOption) && !regenMode && !swapMode && !freeformMode && !studyHallMode && (
                 <Button
                   variant="outline"
                   size="sm"
                   onClick={() => setShowChangesDialog(true)}
                   className="gap-1.5 text-amber-700 border-amber-300 bg-amber-50 hover:bg-amber-100 no-print"
-                  title={classChanges.summary}
+                  title={snapshotNeedsUpdate ? classChanges?.summary : 'This revision needs to be aligned with updated classes'}
                 >
                   <AlertTriangle className="h-3.5 w-3.5" />
-                  <span className="text-xs">{classChanges.affectedTeachers.length} changed</span>
+                  <span className="text-xs">
+                    {snapshotNeedsUpdate
+                      ? `${classChanges?.affectedTeachers.length || 0} changed`
+                      : 'Needs alignment'}
+                  </span>
                 </Button>
               )}
 
@@ -4683,39 +4757,49 @@ export default function HistoryDetailPage() {
           <AlertDialogHeader>
             <AlertDialogTitle className="flex items-center gap-2">
               <AlertTriangle className="h-5 w-5 text-amber-600" />
-              Classes have changed
+              {snapshotNeedsUpdate ? 'Classes have changed' : 'Revision needs alignment'}
             </AlertDialogTitle>
             <AlertDialogDescription asChild>
               <div className="space-y-3">
-                <p>
-                  The current class configuration differs from when this schedule was generated.
-                </p>
-                <p className="text-sm">
-                  {classChanges?.summary || 'Some classes have been added, removed, or modified.'}
-                </p>
-                {classChanges && classChanges.changes.length > 0 && (
-                  <div className="bg-slate-50 rounded-md p-3 max-h-40 overflow-y-auto">
-                    <ul className="text-xs text-slate-700 space-y-1">
-                      {classChanges.changes.map((change, idx) => (
-                        <li key={idx} className="flex items-start gap-1.5">
-                          <span className={`font-medium ${
-                            change.type === 'added' ? 'text-emerald-600' :
-                            change.type === 'removed' ? 'text-red-600' :
-                            'text-amber-600'
-                          }`}>
-                            {change.type === 'added' ? '+' : change.type === 'removed' ? '−' : '~'}
-                          </span>
-                          <span>
-                            <span className="font-medium">{change.teacherName}</span>: {change.gradeName} {change.subjectName}
-                            {change.details && <span className="text-slate-500"> ({change.details})</span>}
-                          </span>
-                        </li>
-                      ))}
-                    </ul>
-                  </div>
+                {snapshotNeedsUpdate ? (
+                  <>
+                    <p>
+                      The current class configuration differs from when this schedule was generated.
+                    </p>
+                    <p className="text-sm">
+                      {classChanges?.summary || 'Some classes have been added, removed, or modified.'}
+                    </p>
+                    {classChanges && classChanges.changes.length > 0 && (
+                      <div className="bg-slate-50 rounded-md p-3 max-h-40 overflow-y-auto">
+                        <ul className="text-xs text-slate-700 space-y-1">
+                          {classChanges.changes.map((change, idx) => (
+                            <li key={idx} className="flex items-start gap-1.5">
+                              <span className={`font-medium ${
+                                change.type === 'added' ? 'text-emerald-600' :
+                                change.type === 'removed' ? 'text-red-600' :
+                                'text-amber-600'
+                              }`}>
+                                {change.type === 'added' ? '+' : change.type === 'removed' ? '−' : '~'}
+                              </span>
+                              <span>
+                                <span className="font-medium">{change.teacherName}</span>: {change.gradeName} {change.subjectName}
+                                {change.details && <span className="text-slate-500"> ({change.details})</span>}
+                              </span>
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                    )}
+                  </>
+                ) : (
+                  <p>
+                    Another revision has been updated with the latest class configuration. This revision still uses the older configuration.
+                  </p>
                 )}
                 <p className="text-sm text-slate-500">
-                  You can apply these changes by regenerating affected teachers, or keep the schedule unchanged.
+                  {snapshotNeedsUpdate
+                    ? 'You can apply these changes by regenerating affected teachers, or keep the schedule unchanged.'
+                    : 'You can align this revision by regenerating teachers, or keep it unchanged.'}
                 </p>
               </div>
             </AlertDialogDescription>
@@ -4740,15 +4824,16 @@ export default function HistoryDetailPage() {
                 // Mark as dismissed for this specific option/revision
                 setDismissedForOptions(prev => new Set(prev).add(viewingOption))
                 setPendingModeEntry(null)
-                // Pre-select affected teachers and enter regen mode with current classes
-                setSelectedForRegen(new Set(classChanges?.affectedTeachers || []))
+                // Pre-select affected teachers (if known) and enter regen mode with current classes
+                const teachersToSelect = classChanges?.affectedTeachers || []
+                setSelectedForRegen(new Set(teachersToSelect))
                 setUseCurrentClasses(true) // Use current DB classes for this regeneration
                 setRegenMode(true)
               }}
               className="bg-amber-600 hover:bg-amber-700"
             >
               <RefreshCw className="h-4 w-4 mr-1" />
-              Apply Changes & Regenerate
+              {snapshotNeedsUpdate ? 'Apply Changes & Regenerate' : 'Align & Regenerate'}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>

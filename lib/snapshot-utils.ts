@@ -56,6 +56,7 @@ export interface GenerationStats {
   rules_snapshot?: RuleSnapshot[]
   grades_snapshot?: GradeSnapshot[]
   allSolutions?: unknown[]
+  snapshotVersion?: number // Timestamp when snapshot was last updated
 }
 
 /**
@@ -324,4 +325,55 @@ export function detectClassChanges(
     changes,
     summary,
   }
+}
+
+/**
+ * Check if a revision's schedules match what the classes_snapshot expects.
+ * This helps detect if a revision has had updated classes applied or not.
+ *
+ * Returns true if the revision's schedules match the snapshot (changes applied),
+ * false if they don't match (changes not yet applied to this revision).
+ */
+export function revisionMatchesSnapshot(
+  teacherSchedules: Record<string, Record<string, Record<number, [string, string] | null>>>,
+  classesSnapshot: ClassSnapshot[]
+): boolean {
+  // Count expected class sessions per teacher+subject from snapshot
+  const expectedCounts = new Map<string, number>()
+  for (const cls of classesSnapshot) {
+    if (!cls.teacher_name || !cls.subject_name) continue
+    const key = `${cls.teacher_name}|${cls.subject_name}`
+    expectedCounts.set(key, (expectedCounts.get(key) || 0) + cls.days_per_week)
+  }
+
+  // Count actual class sessions in the revision's schedules
+  const actualCounts = new Map<string, number>()
+  for (const [teacher, schedule] of Object.entries(teacherSchedules)) {
+    for (const day of Object.values(schedule)) {
+      for (const entry of Object.values(day)) {
+        if (entry && entry[1] && entry[1] !== 'OPEN' && entry[1] !== 'Study Hall') {
+          const subject = entry[1]
+          const key = `${teacher}|${subject}`
+          actualCounts.set(key, (actualCounts.get(key) || 0) + 1)
+        }
+      }
+    }
+  }
+
+  // Compare: check if all expected classes are present with correct counts
+  for (const [key, expectedCount] of expectedCounts) {
+    const actualCount = actualCounts.get(key) || 0
+    if (actualCount !== expectedCount) {
+      return false // Mismatch found - revision doesn't match snapshot
+    }
+  }
+
+  // Also check for classes in actual that aren't in expected (extra classes)
+  for (const [key] of actualCounts) {
+    if (!expectedCounts.has(key)) {
+      return false // Extra class found - revision doesn't match snapshot
+    }
+  }
+
+  return true // All counts match
 }
