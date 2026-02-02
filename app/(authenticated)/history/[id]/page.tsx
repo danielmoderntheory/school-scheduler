@@ -287,6 +287,10 @@ export default function HistoryDetailPage() {
     orphanEntries: number
     phantomGrades: string[]
     summary: string
+    // Orphan correlation analysis
+    totalMissingSessions: number
+    orphanAnalysis: 'extra' | 'possibly_unlinked' | 'none'
+    orphanGuidance: string
   } | null>(null)
   const [repairPreview, setRepairPreview] = useState<{
     teacherSchedules: Record<string, TeacherSchedule>
@@ -4207,7 +4211,10 @@ export default function HistoryDetailPage() {
         classesFoundInSchedule: 0,
         orphanEntries: 0,
         phantomGrades: [],
-        summary: "No snapshot data available for analysis"
+        summary: "No snapshot data available for analysis",
+        totalMissingSessions: 0,
+        orphanAnalysis: 'none',
+        orphanGuidance: ''
       }
     }
 
@@ -4362,6 +4369,40 @@ export default function HistoryDetailPage() {
       }
     }
 
+    // Correlate orphans with missing sessions to determine if they're related
+    const orphanIssues = issues.filter(i => i.type === 'orphan_entry')
+    const missingSessionIssues = issues.filter(i => i.type === 'missing_session' && i.severity === 'error')
+
+    // Calculate total missing session count
+    let totalMissingSessions = 0
+    for (const issue of missingSessionIssues) {
+      const expectedMatch = issue.expected?.match(/(\d+)/)
+      const foundMatch = issue.found?.match(/(\d+)/)
+      if (expectedMatch && foundMatch) {
+        totalMissingSessions += parseInt(expectedMatch[1]) - parseInt(foundMatch[1])
+      }
+    }
+
+    // Determine if orphans might be unlinked classes
+    let orphanAnalysis: 'extra' | 'possibly_unlinked' | 'none' = 'none'
+    let orphanGuidance = ''
+
+    if (orphanCount > 0) {
+      if (totalMissingSessions > 0) {
+        // Both orphans and missing sessions - might be related
+        orphanAnalysis = 'possibly_unlinked'
+        if (orphanCount === totalMissingSessions) {
+          orphanGuidance = `Found ${orphanCount} orphan entries AND ${totalMissingSessions} missing sessions - these are likely the SAME classes that got corrupted/unlinked. Removing orphans would lose data. Consider manual review.`
+        } else {
+          orphanGuidance = `Found ${orphanCount} orphan entries and ${totalMissingSessions} missing sessions. Some orphans may be corrupted versions of missing classes. Review before removing.`
+        }
+      } else {
+        // Orphans but no missing sessions - truly extra
+        orphanAnalysis = 'extra'
+        orphanGuidance = `Found ${orphanCount} orphan entries but ALL snapshot classes are fully scheduled. These appear to be extra/duplicate entries that can be safely removed.`
+      }
+    }
+
     // Build summary
     const errorCount = issues.filter(i => i.severity === 'error').length
     const warningCount = issues.filter(i => i.severity === 'warning').length
@@ -4375,7 +4416,11 @@ export default function HistoryDetailPage() {
       classesFoundInSchedule: expectedClasses.size,
       orphanEntries: orphanCount,
       phantomGrades: Array.from(phantomGradesFound),
-      summary
+      summary,
+      // New fields for orphan correlation
+      totalMissingSessions,
+      orphanAnalysis,
+      orphanGuidance
     }
   }
 
@@ -4509,6 +4554,24 @@ export default function HistoryDetailPage() {
     // Apply fixes for phantom grades - rebuild gradeSchedules will handle this
     if (repairAnalysis.phantomGrades.length > 0) {
       fixesApplied.push(`Remove ${repairAnalysis.phantomGrades.length} phantom grade(s): ${repairAnalysis.phantomGrades.join(', ')}`)
+    }
+
+    // Remove orphan entries if they're identified as "extra" (safe to remove)
+    if (repairAnalysis.orphanAnalysis === 'extra' && repairAnalysis.orphanEntries > 0) {
+      const orphanIssues = repairAnalysis.issues.filter(i => i.type === 'orphan_entry')
+      let removedCount = 0
+      for (const issue of orphanIssues) {
+        if (issue.teacher && issue.day && issue.block) {
+          const schedule = newTeacherSchedules[issue.teacher]
+          if (schedule?.[issue.day]?.[issue.block]) {
+            schedule[issue.day][issue.block] = ['OPEN', 'OPEN']
+            removedCount++
+          }
+        }
+      }
+      if (removedCount > 0) {
+        fixesApplied.push(`Remove ${removedCount} orphan entr${removedCount !== 1 ? 'ies' : 'y'} (set to OPEN)`)
+      }
     }
 
     // Rebuild gradeSchedules from teacherSchedules using valid grades only
@@ -5559,7 +5622,7 @@ export default function HistoryDetailPage() {
                       </div>
                     </div>
                     <div className="flex items-center gap-2">
-                      {!repairPreview && repairAnalysis.phantomGrades.length > 0 && (
+                      {!repairPreview && (repairAnalysis.phantomGrades.length > 0 || repairAnalysis.orphanAnalysis === 'extra') && (
                         <Button
                           size="sm"
                           onClick={handlePreviewRepair}
@@ -5644,6 +5707,38 @@ export default function HistoryDetailPage() {
                           These grades don't exist in the grades snapshot. They may have been created when multi-grade classes were moved.
                           Clicking "Preview Repair" will rebuild gradeSchedules using only valid grades.
                         </p>
+                      </div>
+                    )}
+
+                    {/* Orphan Entries Analysis */}
+                    {repairAnalysis.orphanEntries > 0 && repairAnalysis.orphanGuidance && (
+                      <div className={`border rounded p-2 ${
+                        repairAnalysis.orphanAnalysis === 'extra'
+                          ? 'bg-emerald-50 border-emerald-200'
+                          : 'bg-amber-50 border-amber-200'
+                      }`}>
+                        <div className={`text-sm font-medium mb-1 ${
+                          repairAnalysis.orphanAnalysis === 'extra' ? 'text-emerald-800' : 'text-amber-800'
+                        }`}>
+                          Orphan Entry Analysis:
+                        </div>
+                        <p className={`text-xs ${
+                          repairAnalysis.orphanAnalysis === 'extra' ? 'text-emerald-700' : 'text-amber-700'
+                        }`}>
+                          {repairAnalysis.orphanGuidance}
+                        </p>
+                        {repairAnalysis.orphanAnalysis === 'extra' && (
+                          <p className="text-xs text-emerald-600 mt-1 italic">
+                            These entries don't match any class in the snapshot (wrong teacher+subject combination).
+                            Since all snapshot classes are fully placed, these appear to be duplicates or bugs.
+                          </p>
+                        )}
+                        {repairAnalysis.orphanAnalysis === 'possibly_unlinked' && (
+                          <p className="text-xs text-amber-600 mt-1 italic">
+                            The snapshot itself is never modified during editing - if orphans and missing sessions exist,
+                            the schedule entries may have corrupted teacher/subject/grade data that no longer matches the snapshot definition.
+                          </p>
+                        )}
                       </div>
                     )}
 
