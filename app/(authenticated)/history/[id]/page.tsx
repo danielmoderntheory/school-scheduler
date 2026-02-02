@@ -50,6 +50,100 @@ function gradeSort(a: string, b: string): number {
   return aNum - bNum
 }
 
+/**
+ * Rebuild gradeSchedules from teacherSchedules to ensure consistency.
+ * TeacherSchedules is the source of truth - this derives gradeSchedules from it.
+ * Handles multi-grade classes by parsing grade display strings (e.g., "6th-8th Grade").
+ */
+function rebuildGradeSchedules(
+  teacherSchedules: Record<string, TeacherSchedule>,
+  existingGradeSchedules: Record<string, GradeSchedule>
+): Record<string, GradeSchedule> {
+  const DAYS = ["Mon", "Tues", "Wed", "Thurs", "Fri"]
+  const gradeNames = Object.keys(existingGradeSchedules)
+
+  // Helper to parse grade names from grade_display string (e.g., "6th-11th Grade" -> ["6th Grade", "7th Grade", ...])
+  // Same logic as ScheduleStats.tsx
+  const parseGradeDisplay = (gradeDisplay: string): string[] => {
+    const grades: string[] = []
+
+    // Check for Kindergarten first
+    if (gradeDisplay.toLowerCase().includes('kindergarten') || gradeDisplay === 'K') {
+      const kGrade = gradeNames.find(g => g.toLowerCase().includes('kindergarten') || g === 'K')
+      if (kGrade) {
+        grades.push(kGrade)
+      }
+      return grades
+    }
+
+    // Check for range pattern like "6th-11th" or "6th-8th"
+    const rangeMatch = gradeDisplay.match(/(\d+)(?:st|nd|rd|th)?[-–](\d+)(?:st|nd|rd|th)?/)
+    if (rangeMatch) {
+      const start = parseInt(rangeMatch[1])
+      const end = parseInt(rangeMatch[2])
+      for (let i = start; i <= end; i++) {
+        const suffix = i === 1 ? 'st' : i === 2 ? 'nd' : i === 3 ? 'rd' : 'th'
+        const gradeName = `${i}${suffix} Grade`
+        if (gradeNames.includes(gradeName)) {
+          grades.push(gradeName)
+        }
+      }
+      return grades
+    }
+
+    // Single grade pattern - try exact match first
+    if (gradeNames.includes(gradeDisplay)) {
+      grades.push(gradeDisplay)
+      return grades
+    }
+
+    // Try to find matching grade by number
+    const singleMatch = gradeDisplay.match(/(\d+)(?:st|nd|rd|th)/)
+    if (singleMatch) {
+      const num = parseInt(singleMatch[1])
+      const suffix = num === 1 ? 'st' : num === 2 ? 'nd' : num === 3 ? 'rd' : 'th'
+      const gradeName = `${num}${suffix} Grade`
+      if (gradeNames.includes(gradeName)) {
+        grades.push(gradeName)
+      }
+    }
+
+    return grades
+  }
+
+  // Initialize empty schedules for each grade
+  const newGradeSchedules: Record<string, GradeSchedule> = {}
+  for (const grade of gradeNames) {
+    newGradeSchedules[grade] = {}
+    for (const day of DAYS) {
+      newGradeSchedules[grade][day] = {}
+    }
+  }
+
+  // Scan all teacher schedules and populate grade schedules
+  for (const [teacher, schedule] of Object.entries(teacherSchedules)) {
+    for (const day of DAYS) {
+      for (let block = 1; block <= 5; block++) {
+        const entry = schedule[day]?.[block]
+        if (!entry || entry[1] === "OPEN") continue
+
+        const gradeDisplay = entry[0]
+        const subject = entry[1]
+
+        // Parse the grade display to get all applicable grades
+        const targetGrades = parseGradeDisplay(gradeDisplay)
+
+        // Add this entry to each target grade's schedule
+        for (const grade of targetGrades) {
+          newGradeSchedules[grade][day][block] = [teacher, subject]
+        }
+      }
+    }
+  }
+
+  return newGradeSchedules
+}
+
 // Convert grade string to number for sorting (K=0, 1st=1, etc.)
 function gradeToNum(grade: string): number {
   if (grade.toLowerCase().includes("kindergarten") || grade === "K") return 0
@@ -1282,6 +1376,17 @@ export default function HistoryDetailPage() {
       }
     }
 
+    // Always rebuild gradeSchedules from teacherSchedules before saving
+    // teacherSchedules is the source of truth - this ensures consistency and fixes any corruption
+    const rebuiltGradeSchedules = rebuildGradeSchedules(
+      optionToSave.teacherSchedules,
+      selectedResult.gradeSchedules // Use original grade keys as reference
+    )
+    optionToSave = {
+      ...optionToSave,
+      gradeSchedules: rebuiltGradeSchedules,
+    }
+
     // Define the save logic
     const doSave = async () => {
       let updatedOptions: ScheduleOption[]
@@ -1558,6 +1663,7 @@ export default function HistoryDetailPage() {
       { name: 'Subject conflicts', key: 'subject_conflict' },
       { name: 'Schedule consistency', key: 'consistency' },
       { name: 'Session counts', key: 'session_count' },
+      { name: 'Unknown classes', key: 'unknown_class' },
       { name: 'Study hall coverage', key: 'study_hall_coverage' },
       { name: 'Fixed slot constraints', key: 'fixed_slot_violation' },
       { name: 'Availability constraints', key: 'availability_violation' },
@@ -2321,10 +2427,17 @@ export default function HistoryDetailPage() {
     // Create updated option with working schedules
     const DAYS = ["Mon", "Tues", "Wed", "Thurs", "Fri"]
 
+    // Rebuild gradeSchedules from teacherSchedules to ensure consistency
+    // This also fixes any previously corrupted data with phantom grade keys
+    const rebuiltGradeSchedules = rebuildGradeSchedules(
+      swapWorkingSchedules.teacherSchedules,
+      selectedResult.gradeSchedules
+    )
+
     const updatedOption: ScheduleOption = {
       ...selectedResult,
       teacherSchedules: swapWorkingSchedules.teacherSchedules,
-      gradeSchedules: swapWorkingSchedules.gradeSchedules,
+      gradeSchedules: rebuiltGradeSchedules,
       studyHallAssignments: swapWorkingSchedules.studyHallAssignments,
     }
 
@@ -2891,12 +3004,9 @@ export default function HistoryDetailPage() {
     const newTeacherSchedules = JSON.parse(JSON.stringify(schedules.teacherSchedules))
     const newGradeSchedules = JSON.parse(JSON.stringify(schedules.gradeSchedules))
 
-    // Clear blockers from their current positions
+    // Clear blockers from their current positions (only in teacherSchedules - gradeSchedules will be rebuilt)
     for (const { blocker } of blockers) {
       newTeacherSchedules[blocker.teacher][blocker.day][blocker.block] = [blocker.grade, "OPEN"]
-      if (newGradeSchedules[blocker.grade]?.[blocker.day]?.[blocker.block]) {
-        newGradeSchedules[blocker.grade][blocker.day][blocker.block] = null
-      }
     }
 
     // Helper: check if a placement is valid for a blocker being moved
@@ -2967,16 +3077,8 @@ export default function HistoryDetailPage() {
       for (const slot of shuffledSlots) {
         if (!isValidPlacement(blocker.grade, blocker.subject, slot.day, slot.block, blocker.teacher)) continue
 
-        // Place the blocker at the new position
+        // Place the blocker at the new position (only in teacherSchedules - gradeSchedules will be rebuilt)
         newTeacherSchedules[blocker.teacher][slot.day][slot.block] = blocker.entry
-
-        if (!newGradeSchedules[blocker.grade]) {
-          newGradeSchedules[blocker.grade] = {}
-        }
-        if (!newGradeSchedules[blocker.grade][slot.day]) {
-          newGradeSchedules[blocker.grade][slot.day] = {}
-        }
-        newGradeSchedules[blocker.grade][slot.day][slot.block] = [blocker.teacher, blocker.subject]
 
         movedBlockers.push({
           from: { teacher: blocker.teacher, day: blocker.day, block: blocker.block },
@@ -3776,6 +3878,54 @@ export default function HistoryDetailPage() {
             })
           }
         }
+
+        // 5b. Unknown Classes - check every teaching entry in teacherSchedules is a real class from snapshot
+        // Build a set of valid (teacher, subject) pairs from the snapshot
+        const validTeacherSubjects = new Set<string>()
+        for (const cls of classes) {
+          if (cls.teacher && cls.subject) {
+            validTeacherSubjects.add(`${cls.teacher}|${cls.subject}`)
+          }
+        }
+
+        // Scan teacherSchedules for any entry that's not in the valid set
+        const unknownEntries: Array<{ teacher: string; day: string; block: number; grade: string; subject: string }> = []
+        for (const [teacher, schedule] of Object.entries(option.teacherSchedules)) {
+          for (const day of DAYS) {
+            for (let block = 1; block <= 5; block++) {
+              const entry = schedule[day]?.[block]
+              if (!entry || entry[1] === "OPEN" || entry[1] === "Study Hall") continue
+
+              const grade = entry[0]
+              const subject = entry[1]
+              const key = `${teacher}|${subject}`
+
+              if (!validTeacherSubjects.has(key)) {
+                unknownEntries.push({ teacher, day, block, grade, subject })
+              }
+            }
+          }
+        }
+
+        if (unknownEntries.length > 0) {
+          // Group by teacher+subject for cleaner error messages
+          const grouped = new Map<string, typeof unknownEntries>()
+          for (const entry of unknownEntries) {
+            const key = `${entry.teacher}|${entry.subject}`
+            if (!grouped.has(key)) grouped.set(key, [])
+            grouped.get(key)!.push(entry)
+          }
+
+          for (const [key, entries] of grouped) {
+            const [teacher, subject] = key.split('|')
+            const locations = entries.map(e => `${e.day} B${e.block}`).join(', ')
+            errors.push({
+              type: 'unknown_class',
+              message: `[Unknown Class] ${teacher}/${subject} (${entries.length}x at ${locations}) is not in the class list`,
+              cells: entries.map(e => ({ teacher: e.teacher, day: e.day, block: e.block, grade: e.grade, subject: e.subject }))
+            })
+          }
+        }
       }
 
       // 6. Study Hall Coverage - check all required grades have study halls
@@ -3979,10 +4129,17 @@ export default function HistoryDetailPage() {
       }
     }
 
+    // Rebuild gradeSchedules from teacherSchedules to ensure consistency
+    // This fixes issues with multi-grade classes creating phantom grade keys
+    const rebuiltGradeSchedules = rebuildGradeSchedules(
+      workingSchedules.teacherSchedules,
+      selectedResult.gradeSchedules // Use original grade keys as reference
+    )
+
     const updatedOption: ScheduleOption = {
       ...selectedResult,
       teacherSchedules: workingSchedules.teacherSchedules,
-      gradeSchedules: workingSchedules.gradeSchedules,
+      gradeSchedules: rebuiltGradeSchedules,
       studyHallAssignments: updatedStudyHallAssignments,
     }
 
