@@ -112,6 +112,7 @@ function sortTeachers(
 }
 
 // Format schedule cell: "Grade - Subject" or just "OPEN" (no dash)
+// For teacher schedules: entry is [grade, subject]
 function formatCell(entry: [string, string] | null | undefined): string {
   if (!entry) return ""
   // OPEN blocks have no grade info
@@ -123,6 +124,50 @@ function formatCell(entry: [string, string] | null | undefined): string {
   // If first part is empty, just show subject
   if (!entry[0]) return entry[1]
   return `${entry[0]} - ${entry[1]}`
+}
+
+// Format grade schedule cell - handles array format [[teacher, subject], ...]
+// For grade schedules: entries are [teacher, subject] pairs
+function formatGradeCell(raw: unknown): string {
+  if (!raw) return ""
+
+  // Handle array format (new)
+  let entries: [string, string][] = []
+  if (Array.isArray(raw) && raw.length > 0) {
+    if (Array.isArray(raw[0])) {
+      // New format: array of arrays
+      entries = raw as [string, string][]
+    } else if (typeof raw[0] === 'string' && raw.length === 2) {
+      // Old format: single tuple
+      entries = [raw as [string, string]]
+    }
+  }
+
+  if (entries.length === 0) return ""
+
+  // Single entry - show teacher and subject
+  if (entries.length === 1) {
+    const [teacher, subject] = entries[0]
+    if (subject === "OPEN") return "OPEN"
+    if (subject === "Study Hall") return `${teacher} - Study Hall`
+    return `${teacher} - ${subject}`
+  }
+
+  // Multiple entries (electives) - just show "Elective"
+  // Filter out OPEN and Study Hall for counting
+  const classEntries = entries.filter(([, subject]) => subject !== "OPEN" && subject !== "Study Hall")
+  if (classEntries.length === 0) {
+    // All entries are Study Hall or OPEN - just show first
+    const [teacher, subject] = entries[0]
+    return subject === "OPEN" ? "OPEN" : `${teacher} - ${subject}`
+  }
+  if (classEntries.length === 1) {
+    const [teacher, subject] = classEntries[0]
+    return `${teacher} - ${subject}`
+  }
+
+  // Multiple electives - just show "Elective"
+  return "Elective"
 }
 
 // Style definitions
@@ -383,7 +428,7 @@ export function generateXLSX(option: ScheduleOption, metadata?: ExportMetadata):
       gradeRowInfo.push({ type: "block", row: gradeData.length })
       const row: (string | number)[] = [`Block ${block}`]
       DAYS.forEach((day) => {
-        row.push(formatCell(schedule[day]?.[block]))
+        row.push(formatGradeCell(schedule[day]?.[block]))
       })
       gradeData.push(row)
     })
@@ -476,7 +521,7 @@ export function generateCSV(option: ScheduleOption, metadata?: ExportMetadata): 
     BLOCKS.forEach((block) => {
       const row: string[] = [`Block ${block}`]
       DAYS.forEach((day) => {
-        const cell = formatCell(schedule[day]?.[block])
+        const cell = formatGradeCell(schedule[day]?.[block])
         row.push(cell ? `"${cell}"` : "")
       })
       lines.push(row.join(","))
