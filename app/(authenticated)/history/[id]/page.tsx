@@ -54,13 +54,28 @@ function gradeSort(a: string, b: string): number {
  * Rebuild gradeSchedules from teacherSchedules to ensure consistency.
  * TeacherSchedules is the source of truth - this derives gradeSchedules from it.
  * Handles multi-grade classes by parsing grade display strings (e.g., "6th-8th Grade").
+ *
+ * @param gradesSnapshot - Array of valid grades from the snapshot (source of truth for grade names)
  */
 function rebuildGradeSchedules(
   teacherSchedules: Record<string, TeacherSchedule>,
+  gradesSnapshot: Array<{ id: string; name: string; display_name: string }> | undefined,
   existingGradeSchedules: Record<string, GradeSchedule>
 ): Record<string, GradeSchedule> {
   const DAYS = ["Mon", "Tues", "Wed", "Thurs", "Fri"]
-  const gradeNames = Object.keys(existingGradeSchedules)
+
+  // Use grades_snapshot as the source of truth for valid grade names
+  // Fall back to filtering existingGradeSchedules if snapshot not available
+  let gradeNames: string[]
+  if (gradesSnapshot && gradesSnapshot.length > 0) {
+    gradeNames = gradesSnapshot.map(g => g.display_name)
+  } else {
+    // Fallback: filter out phantom grade keys (like "6th-7th Grade")
+    gradeNames = Object.keys(existingGradeSchedules).filter(grade => {
+      const hasRangePattern = /\d+(?:st|nd|rd|th)?[-–]\d+/.test(grade)
+      return !hasRangePattern
+    })
+  }
 
   // Helper to parse grade names from grade_display string (e.g., "6th-11th Grade" -> ["6th Grade", "7th Grade", ...])
   // Same logic as ScheduleStats.tsx
@@ -1380,7 +1395,8 @@ export default function HistoryDetailPage() {
     // teacherSchedules is the source of truth - this ensures consistency and fixes any corruption
     const rebuiltGradeSchedules = rebuildGradeSchedules(
       optionToSave.teacherSchedules,
-      selectedResult.gradeSchedules // Use original grade keys as reference
+      statsForValidation?.grades_snapshot,
+      selectedResult.gradeSchedules // Fallback for grade keys
     )
     optionToSave = {
       ...optionToSave,
@@ -2431,6 +2447,7 @@ export default function HistoryDetailPage() {
     // This also fixes any previously corrupted data with phantom grade keys
     const rebuiltGradeSchedules = rebuildGradeSchedules(
       swapWorkingSchedules.teacherSchedules,
+      generation.stats?.grades_snapshot,
       selectedResult.gradeSchedules
     )
 
@@ -4133,7 +4150,8 @@ export default function HistoryDetailPage() {
     // This fixes issues with multi-grade classes creating phantom grade keys
     const rebuiltGradeSchedules = rebuildGradeSchedules(
       workingSchedules.teacherSchedules,
-      selectedResult.gradeSchedules // Use original grade keys as reference
+      generation.stats?.grades_snapshot,
+      selectedResult.gradeSchedules // Fallback for grade keys
     )
 
     const updatedOption: ScheduleOption = {
