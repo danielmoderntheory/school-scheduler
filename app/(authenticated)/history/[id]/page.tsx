@@ -195,7 +195,8 @@ export default function HistoryDetailPage() {
 
   // Change detection state
   const [classChanges, setClassChanges] = useState<ChangeDetectionResult | null>(null)
-  const [changesDismissed, setChangesDismissed] = useState(false)
+  // Track dismissed state per option/revision (so dismissing for Rev 1 doesn't affect Rev 2)
+  const [dismissedForOptions, setDismissedForOptions] = useState<Set<string>>(new Set())
   const [showChangesDialog, setShowChangesDialog] = useState(false)
   const [pendingModeEntry, setPendingModeEntry] = useState<'regen' | 'swap' | 'freeform' | 'studyHall' | null>(null)
   const [useCurrentClasses, setUseCurrentClasses] = useState(false) // When true, regen uses current DB classes instead of snapshot
@@ -288,7 +289,7 @@ export default function HistoryDetailPage() {
         const currentClasses: CurrentClass[] = await res.json()
         const result = detectClassChanges(generation.stats!.classes_snapshot!, currentClasses)
         setClassChanges(result)
-        setChangesDismissed(false) // Reset dismissed state when generation changes
+        setDismissedForOptions(new Set()) // Reset dismissed state when generation changes
       } catch (error) {
         console.error('Error detecting class changes:', error)
       }
@@ -376,7 +377,7 @@ export default function HistoryDetailPage() {
 
   function enterRegenMode(skipChangesCheck = false) {
     // If changes detected and not dismissed, show dialog first
-    if (!skipChangesCheck && classChanges?.hasChanges && !changesDismissed) {
+    if (!skipChangesCheck && classChanges?.hasChanges && !dismissedForOptions.has(viewingOption)) {
       setPendingModeEntry('regen')
       setShowChangesDialog(true)
       return
@@ -1203,7 +1204,12 @@ export default function HistoryDetailPage() {
         // Re-check for changes (should now show none if snapshots were updated)
         if (useCurrentClasses) {
           setClassChanges(null) // Clear changes since we just updated snapshots
-          setChangesDismissed(false)
+          // Remove this option from dismissed set since changes were applied
+          setDismissedForOptions(prev => {
+            const next = new Set(prev)
+            next.delete(viewingOption)
+            return next
+          })
         }
         toast.success(successMessage)
       } else {
@@ -1229,7 +1235,7 @@ export default function HistoryDetailPage() {
 
   function enterStudyHallMode(skipChangesCheck = false) {
     // If changes detected and not dismissed, show dialog first
-    if (!skipChangesCheck && classChanges?.hasChanges && !changesDismissed) {
+    if (!skipChangesCheck && classChanges?.hasChanges && !dismissedForOptions.has(viewingOption)) {
       setPendingModeEntry('studyHall')
       setShowChangesDialog(true)
       return
@@ -2134,7 +2140,7 @@ export default function HistoryDetailPage() {
   function enterSwapMode(skipChangesCheck = false) {
     if (!selectedResult) return
     // If changes detected and not dismissed, show dialog first
-    if (!skipChangesCheck && classChanges?.hasChanges && !changesDismissed) {
+    if (!skipChangesCheck && classChanges?.hasChanges && !dismissedForOptions.has(viewingOption)) {
       setPendingModeEntry('swap')
       setShowChangesDialog(true)
       return
@@ -2370,7 +2376,7 @@ export default function HistoryDetailPage() {
     if (!selectedResult || !generation) return
 
     // If changes detected and not dismissed, show dialog first
-    if (!skipChangesCheck && classChanges?.hasChanges && !changesDismissed) {
+    if (!skipChangesCheck && classChanges?.hasChanges && !dismissedForOptions.has(viewingOption)) {
       setPendingModeEntry('freeform')
       setShowChangesDialog(true)
       return
@@ -2877,10 +2883,12 @@ export default function HistoryDetailPage() {
         }
 
         for (const [subject, locations] of subjectsOnDay) {
-          if (locations.length > 1) {
+          // Only flag if same subject at DIFFERENT blocks (multiple teachers at same block = electives, which is valid)
+          const uniqueBlocks = new Set(locations.map(loc => loc.block))
+          if (uniqueBlocks.size > 1) {
             errors.push({
               type: 'subject_conflict',
-              message: `[No Duplicate Subjects] ${grade} has ${subject} twice on ${day}`,
+              message: `[No Duplicate Subjects] ${grade} has ${subject} at ${uniqueBlocks.size} different times on ${day}`,
               cells: locations
             })
           }
@@ -3092,10 +3100,12 @@ export default function HistoryDetailPage() {
         }
 
         for (const [subject, occurrences] of subjectsOnDay) {
-          if (occurrences.length > 1) {
+          // Only flag if same subject at DIFFERENT blocks (multiple teachers at same block = electives, which is valid)
+          const uniqueBlocks = new Set(occurrences.map(o => o.block))
+          if (uniqueBlocks.size > 1) {
             errors.push({
               type: 'subject_conflict',
-              message: `[Subject Conflict] ${grade} has ${subject} ${occurrences.length}x on ${day}`,
+              message: `[Subject Conflict] ${grade} has ${subject} at ${uniqueBlocks.size} different times on ${day}`,
               cells: occurrences.map(o => ({ teacher: o.teacher, day, block: o.block, grade, subject }))
             })
           }
@@ -3667,7 +3677,7 @@ export default function HistoryDetailPage() {
               )}
 
               {/* Class Changes Indicator - small button that opens dialog */}
-              {classChanges?.hasChanges && !changesDismissed && !regenMode && !swapMode && !freeformMode && !studyHallMode && (
+              {classChanges?.hasChanges && !dismissedForOptions.has(viewingOption) && !regenMode && !swapMode && !freeformMode && !studyHallMode && (
                 <Button
                   variant="outline"
                   size="sm"
@@ -3836,11 +3846,33 @@ export default function HistoryDetailPage() {
                           {validTargets.length} valid target{validTargets.length !== 1 ? 's' : ''} available
                         </span>
                       )}
+                      {validationErrors.length > 0 && (
+                        <span className="text-red-600 font-medium">
+                          {validationErrors.length} validation issue{validationErrors.length !== 1 ? 's' : ''}
+                        </span>
+                      )}
                     </div>
                     <span className="text-amber-600/70">
                       {generation.options.length === 1 ? "Will create Revision 2" : `Will update Revision ${viewingOption}`}
                     </span>
                   </div>
+                  {/* Validation errors warning */}
+                  {validationErrors.length > 0 && (
+                    <div className="mt-2 text-red-600 text-sm bg-red-50 border border-red-200 rounded px-3 py-2">
+                      <div className="flex items-center gap-2 font-medium mb-1">
+                        <AlertTriangle className="h-4 w-4 flex-shrink-0" />
+                        <span>Schedule conflicts detected:</span>
+                      </div>
+                      <ul className="text-xs space-y-0.5 ml-6">
+                        {validationErrors.slice(0, 5).map((error, idx) => (
+                          <li key={idx}>• {error.message}</li>
+                        ))}
+                        {validationErrors.length > 5 && (
+                          <li className="text-red-500">...and {validationErrors.length - 5} more</li>
+                        )}
+                      </ul>
+                    </div>
+                  )}
                 </div>
               )}
 
@@ -4561,7 +4593,8 @@ export default function HistoryDetailPage() {
             <AlertDialogAction
               onClick={() => {
                 setShowChangesDialog(false)
-                setChangesDismissed(true)
+                // Mark as dismissed for this specific option/revision
+                setDismissedForOptions(prev => new Set(prev).add(viewingOption))
                 setPendingModeEntry(null)
                 // Pre-select affected teachers and enter regen mode with current classes
                 setSelectedForRegen(new Set(classChanges?.affectedTeachers || []))
@@ -4712,7 +4745,20 @@ export default function HistoryDetailPage() {
               })()}
               <Button
                 variant={validationModal?.mode === 'review' ? 'default' : 'outline'}
-                onClick={() => setValidationModal(null)}
+                onClick={() => {
+                  if (validationModal?.mode === 'review') {
+                    setValidationModal(null)
+                  } else {
+                    // Switch to review mode and expand all failed checks
+                    const failedIndices = new Set<number>()
+                    validationModal?.checks.forEach((check, idx) => {
+                      if (check.status === 'failed' && check.errors && check.errors.length > 0) {
+                        failedIndices.add(idx)
+                      }
+                    })
+                    setValidationModal(prev => prev ? { ...prev, mode: 'review', expandedChecks: failedIndices } : null)
+                  }
+                }}
                 className="w-full sm:w-auto"
               >
                 {validationModal?.mode === 'review' ? 'Close' : 'Review Errors'}

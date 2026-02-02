@@ -85,6 +85,16 @@ export function ScheduleStats({
     // Helper to parse grade names from grade_display string (e.g., "6th-11th Grade" -> ["6th Grade", "7th Grade", ...])
     const parseGradeDisplay = (gradeDisplay: string): string[] => {
       const grades: string[] = []
+
+      // Check for Kindergarten first
+      if (gradeDisplay.toLowerCase().includes('kindergarten') || gradeDisplay === 'K') {
+        const kGrade = gradeNames.find(g => g.toLowerCase().includes('kindergarten') || g === 'K')
+        if (kGrade) {
+          grades.push(kGrade)
+        }
+        return grades
+      }
+
       // Check for range pattern like "6th-11th" or "6th-8th"
       const rangeMatch = gradeDisplay.match(/(\d+)(?:st|nd|rd|th)-(\d+)(?:st|nd|rd|th)/)
       if (rangeMatch) {
