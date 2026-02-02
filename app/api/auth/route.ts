@@ -1,5 +1,12 @@
 import { NextRequest, NextResponse } from "next/server"
 
+// Check if user is authenticated
+export async function GET(request: NextRequest) {
+  const authCookie = request.cookies.get("auth")
+  const isAuthenticated = authCookie?.value === "authenticated"
+  return NextResponse.json({ isAuthenticated })
+}
+
 export async function POST(request: NextRequest) {
   const body = await request.json()
   const { password } = body

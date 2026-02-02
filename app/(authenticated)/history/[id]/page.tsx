@@ -136,6 +136,7 @@ export default function HistoryDetailPage() {
   const [viewingOption, setViewingOption] = useState("1")
   const [viewMode, setViewMode] = useState<"teacher" | "grade">("teacher")
   const [saving, setSaving] = useState(false)
+  const [isPublicView, setIsPublicView] = useState<boolean | null>(null) // null = checking, true = public, false = authenticated
 
   // Regeneration state - teachers selected for regeneration
   const [regenMode, setRegenMode] = useState(false)
@@ -206,6 +207,21 @@ export default function HistoryDetailPage() {
   useEffect(() => {
     loadGeneration()
   }, [id])
+
+  // Check if user is authenticated (for public view mode)
+  useEffect(() => {
+    async function checkAuth() {
+      try {
+        const res = await fetch('/api/auth')
+        const data = await res.json()
+        setIsPublicView(!data.isAuthenticated)
+      } catch {
+        // On error, assume public view for safety
+        setIsPublicView(true)
+      }
+    }
+    checkAuth()
+  }, [])
 
   // Prevent accidental navigation away during generation
   useEffect(() => {
@@ -3510,7 +3526,7 @@ export default function HistoryDetailPage() {
   const selectedResult = displayedOption
   const currentOption = savedOption
 
-  if (loading) {
+  if (loading || isPublicView === null) {
     return (
       <div className="flex items-center justify-center p-12">
         <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
@@ -3533,6 +3549,134 @@ export default function HistoryDetailPage() {
 
   const teacherCount = selectedResult ? Object.keys(selectedResult.teacherSchedules).length : 0
   const selectedCount = selectedForRegen.size
+
+  // Public View Mode - simplified read-only view for shared schedules
+  if (isPublicView) {
+    // Get the selected/primary option to display
+    const publicOption = generation.selected_option
+      ? generation.options[generation.selected_option - 1]
+      : generation.options[0]
+
+    if (!publicOption) {
+      return (
+        <div className="max-w-6xl mx-auto p-8">
+          <p>Schedule not available.</p>
+        </div>
+      )
+    }
+
+    return (
+      <div className="max-w-7xl mx-auto p-8">
+        {/* Header */}
+        <div className="mb-6">
+          <h1 className="text-2xl font-bold mb-2">
+            {generation.quarter?.name} Schedule
+          </h1>
+          <div className="flex items-center gap-3 text-sm text-muted-foreground">
+            <span>{new Date(generation.generated_at).toLocaleString()}</span>
+            <span className="text-slate-300">{generation.id.slice(0, 8)}</span>
+            {generation.notes && (
+              <span className="text-slate-600 italic">
+                — &ldquo;{generation.notes}&rdquo;
+              </span>
+            )}
+          </div>
+        </div>
+
+        {/* Revision indicator and Print button */}
+        <div className="flex items-center justify-between mb-4 no-print">
+          <div className="inline-flex rounded-lg bg-gray-100 p-1">
+            <span className="px-3 py-1.5 rounded-md text-sm bg-white text-gray-900 shadow-sm font-medium flex items-center gap-1.5">
+              <Check className="h-3.5 w-3.5 text-emerald-600" />
+              Revision {generation.selected_option || 1}
+            </span>
+          </div>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => window.print()}
+            className="gap-1.5"
+          >
+            <Printer className="h-4 w-4" />
+            Print
+          </Button>
+        </div>
+
+        {/* View toggle */}
+        <div className="flex items-center justify-between mb-4 no-print">
+          <h3 className="font-semibold">
+            {viewMode === "teacher" ? "Teacher Schedules" : "Grade Schedules"}
+          </h3>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => setViewMode(viewMode === "teacher" ? "grade" : "teacher")}
+            className="gap-1.5"
+          >
+            {viewMode === "teacher" ? (
+              <GraduationCap className="h-4 w-4" />
+            ) : (
+              <Users className="h-4 w-4" />
+            )}
+            View by {viewMode === "teacher" ? "Grade" : "Teacher"}
+          </Button>
+        </div>
+
+        {/* Schedule Grids */}
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 print-grid">
+          {viewMode === "teacher"
+            ? Object.entries(publicOption.teacherSchedules)
+                .sort(([teacherA, scheduleA], [teacherB, scheduleB]) => {
+                  const statA = publicOption.teacherStats.find(s => s.teacher === teacherA)
+                  const statB = publicOption.teacherStats.find(s => s.teacher === teacherB)
+                  const infoA = analyzeTeacherGrades(scheduleA)
+                  const infoB = analyzeTeacherGrades(scheduleB)
+
+                  // 1. Full-time before part-time
+                  if (statA?.status === 'full-time' && statB?.status !== 'full-time') return -1
+                  if (statA?.status !== 'full-time' && statB?.status === 'full-time') return 1
+
+                  // 2. Teachers with a primary grade before those without
+                  if (infoA.hasPrimary && !infoB.hasPrimary) return -1
+                  if (!infoA.hasPrimary && infoB.hasPrimary) return 1
+
+                  // 3. Sort by primary grade
+                  if (infoA.primaryGrade !== infoB.primaryGrade) {
+                    return infoA.primaryGrade - infoB.primaryGrade
+                  }
+
+                  // 4. Sort by grade spread
+                  if (infoA.gradeSpread !== infoB.gradeSpread) {
+                    return infoA.gradeSpread - infoB.gradeSpread
+                  }
+
+                  // 5. Alphabetical
+                  return teacherA.localeCompare(teacherB)
+                })
+                .map(([teacher, schedule]) => (
+                  <ScheduleGrid
+                    key={teacher}
+                    schedule={schedule}
+                    type="teacher"
+                    name={teacher}
+                    status={publicOption.teacherStats.find(s => s.teacher === teacher)?.status}
+                  />
+                ))
+            : Object.entries(publicOption.gradeSchedules)
+                .sort(([a], [b]) => gradeSort(a, b))
+                .map(([grade, schedule]) => (
+                  <ScheduleGrid
+                    key={grade}
+                    schedule={schedule}
+                    type="grade"
+                    name={grade}
+                  />
+                ))
+          }
+        </div>
+      </div>
+    )
+  }
 
   return (
     <div className="max-w-7xl mx-auto p-8">

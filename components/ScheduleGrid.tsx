@@ -64,8 +64,30 @@ export function ScheduleGrid({
   onUnplace,
   onDeselect,
 }: ScheduleGridProps) {
-  function getCellContent(day: string, block: number): [string, string] | null {
-    return schedule[day]?.[block] || null
+  // Returns [primary, secondary, isMultiple] where isMultiple indicates multiple entries (electives)
+  function getCellContent(day: string, block: number): { entry: [string, string] | null; isMultiple: boolean } {
+    const raw = schedule[day]?.[block]
+    if (!raw) return { entry: null, isMultiple: false }
+
+    // Handle array format for grade schedules (electives): [[teacher, subject], ...]
+    if (Array.isArray(raw) && raw.length > 0) {
+      if (Array.isArray(raw[0])) {
+        // New format: array of arrays
+        const entries = raw as unknown as [string, string][]
+        // Filter to actual classes (not OPEN or Study Hall)
+        const classEntries = entries.filter(([, subject]) => subject !== "OPEN" && subject !== "Study Hall")
+        if (classEntries.length > 1) {
+          // Multiple classes at same time = Elective period
+          return { entry: ["", "Elective"], isMultiple: true }
+        }
+        // Single entry or only OPEN/Study Hall - return first
+        return { entry: entries[0], isMultiple: false }
+      }
+      // Old format: single tuple [string, string]
+      return { entry: raw as [string, string], isMultiple: false }
+    }
+
+    return { entry: null, isMultiple: false }
   }
 
   function getCellType(entry: [string, string] | null): "study-hall" | "open" | "class" | "empty" {
@@ -124,7 +146,7 @@ export function ScheduleGrid({
     if (type !== "teacher") return false
     // Picked-up cells are valid targets (they're essentially empty now)
     if (isPickedUpCell(day, block)) return true
-    const entry = getCellContent(day, block)
+    const { entry } = getCellContent(day, block)
     const cellType = getCellType(entry)
     // Can place on OPEN cells or swap with classes/study halls
     return cellType === "open" || cellType === "empty" || cellType === "class" || cellType === "study-hall"
@@ -136,6 +158,7 @@ export function ScheduleGrid({
       const [, subject] = entry
       if (subject === "OPEN") return "bg-gray-100 text-gray-500"
       if (subject === "Study Hall") return "bg-blue-100 text-blue-800"
+      if (subject === "Elective") return "bg-purple-50"
       return "bg-green-50"
     })()
 
@@ -217,7 +240,7 @@ export function ScheduleGrid({
   function handleCellClick(day: string, block: number) {
     // Handle freeform mode
     if (freeformMode && type === "teacher") {
-      const entry = getCellContent(day, block)
+      const { entry } = getCellContent(day, block)
       const cellType = getCellType(entry)
       const [grade, subject] = entry || ["", ""]
       const placement = hasPendingPlacement(day, block)
@@ -267,7 +290,7 @@ export function ScheduleGrid({
 
     if (!swapMode || !onCellClick) return
 
-    const entry = getCellContent(day, block)
+    const { entry } = getCellContent(day, block)
     const cellType = getCellType(entry)
 
     if (type === "teacher") {
@@ -356,7 +379,7 @@ export function ScheduleGrid({
                 B{block}
               </td>
               {DAYS.map((day) => {
-                const entry = getCellContent(day, block)
+                const { entry, isMultiple } = getCellContent(day, block)
                 const [primary, secondary] = entry || ["", ""]
 
                 // In freeform mode, check for pending placements or picked-up state
@@ -405,6 +428,13 @@ export function ScheduleGrid({
                     ) : displaySecondary === "OPEN" ? (
                       // OPEN cells just show "OPEN" without grade
                       <span className="text-xs text-muted-foreground">OPEN</span>
+                    ) : isMultiple ? (
+                      // Multiple entries (electives) - show just "Elective" or "Multiple"
+                      <div className="max-w-full overflow-hidden">
+                        <div className="font-medium text-xs leading-tight text-purple-700">
+                          {displaySecondary}
+                        </div>
+                      </div>
                     ) : hasContent ? (
                       <div className="max-w-full overflow-hidden">
                         <div className="font-medium text-xs leading-tight truncate" title={type === "teacher" ? displayPrimary : displaySecondary}>

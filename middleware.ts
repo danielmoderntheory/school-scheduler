@@ -16,6 +16,14 @@ export function middleware(request: NextRequest) {
     return NextResponse.next()
   }
 
+  // Allow unauthenticated access to shared schedule pages (public view mode)
+  // Match /history/[uuid] pattern for both page and API
+  if (request.nextUrl.pathname.match(/^\/history\/[a-f0-9-]+$/i) ||
+      request.nextUrl.pathname.match(/^\/api\/history\/[a-f0-9-]+$/i)) {
+    // Allow access but don't set auth - page will detect public view mode
+    return NextResponse.next()
+  }
+
   // Check for auth cookie
   const authCookie = request.cookies.get("auth")
   if (!authCookie || authCookie.value !== "authenticated") {
