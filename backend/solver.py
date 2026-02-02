@@ -234,13 +234,20 @@ def get_study_hall_eligible(teachers: list[Teacher], classes: list[ClassEntry], 
     return eligible
 
 
-def build_sessions(classes: list[ClassEntry], locked_grade_slots: dict[str, set[int]] = None, grades: list[str] = None) -> list[Session]:
+def build_sessions(
+    classes: list[ClassEntry],
+    locked_grade_slots: dict[str, set[int]] = None,
+    grades: list[str] = None,
+    locked_grade_subject_days: dict[tuple[str, str], set[int]] = None
+) -> list[Session]:
     """Convert classes to sessions (one per day of instruction).
 
     Args:
         classes: List of ClassEntry objects
         locked_grade_slots: Dict mapping grade to set of blocked slot numbers
         grades: List of grade names from database (for grade_blocked_slots initialization)
+        locked_grade_subject_days: Dict mapping (grade, subject) to set of day indices where
+            that subject is already taught by a locked teacher (to prevent duplicate subjects per day)
 
     Sessions are sorted by constraint level (most constrained first):
     1. Fixed slots first (only 1 valid slot)
@@ -257,6 +264,8 @@ def build_sessions(classes: list[ClassEntry], locked_grade_slots: dict[str, set[
     Args:
         classes: List of ClassEntry objects to schedule
         locked_grade_slots: Optional dict mapping grade -> set of slots blocked by locked teachers
+        locked_grade_subject_days: Optional dict mapping (grade, subject) -> set of day indices
+            where that subject is already taught by locked teachers
     """
     sessions = []
     session_id = 0
@@ -330,6 +339,7 @@ def build_sessions(classes: list[ClassEntry], locked_grade_slots: dict[str, set[
             # For regular (non-elective) classes, remove slots blocked by:
             # 1. Electives with fixed slots
             # 2. Locked teachers (for partial regeneration)
+            # 3. Days where locked teachers already teach same subject to same grade
             if not cls.is_elective and cls.grades:
                 blocked = set()
                 for grade in cls.grades:
@@ -339,6 +349,18 @@ def build_sessions(classes: list[ClassEntry], locked_grade_slots: dict[str, set[
                         blocked.update(locked_grade_slots.get(grade, set()))
                 if blocked:
                     valid_slots = [s for s in valid_slots if s not in blocked]
+
+                # Block entire days where locked teachers already teach this subject to this grade
+                # This prevents "same subject twice per day per grade" conflicts with locked schedules
+                if locked_grade_subject_days:
+                    blocked_days = set()
+                    for grade in cls.grades:
+                        key = (grade, cls.subject)
+                        if key in locked_grade_subject_days:
+                            blocked_days.update(locked_grade_subject_days[key])
+                    if blocked_days:
+                        # Filter out slots on blocked days (day = slot // 5)
+                        valid_slots = [s for s in valid_slots if (s // 5) not in blocked_days]
 
             for _ in range(cls.days_per_week):
                 sessions.append(Session(
@@ -704,9 +726,8 @@ def parse_grades_from_database(grade_display: str, database_grades: set) -> list
     """
     import re
 
-    # Skip electives - they don't map to specific grades
-    if 'elective' in grade_display.lower():
-        return []
+    # Note: We no longer skip electives - they DO map to specific grades
+    # (e.g., "6th-11th Elective" should map to grades 6-11)
 
     trimmed = grade_display.strip()
 
@@ -779,6 +800,9 @@ def rebuild_grade_schedules(teacher_schedules: dict, grades: list[str]) -> dict:
     for g in grades:
         grade_schedules[g] = {day: {b: None for b in BLOCKS} for day in DAYS}
 
+    # Track entries that failed to parse (for debugging)
+    unparsed_entries = []
+
     # Populate from teacher schedules
     for teacher, schedule in teacher_schedules.items():
         for day in DAYS:
@@ -788,14 +812,36 @@ def rebuild_grade_schedules(teacher_schedules: dict, grades: list[str]) -> dict:
                     grade_display = entry[0]
                     subject = entry[1]
 
+                    # Skip Study Hall - it's tracked separately
+                    if subject == 'Study Hall':
+                        continue
+
                     # Parse grades using DATABASE grades (no hardcoding)
                     parsed_grades = parse_grades_from_database(grade_display, database_grades)
+
+                    if not parsed_grades:
+                        # Log entries that couldn't be parsed
+                        unparsed_entries.append({
+                            'teacher': teacher,
+                            'day': day,
+                            'block': block,
+                            'grade_display': grade_display,
+                            'subject': subject,
+                        })
 
                     for g in parsed_grades:
                         # Initialize grade if somehow not in the list (safety)
                         if g not in grade_schedules:
                             grade_schedules[g] = {d: {b: None for b in BLOCKS} for d in DAYS}
                         grade_schedules[g][day][block] = [teacher, subject]
+
+    # Log warning if entries couldn't be parsed
+    if unparsed_entries:
+        print(f"[rebuild_grade_schedules] WARNING: {len(unparsed_entries)} entries could not be parsed to grades:")
+        for e in unparsed_entries[:10]:  # Limit to first 10
+            print(f"  - {e['teacher']} on {e['day']} B{e['block']}: '{e['grade_display']}' / '{e['subject']}'")
+        if len(unparsed_entries) > 10:
+            print(f"  ... and {len(unparsed_entries) - 10} more")
 
     return grade_schedules
 
@@ -1322,6 +1368,8 @@ def generate_schedules(
 
     # Pre-compute grade slots blocked by locked teachers
     locked_grade_slots: dict[str, set[int]] = {g: set() for g in active_grades}
+    # Also track which subjects are taught on each day for each grade (to prevent duplicate subjects per day)
+    locked_grade_subject_days: dict[tuple[str, str], set[int]] = {}
     if locked_teachers:
         for teacher_name, schedule in locked_teachers.items():
             for day, blocks in schedule.items():
@@ -1344,6 +1392,11 @@ def generate_schedules(
                         for g in parsed_grades:
                             if g in locked_grade_slots:
                                 locked_grade_slots[g].add(slot)
+                            # Track subject+day combinations to prevent duplicate subjects per day per grade
+                            key = (g, subject)
+                            if key not in locked_grade_subject_days:
+                                locked_grade_subject_days[key] = set()
+                            locked_grade_subject_days[key].add(day_idx)
 
     eligible = get_study_hall_eligible(teacher_objs, classes_to_schedule, rules)
 
@@ -1359,7 +1412,12 @@ def generate_schedules(
         additional = [t for t in teachers_needing_study_halls if t not in (locked_teachers or {}).keys()]
         eligible = list(set(eligible + additional))
 
-    sessions = build_sessions(classes_to_schedule, locked_grade_slots if is_partial_regen else None, active_grades)
+    sessions = build_sessions(
+        classes_to_schedule,
+        locked_grade_slots if is_partial_regen else None,
+        active_grades,
+        locked_grade_subject_days if is_partial_regen else None
+    )
 
     if on_progress:
         on_progress(0, num_attempts, 'Initializing CP-SAT solver...')
@@ -1551,8 +1609,10 @@ def generate_schedules(
 
             # Redistribute open blocks to minimize back-to-back issues
             # Only run if the no_btb_open rule is enabled
+            # IMPORTANT: Only redistribute for non-locked teachers to preserve locked schedules
             if is_rule_enabled(rules, 'no_btb_open'):
-                redistribute_open_blocks(ts, gs, full_time_names)
+                unlocked_full_time = [t for t in full_time_names if t not in locked_teacher_names]
+                redistribute_open_blocks(ts, gs, unlocked_full_time)
 
             # CRITICAL: Rebuild grade schedules from teacher schedules to ensure consistency.
             # This is a destructive rebuild that ensures grade_schedules always match teacher_schedules,
