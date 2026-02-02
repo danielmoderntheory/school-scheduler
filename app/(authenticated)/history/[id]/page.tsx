@@ -264,6 +264,35 @@ export default function HistoryDetailPage() {
   const [studyHallMode, setStudyHallMode] = useState(false) // Whether we're in study hall reassignment mode
   const [studyHallSeed, setStudyHallSeed] = useState<number | null>(null) // Seed for study hall shuffling
 
+  // Repair mode state - diagnose and fix schedule issues
+  type RepairIssue = {
+    type: 'orphan_entry' | 'missing_session' | 'grade_mismatch' | 'phantom_grade' | 'unknown_class'
+    severity: 'error' | 'warning' | 'info'
+    teacher: string
+    day?: string
+    block?: number
+    gradeDisplay?: string
+    subject?: string
+    expected?: string
+    found?: string
+    description: string
+    canFix: boolean
+    fix?: () => void
+  }
+  const [repairMode, setRepairMode] = useState(false)
+  const [repairAnalysis, setRepairAnalysis] = useState<{
+    issues: RepairIssue[]
+    classesInSnapshot: number
+    classesFoundInSchedule: number
+    orphanEntries: number
+    phantomGrades: string[]
+    summary: string
+  } | null>(null)
+  const [repairPreview, setRepairPreview] = useState<{
+    teacherSchedules: Record<string, TeacherSchedule>
+    gradeSchedules: Record<string, GradeSchedule>
+    fixesApplied: string[]
+  } | null>(null)
 
   // Swap mode state
   const [swapMode, setSwapMode] = useState(false)
@@ -4093,6 +4122,339 @@ export default function HistoryDetailPage() {
     return errors
   }
 
+  /**
+   * Analyze the schedule against the classes snapshot to find discrepancies.
+   * This helps diagnose issues where validation passes but stats look wrong.
+   */
+  function analyzeScheduleForRepair(
+    option: ScheduleOption,
+    stats: GenerationStats | undefined
+  ): typeof repairAnalysis {
+    if (!stats?.classes_snapshot || !stats?.grades_snapshot) {
+      return {
+        issues: [],
+        classesInSnapshot: 0,
+        classesFoundInSchedule: 0,
+        orphanEntries: 0,
+        phantomGrades: [],
+        summary: "No snapshot data available for analysis"
+      }
+    }
+
+    const DAYS = ["Mon", "Tues", "Wed", "Thurs", "Fri"]
+    const issues: RepairIssue[] = []
+    const classes = parseClassesFromSnapshot(stats.classes_snapshot)
+    const validGradeNames = stats.grades_snapshot.map(g => g.display_name)
+
+    // Build a map of expected classes: teacher|subject -> class info
+    const expectedClasses = new Map<string, {
+      teacher: string
+      subject: string
+      gradeDisplay: string
+      grades: string[]
+      daysPerWeek: number
+      foundCount: number
+      locations: Array<{ day: string; block: number; gradeInSchedule: string }>
+    }>()
+
+    for (const cls of classes) {
+      if (!cls.teacher || !cls.subject) continue
+      const key = `${cls.teacher}|${cls.subject}`
+      if (!expectedClasses.has(key)) {
+        expectedClasses.set(key, {
+          teacher: cls.teacher,
+          subject: cls.subject,
+          gradeDisplay: cls.gradeDisplay || cls.grade,
+          grades: cls.grades || [cls.grade],
+          daysPerWeek: cls.daysPerWeek,
+          foundCount: 0,
+          locations: []
+        })
+      } else {
+        // Same teacher+subject, aggregate daysPerWeek
+        const existing = expectedClasses.get(key)!
+        existing.daysPerWeek += cls.daysPerWeek
+      }
+    }
+
+    // Scan teacherSchedules and match entries to expected classes
+    let orphanCount = 0
+    const phantomGradesFound = new Set<string>()
+
+    for (const [teacher, schedule] of Object.entries(option.teacherSchedules)) {
+      for (const day of DAYS) {
+        for (let block = 1; block <= 5; block++) {
+          const entry = schedule[day]?.[block]
+          if (!entry || entry[1] === "OPEN" || entry[1] === "Study Hall") continue
+
+          const gradeDisplay = entry[0]
+          const subject = entry[1]
+          const key = `${teacher}|${subject}`
+
+          // Check if this grade display is valid or a phantom
+          const isPhantomGrade = /\d+(?:st|nd|rd|th)?[-–]\d+/.test(gradeDisplay)
+          if (isPhantomGrade) {
+            phantomGradesFound.add(gradeDisplay)
+          }
+
+          // Check if this entry matches an expected class
+          const expectedClass = expectedClasses.get(key)
+          if (expectedClass) {
+            expectedClass.foundCount++
+            expectedClass.locations.push({ day, block, gradeInSchedule: gradeDisplay })
+
+            // Check if grade display matches expected
+            if (gradeDisplay !== expectedClass.gradeDisplay) {
+              // Check if it's a valid variant (might be parsed differently)
+              const gradesInEntry = parseGradeDisplayToNames(gradeDisplay, validGradeNames)
+              const expectedGrades = expectedClass.grades
+
+              const matches = expectedGrades.every(g => gradesInEntry.includes(g)) &&
+                              gradesInEntry.every(g => expectedGrades.includes(g))
+
+              if (!matches && !isPhantomGrade) {
+                issues.push({
+                  type: 'grade_mismatch',
+                  severity: 'warning',
+                  teacher,
+                  day,
+                  block,
+                  gradeDisplay,
+                  subject,
+                  expected: expectedClass.gradeDisplay,
+                  found: gradeDisplay,
+                  description: `Grade display mismatch: expected "${expectedClass.gradeDisplay}" but found "${gradeDisplay}"`,
+                  canFix: true
+                })
+              }
+            }
+          } else {
+            // Entry doesn't match any expected class
+            orphanCount++
+            issues.push({
+              type: 'orphan_entry',
+              severity: 'error',
+              teacher,
+              day,
+              block,
+              gradeDisplay,
+              subject,
+              description: `No matching class in snapshot for ${teacher}/${subject} at ${day} B${block}`,
+              canFix: false
+            })
+          }
+        }
+      }
+    }
+
+    // Check for missing sessions (classes not fully scheduled)
+    for (const [key, cls] of expectedClasses) {
+      if (cls.foundCount < cls.daysPerWeek) {
+        issues.push({
+          type: 'missing_session',
+          severity: 'error',
+          teacher: cls.teacher,
+          subject: cls.subject,
+          gradeDisplay: cls.gradeDisplay,
+          expected: `${cls.daysPerWeek} sessions`,
+          found: `${cls.foundCount} sessions`,
+          description: `${cls.teacher}/${cls.gradeDisplay}/${cls.subject}: expected ${cls.daysPerWeek}x/week but found ${cls.foundCount}x`,
+          canFix: false
+        })
+      } else if (cls.foundCount > cls.daysPerWeek) {
+        issues.push({
+          type: 'missing_session',
+          severity: 'warning',
+          teacher: cls.teacher,
+          subject: cls.subject,
+          gradeDisplay: cls.gradeDisplay,
+          expected: `${cls.daysPerWeek} sessions`,
+          found: `${cls.foundCount} sessions`,
+          description: `${cls.teacher}/${cls.gradeDisplay}/${cls.subject}: expected ${cls.daysPerWeek}x/week but found ${cls.foundCount}x (extra sessions)`,
+          canFix: false
+        })
+      }
+    }
+
+    // Check for phantom grades in gradeSchedules
+    const gradeScheduleKeys = Object.keys(option.gradeSchedules)
+    for (const grade of gradeScheduleKeys) {
+      if (!validGradeNames.includes(grade)) {
+        phantomGradesFound.add(grade)
+        issues.push({
+          type: 'phantom_grade',
+          severity: 'error',
+          teacher: '',
+          gradeDisplay: grade,
+          description: `Phantom grade "${grade}" in gradeSchedules (not in grades snapshot)`,
+          canFix: true
+        })
+      }
+    }
+
+    // Build summary
+    const errorCount = issues.filter(i => i.severity === 'error').length
+    const warningCount = issues.filter(i => i.severity === 'warning').length
+    const summary = issues.length === 0
+      ? "✓ No issues found - schedule matches snapshot perfectly"
+      : `Found ${errorCount} error${errorCount !== 1 ? 's' : ''}, ${warningCount} warning${warningCount !== 1 ? 's' : ''}`
+
+    return {
+      issues,
+      classesInSnapshot: classes.length,
+      classesFoundInSchedule: expectedClasses.size,
+      orphanEntries: orphanCount,
+      phantomGrades: Array.from(phantomGradesFound),
+      summary
+    }
+  }
+
+  // Helper to parse grade display into individual grade names
+  function parseGradeDisplayToNames(gradeDisplay: string, validGradeNames: string[]): string[] {
+    const grades: string[] = []
+
+    if (gradeDisplay.toLowerCase().includes('kindergarten') || gradeDisplay === 'K') {
+      const kGrade = validGradeNames.find(g => g.toLowerCase().includes('kindergarten') || g === 'K')
+      if (kGrade) grades.push(kGrade)
+      return grades
+    }
+
+    const rangeMatch = gradeDisplay.match(/(\d+)(?:st|nd|rd|th)?[-–](\d+)(?:st|nd|rd|th)?/)
+    if (rangeMatch) {
+      const start = parseInt(rangeMatch[1])
+      const end = parseInt(rangeMatch[2])
+      for (let i = start; i <= end; i++) {
+        const suffix = i === 1 ? 'st' : i === 2 ? 'nd' : i === 3 ? 'rd' : 'th'
+        const gradeName = `${i}${suffix} Grade`
+        if (validGradeNames.includes(gradeName)) grades.push(gradeName)
+      }
+      return grades
+    }
+
+    if (validGradeNames.includes(gradeDisplay)) {
+      grades.push(gradeDisplay)
+      return grades
+    }
+
+    const singleMatch = gradeDisplay.match(/(\d+)(?:st|nd|rd|th)/)
+    if (singleMatch) {
+      const num = parseInt(singleMatch[1])
+      const suffix = num === 1 ? 'st' : num === 2 ? 'nd' : num === 3 ? 'rd' : 'th'
+      const gradeName = `${num}${suffix} Grade`
+      if (validGradeNames.includes(gradeName)) grades.push(gradeName)
+    }
+
+    return grades
+  }
+
+  function handleStartRepairMode() {
+    if (!selectedResult || !generation?.stats) return
+
+    const analysis = analyzeScheduleForRepair(selectedResult, generation.stats)
+    setRepairAnalysis(analysis)
+    setRepairMode(true)
+    setRepairPreview(null)
+  }
+
+  function handleExitRepairMode() {
+    setRepairMode(false)
+    setRepairAnalysis(null)
+    setRepairPreview(null)
+  }
+
+  async function handleApplyRepair() {
+    if (!repairPreview || !generation || !selectedResult) return
+
+    // Save previous state for undo
+    const previousOptions = JSON.parse(JSON.stringify(generation.options))
+
+    // Create updated option with repaired schedules
+    const rebuiltGradeSchedules = rebuildGradeSchedules(
+      repairPreview.teacherSchedules,
+      generation.stats?.grades_snapshot,
+      selectedResult.gradeSchedules
+    )
+
+    const updatedOption: ScheduleOption = {
+      ...selectedResult,
+      teacherSchedules: repairPreview.teacherSchedules,
+      gradeSchedules: rebuiltGradeSchedules,
+    }
+
+    // Update options array
+    const optionIndex = parseInt(viewingOption) - 1
+    const updatedOptions = [...generation.options]
+    updatedOptions[optionIndex] = updatedOption
+
+    try {
+      const updateRes = await fetch(`/api/history/${id}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ options: updatedOptions }),
+      })
+
+      if (!updateRes.ok) throw new Error("Failed to save")
+
+      setGeneration({ ...generation, options: updatedOptions })
+      handleExitRepairMode()
+
+      toast(
+        (t) => (
+          <div className="flex items-center gap-3">
+            <span className="text-sm">Repair applied: {repairPreview.fixesApplied.length} fixes</span>
+            <button
+              onClick={async () => {
+                toast.dismiss(t.id)
+                // Restore previous options
+                const restoreRes = await fetch(`/api/history/${id}`, {
+                  method: "PUT",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({ options: previousOptions }),
+                })
+                if (restoreRes.ok) {
+                  setGeneration({ ...generation, options: previousOptions })
+                  toast.success("Repair undone")
+                }
+              }}
+              className="px-2 py-1 text-sm font-medium text-blue-600 hover:text-blue-800 hover:bg-blue-50 rounded"
+            >
+              Undo
+            </button>
+          </div>
+        ),
+        { duration: 60000, icon: "🔧" }
+      )
+    } catch (error) {
+      console.error('Repair save error:', error)
+      toast.error("Failed to save repair")
+    }
+  }
+
+  function handlePreviewRepair() {
+    if (!repairAnalysis || !selectedResult || !generation?.stats) return
+
+    const newTeacherSchedules = JSON.parse(JSON.stringify(selectedResult.teacherSchedules))
+    const fixesApplied: string[] = []
+
+    // Apply fixes for phantom grades - rebuild gradeSchedules will handle this
+    if (repairAnalysis.phantomGrades.length > 0) {
+      fixesApplied.push(`Remove ${repairAnalysis.phantomGrades.length} phantom grade(s): ${repairAnalysis.phantomGrades.join(', ')}`)
+    }
+
+    // Rebuild gradeSchedules from teacherSchedules using valid grades only
+    const rebuiltGradeSchedules = rebuildGradeSchedules(
+      newTeacherSchedules,
+      generation.stats?.grades_snapshot,
+      selectedResult.gradeSchedules
+    )
+
+    setRepairPreview({
+      teacherSchedules: newTeacherSchedules,
+      gradeSchedules: rebuiltGradeSchedules,
+      fixesApplied
+    })
+  }
+
   function handleValidate() {
     const errors = validatePlacements()
     setValidationErrors(errors)
@@ -4651,11 +5013,15 @@ export default function HistoryDetailPage() {
                     Reassign Study Halls
                   </DropdownMenuItem>
                   <DropdownMenuSeparator />
-                  <DropdownMenuItem onClick={handleValidateSchedule} disabled={regenMode || swapMode || freeformMode || studyHallMode || !!previewOption}>
+                  <DropdownMenuItem onClick={handleValidateSchedule} disabled={regenMode || swapMode || freeformMode || studyHallMode || repairMode || !!previewOption}>
                     <AlertTriangle className="h-4 w-4 mr-2" />
                     Validate Schedule
                   </DropdownMenuItem>
-                  <DropdownMenuItem onClick={handleDuplicateRevision} disabled={regenMode || swapMode || freeformMode || studyHallMode}>
+                  <DropdownMenuItem onClick={handleStartRepairMode} disabled={regenMode || swapMode || freeformMode || studyHallMode || repairMode || !!previewOption}>
+                    <RefreshCw className="h-4 w-4 mr-2" />
+                    Repair Schedule
+                  </DropdownMenuItem>
+                  <DropdownMenuItem onClick={handleDuplicateRevision} disabled={regenMode || swapMode || freeformMode || studyHallMode || repairMode}>
                     <Copy className="h-4 w-4 mr-2" />
                     Duplicate Revision
                   </DropdownMenuItem>
@@ -4685,7 +5051,7 @@ export default function HistoryDetailPage() {
           {selectedResult && (
             <div className="space-y-6">
               {/* Stats Summary - hidden during edit modes */}
-              {!isGenerating && !swapMode && !freeformMode && !studyHallMode && !regenMode && (
+              {!isGenerating && !swapMode && !freeformMode && !studyHallMode && !regenMode && !repairMode && (
                 <div>
                   <ScheduleStats
                     stats={selectedResult.teacherStats}
@@ -4700,7 +5066,7 @@ export default function HistoryDetailPage() {
               )}
 
               {/* Mode Banners - Sticky container */}
-              {(swapMode || freeformMode || regenMode || studyHallMode) && (
+              {(swapMode || freeformMode || regenMode || studyHallMode || repairMode) && (
                 <div className="sticky top-0 z-10">
               {/* Swap Mode Banner */}
               {swapMode && (
@@ -5106,6 +5472,147 @@ export default function HistoryDetailPage() {
                       </ul>
                     </div>
                   )}
+                </div>
+              )}
+
+              {/* Repair Mode Banner */}
+              {repairMode && repairAnalysis && (
+                <div className="bg-blue-50 border border-blue-200 rounded-lg p-4 no-print">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-3">
+                      <RefreshCw className="h-5 w-5 text-blue-600" />
+                      <div>
+                        <span className="text-blue-800 font-medium">Repair Schedule</span>
+                        <p className="text-sm text-blue-600">
+                          {repairAnalysis.summary}
+                        </p>
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      {!repairPreview && repairAnalysis.phantomGrades.length > 0 && (
+                        <Button
+                          size="sm"
+                          onClick={handlePreviewRepair}
+                          className="bg-blue-600 hover:bg-blue-700 text-white"
+                        >
+                          Preview Repair
+                        </Button>
+                      )}
+                      {repairPreview && (
+                        <>
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            onClick={() => setRepairPreview(null)}
+                            className="text-blue-600 border-blue-300 hover:bg-blue-100"
+                          >
+                            Cancel Preview
+                          </Button>
+                          <Button
+                            size="sm"
+                            onClick={handleApplyRepair}
+                            className="bg-blue-600 hover:bg-blue-700 text-white"
+                          >
+                            <Check className="h-4 w-4 mr-1" />
+                            Apply Repair
+                          </Button>
+                        </>
+                      )}
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={handleExitRepairMode}
+                        className="text-slate-600 border-slate-300 hover:bg-slate-100"
+                      >
+                        <X className="h-4 w-4 mr-1" />
+                        Close
+                      </Button>
+                    </div>
+                  </div>
+
+                  {/* Repair Preview Info */}
+                  {repairPreview && (
+                    <div className="mt-3 p-2 bg-blue-100 rounded text-sm text-blue-800">
+                      <span className="font-medium">Preview: </span>
+                      {repairPreview.fixesApplied.map((fix, i) => (
+                        <span key={i}>{i > 0 ? ', ' : ''}{fix}</span>
+                      ))}
+                    </div>
+                  )}
+
+                  {/* Detailed Analysis */}
+                  <div className="mt-3 space-y-3">
+                    {/* Summary Stats */}
+                    <div className="flex gap-4 text-sm">
+                      <span className="text-blue-700">
+                        <span className="font-medium">{repairAnalysis.classesInSnapshot}</span> classes in snapshot
+                      </span>
+                      {repairAnalysis.phantomGrades.length > 0 && (
+                        <span className="text-red-600">
+                          <span className="font-medium">{repairAnalysis.phantomGrades.length}</span> phantom grade(s)
+                        </span>
+                      )}
+                      {repairAnalysis.orphanEntries > 0 && (
+                        <span className="text-amber-600">
+                          <span className="font-medium">{repairAnalysis.orphanEntries}</span> orphan entries
+                        </span>
+                      )}
+                    </div>
+
+                    {/* Phantom Grades Detail */}
+                    {repairAnalysis.phantomGrades.length > 0 && (
+                      <div className="bg-red-50 border border-red-200 rounded p-2">
+                        <div className="text-sm font-medium text-red-800 mb-1">Phantom Grades Found:</div>
+                        <div className="text-sm text-red-700">
+                          {repairAnalysis.phantomGrades.map((g, i) => (
+                            <span key={g} className="inline-block bg-red-100 px-2 py-0.5 rounded mr-1 mb-1">
+                              {g}
+                            </span>
+                          ))}
+                        </div>
+                        <p className="text-xs text-red-600 mt-1">
+                          These grades don't exist in the grades snapshot. They may have been created when multi-grade classes were moved.
+                          Clicking "Preview Repair" will rebuild gradeSchedules using only valid grades.
+                        </p>
+                      </div>
+                    )}
+
+                    {/* Issues List */}
+                    {repairAnalysis.issues.length > 0 && (
+                      <details className="group">
+                        <summary className="cursor-pointer text-sm font-medium text-blue-800 hover:text-blue-900">
+                          View all {repairAnalysis.issues.length} issue{repairAnalysis.issues.length !== 1 ? 's' : ''} →
+                        </summary>
+                        <div className="mt-2 max-h-60 overflow-y-auto space-y-1 text-xs">
+                          {repairAnalysis.issues.map((issue, i) => (
+                            <div
+                              key={i}
+                              className={`p-2 rounded ${
+                                issue.severity === 'error' ? 'bg-red-50 text-red-800' :
+                                issue.severity === 'warning' ? 'bg-amber-50 text-amber-800' :
+                                'bg-slate-50 text-slate-700'
+                              }`}
+                            >
+                              <span className="font-medium">[{issue.type.replace('_', ' ')}]</span>{' '}
+                              {issue.description}
+                              {issue.day && issue.block && (
+                                <span className="text-slate-500 ml-1">
+                                  at {issue.day} B{issue.block}
+                                </span>
+                              )}
+                            </div>
+                          ))}
+                        </div>
+                      </details>
+                    )}
+
+                    {repairAnalysis.issues.length === 0 && (
+                      <div className="text-sm text-emerald-700 bg-emerald-50 rounded p-2">
+                        ✓ Schedule data appears consistent with the classes snapshot.
+                        If stats still look wrong, try doing a simple swap and save to trigger a gradeSchedules rebuild.
+                      </div>
+                    )}
+                  </div>
                 </div>
               )}
 

@@ -69,6 +69,14 @@ export function ScheduleStats({
   let totalBlocksScheduled = 0
   let totalBlocksAvailable = 0
 
+  // Track grades with gaps for detailed reporting
+  type GradeGapInfo = {
+    grade: string
+    filledCount: number
+    missingSlots: Array<{ day: string; block: number }>
+  }
+  const gradesWithGaps: GradeGapInfo[] = []
+
   // Get grade list from gradeSchedules (still needed to know which grades exist)
   const gradeNames = gradeSchedules ? Object.keys(gradeSchedules) : []
   totalGrades = gradeNames.length
@@ -145,12 +153,24 @@ export function ScheduleStats({
       }
     }
 
-    // Count total filled slots and grades that are full
+    // Count total filled slots and grades that are full, track gaps
     for (const grade of gradeNames) {
       const filledCount = filledSlots[grade].size
       totalBlocksScheduled += filledCount
       if (filledCount >= BLOCKS_PER_WEEK) {
         gradesFullCount++
+      } else {
+        // Find which slots are missing
+        const missingSlots: Array<{ day: string; block: number }> = []
+        for (const day of DAYS) {
+          for (const block of BLOCKS) {
+            const slotKey = `${day}|${block}`
+            if (!filledSlots[grade].has(slotKey)) {
+              missingSlots.push({ day, block })
+            }
+          }
+        }
+        gradesWithGaps.push({ grade, filledCount, missingSlots })
       }
     }
   } else if (gradeSchedules) {
@@ -158,6 +178,7 @@ export function ScheduleStats({
     for (const grade of gradeNames) {
       const schedule = gradeSchedules[grade]
       let filledBlocks = 0
+      const missingSlots: Array<{ day: string; block: number }> = []
 
       for (const day of DAYS) {
         for (const block of BLOCKS) {
@@ -166,12 +187,16 @@ export function ScheduleStats({
           if (entry && entry[1] && entry[1] !== 'OPEN') {
             filledBlocks++
             totalBlocksScheduled++
+          } else {
+            missingSlots.push({ day, block })
           }
         }
       }
 
       if (filledBlocks >= BLOCKS_PER_WEEK) {
         gradesFullCount++
+      } else {
+        gradesWithGaps.push({ grade, filledCount: filledBlocks, missingSlots })
       }
     }
   }
@@ -230,6 +255,25 @@ export function ScheduleStats({
     issues.push({
       type: 'warning',
       message: `${unscheduledClasses} block${unscheduledClasses !== 1 ? 's' : ''} could not be scheduled. Check for conflicting restrictions.`
+    })
+  }
+
+  // Sort grades with gaps by grade order for display
+  const sortedGradesWithGaps = [...gradesWithGaps].sort((a, b) => {
+    const aNum = a.grade.toLowerCase().includes('kindergarten') ? 0 : parseInt(a.grade.match(/(\d+)/)?.[1] || '99')
+    const bNum = b.grade.toLowerCase().includes('kindergarten') ? 0 : parseInt(b.grade.match(/(\d+)/)?.[1] || '99')
+    return aNum - bNum
+  })
+
+  if (gradesWithGaps.length > 0) {
+    const totalMissingSlots = gradesWithGaps.reduce((sum, g) => sum + g.missingSlots.length, 0)
+    const gradeList = sortedGradesWithGaps.map(g => {
+      const shortName = g.grade.replace(' Grade', '').replace('Kindergarten', 'K')
+      return `${shortName} (${g.missingSlots.length})`
+    }).join(', ')
+    issues.push({
+      type: 'warning',
+      message: `${totalMissingSlots} empty slot${totalMissingSlots !== 1 ? 's' : ''} across ${gradesWithGaps.length} grade${gradesWithGaps.length !== 1 ? 's' : ''}: ${gradeList}. Click "Grades Full" for details.`
     })
   }
 
@@ -340,7 +384,10 @@ export function ScheduleStats({
           </div>
 
           {/* Grades Full */}
-          <div className={`border rounded-lg p-3 md:flex-1 md:min-w-0 ${gradesStatus === 'warning' ? 'border-amber-300 bg-amber-50' : 'border-emerald-200 bg-emerald-50'}`}>
+          <div
+            className={`border rounded-lg p-3 md:flex-1 md:min-w-0 ${gradesStatus === 'warning' ? 'border-amber-300 bg-amber-50 cursor-pointer hover:border-amber-400' : 'border-emerald-200 bg-emerald-50'}`}
+            onClick={gradesStatus === 'warning' ? () => scrollToSection('grade-gaps-section') : undefined}
+          >
             <div className="text-sm text-slate-600">
               Grades Full
               <InfoTooltip text="Number of grades with all 25 blocks filled (no empty slots)." />
@@ -356,6 +403,9 @@ export function ScheduleStats({
                 <Badge className="ml-2 text-xs bg-emerald-500">All Full</Badge>
               )}
             </div>
+            {gradesStatus === 'warning' && (
+              <div className="text-xs text-amber-600 mt-1 no-print">Click for details</div>
+            )}
           </div>
 
           {/* Study Halls */}
@@ -454,6 +504,35 @@ export function ScheduleStats({
           </summary>
 
           <div className="mt-3 space-y-4">
+            {/* Grade Gaps - Show which grades have empty slots */}
+            {sortedGradesWithGaps.length > 0 && (
+              <div id="grade-gaps-section">
+                <h3 className="font-semibold mb-2 text-xs text-slate-500 uppercase tracking-wide">Grade Gaps</h3>
+                <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-2">
+                  {sortedGradesWithGaps.map((g) => (
+                    <div
+                      key={g.grade}
+                      className="border border-amber-200 rounded px-2 py-1.5 bg-amber-50"
+                    >
+                      <div className="font-medium text-xs text-amber-900">
+                        {g.grade.replace(' Grade', '')}
+                        <span className="font-normal text-amber-700 ml-1">
+                          ({g.filledCount}/25)
+                        </span>
+                      </div>
+                      <div className="text-[10px] text-amber-700 mt-0.5">
+                        Missing: {g.missingSlots.slice(0, 5).map(s => `${s.day.slice(0,3)} B${s.block}`).join(', ')}
+                        {g.missingSlots.length > 5 && ` +${g.missingSlots.length - 5} more`}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+                <p className="text-xs text-amber-700 mt-2">
+                  Use Freeform mode to manually place classes in empty slots, or Regen mode to regenerate the schedule.
+                </p>
+              </div>
+            )}
+
             {/* Study Hall Assignments - Compact inline list */}
             <div id="study-hall-section">
               <h3 className="font-semibold mb-2 text-xs text-slate-500 uppercase tracking-wide">Study Hall Assignments</h3>
