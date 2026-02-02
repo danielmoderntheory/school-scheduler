@@ -3961,31 +3961,113 @@ export default function HistoryDetailPage() {
 
     // === Comprehensive checks (require stats) ===
     if (stats) {
-      // 5. Class Session Count - check each class is scheduled the correct number of times
+      // 5. Class Session Count + Unknown Class Detection
       if (stats.classes_snapshot) {
         const classes = parseClassesFromSnapshot(stats.classes_snapshot)
 
+        // Helper: check if two grade displays overlap (share any common grades)
+        // e.g., "6th Grade" overlaps with "6th-8th Grade"
+        function gradesOverlapValidation(gradeA: string, gradeB: string): boolean {
+          if (gradeA === gradeB) return true
+
+          const parseGrades = (display: string): number[] => {
+            const grades: number[] = []
+            if (display.toLowerCase().includes('kindergarten') || display === 'K') {
+              grades.push(0)
+              return grades
+            }
+            // Handle comma-separated list like "K, 1st, 2nd, 3rd"
+            if (display.includes(',')) {
+              const parts = display.split(',').map(p => p.trim())
+              for (const part of parts) {
+                if (part.toLowerCase().includes('kindergarten') || part === 'K') {
+                  grades.push(0)
+                } else {
+                  const num = part.match(/(\d+)/)
+                  if (num) grades.push(parseInt(num[1]))
+                }
+              }
+              return grades
+            }
+            // Handle range pattern like "6th-8th"
+            const rangeMatch = display.match(/(\d+)(?:st|nd|rd|th)?[-–](\d+)/)
+            if (rangeMatch) {
+              const start = parseInt(rangeMatch[1])
+              const end = parseInt(rangeMatch[2])
+              for (let i = start; i <= end; i++) grades.push(i)
+              return grades
+            }
+            // Single grade
+            const singleMatch = display.match(/(\d+)/)
+            if (singleMatch) grades.push(parseInt(singleMatch[1]))
+            return grades
+          }
+
+          const gradesA = parseGrades(gradeA)
+          const gradesB = parseGrades(gradeB)
+          return gradesA.some(g => gradesB.includes(g))
+        }
+
+        // Helper: check if a schedule entry matches a class definition
+        // A match requires: same teacher, same subject, and grades overlap
+        function entryMatchesClass(
+          teacher: string,
+          entryGrade: string,
+          entrySubject: string,
+          cls: ClassEntry
+        ): boolean {
+          if (cls.teacher !== teacher || cls.subject !== entrySubject) return false
+          // Check if entry's grade overlaps with class's grades
+          return gradesOverlapValidation(entryGrade, cls.gradeDisplay || cls.grade)
+        }
+
+        // Track all teaching entries and whether they've been matched
+        const allEntries = new Map<string, { grade: string; subject: string; matched: boolean; teacher: string; day: string; block: number }>()
+
+        for (const [teacher, schedule] of Object.entries(option.teacherSchedules)) {
+          for (const day of DAYS) {
+            for (let block = 1; block <= 5; block++) {
+              const entry = schedule[day]?.[block]
+              if (!entry || entry[1] === "OPEN" || entry[1] === "Study Hall") continue
+
+              const key = `${teacher}|${day}|${block}`
+              allEntries.set(key, {
+                grade: entry[0],
+                subject: entry[1],
+                matched: false,
+                teacher,
+                day,
+                block
+              })
+            }
+          }
+        }
+
+        // Go through each class and count/match entries
         for (const cls of classes) {
           if (!cls.teacher || !cls.subject) continue
 
           const teacherSchedule = option.teacherSchedules[cls.teacher]
           if (!teacherSchedule) continue
 
-          // Count how many times this class appears in the schedule
           let sessionCount = 0
+
           for (const day of DAYS) {
             for (let block = 1; block <= 5; block++) {
               const entry = teacherSchedule[day]?.[block]
-              if (!entry || entry[1] !== cls.subject) continue
+              if (!entry) continue
 
-              // Check if grade matches (handle multi-grade classes)
-              const classGrades = cls.grades || [cls.grade]
-              const entryMatches = classGrades.some(g =>
-                entry[0] === g || entry[0]?.includes(g) || g?.includes(entry[0])
-              ) || entry[0] === cls.gradeDisplay
+              const entryGrade = entry[0]
+              const entrySubject = entry[1]
 
-              if (entryMatches) {
+              if (entryMatchesClass(cls.teacher, entryGrade, entrySubject, cls)) {
                 sessionCount++
+                // Mark this entry as matched to SOME class
+                const key = `${cls.teacher}|${day}|${block}`
+                const entryRecord = allEntries.get(key)
+                if (entryRecord) {
+                  entryRecord.matched = true
+                }
               }
             }
           }
@@ -3999,49 +4081,28 @@ export default function HistoryDetailPage() {
           }
         }
 
-        // 5b. Unknown Classes - check every teaching entry in teacherSchedules is a real class from snapshot
-        // Build a set of valid (teacher, subject) pairs from the snapshot
-        const validTeacherSubjects = new Set<string>()
-        for (const cls of classes) {
-          if (cls.teacher && cls.subject) {
-            validTeacherSubjects.add(`${cls.teacher}|${cls.subject}`)
-          }
-        }
+        // 5b. Unknown Classes - entries not matched to ANY class are truly unknown
+        // For each unmatched entry, verify it doesn't match ANY class (not just the first one found)
+        const unmatchedEntries = Array.from(allEntries.values()).filter(e => {
+          if (e.matched) return false
+          // Double-check: does this entry match ANY class in the snapshot?
+          return !classes.some(cls => entryMatchesClass(e.teacher, e.grade, e.subject, cls))
+        })
 
-        // Scan teacherSchedules for any entry that's not in the valid set
-        const unknownEntries: Array<{ teacher: string; day: string; block: number; grade: string; subject: string }> = []
-        for (const [teacher, schedule] of Object.entries(option.teacherSchedules)) {
-          for (const day of DAYS) {
-            for (let block = 1; block <= 5; block++) {
-              const entry = schedule[day]?.[block]
-              if (!entry || entry[1] === "OPEN" || entry[1] === "Study Hall") continue
-
-              const grade = entry[0]
-              const subject = entry[1]
-              const key = `${teacher}|${subject}`
-
-              if (!validTeacherSubjects.has(key)) {
-                unknownEntries.push({ teacher, day, block, grade, subject })
-              }
-            }
-          }
-        }
-
-        if (unknownEntries.length > 0) {
-          // Group by teacher+subject for cleaner error messages
-          const grouped = new Map<string, typeof unknownEntries>()
-          for (const entry of unknownEntries) {
-            const key = `${entry.teacher}|${entry.subject}`
+        if (unmatchedEntries.length > 0) {
+          const grouped = new Map<string, typeof unmatchedEntries>()
+          for (const entry of unmatchedEntries) {
+            const key = `${entry.teacher}|${entry.grade}|${entry.subject}`
             if (!grouped.has(key)) grouped.set(key, [])
             grouped.get(key)!.push(entry)
           }
 
           for (const [key, entries] of grouped) {
-            const [teacher, subject] = key.split('|')
+            const [teacher, grade, subject] = key.split('|')
             const locations = entries.map(e => `${e.day} B${e.block}`).join(', ')
             errors.push({
               type: 'unknown_class',
-              message: `[Unknown Class] ${teacher}/${subject} (${entries.length}x at ${locations}) is not in the class list`,
+              message: `[Unknown Class] ${teacher}/${grade}/${subject} (${entries.length}x at ${locations}) doesn't match any class in snapshot`,
               cells: entries.map(e => ({ teacher: e.teacher, day: e.day, block: e.block, grade: e.grade, subject: e.subject }))
             })
           }
@@ -4223,38 +4284,75 @@ export default function HistoryDetailPage() {
     const classes = parseClassesFromSnapshot(stats.classes_snapshot)
     const validGradeNames = stats.grades_snapshot.map(g => g.display_name)
 
-    // Build a map of expected classes: teacher|subject -> class info
-    const expectedClasses = new Map<string, {
-      teacher: string
-      subject: string
-      gradeDisplay: string
-      grades: string[]
-      daysPerWeek: number
+    // Helper: check if two grade displays overlap (share any common grades)
+    function gradesOverlapRepair(gradeA: string, gradeB: string): boolean {
+      if (gradeA === gradeB) return true
+
+      const parseGrades = (display: string): number[] => {
+        const grades: number[] = []
+        if (display.toLowerCase().includes('kindergarten') || display === 'K') {
+          grades.push(0)
+          return grades
+        }
+        // Handle comma-separated list like "K, 1st, 2nd, 3rd"
+        if (display.includes(',')) {
+          const parts = display.split(',').map(p => p.trim())
+          for (const part of parts) {
+            if (part.toLowerCase().includes('kindergarten') || part === 'K') {
+              grades.push(0)
+            } else {
+              const num = part.match(/(\d+)/)
+              if (num) grades.push(parseInt(num[1]))
+            }
+          }
+          return grades
+        }
+        // Handle range pattern like "6th-8th"
+        const rangeMatch = display.match(/(\d+)(?:st|nd|rd|th)?[-–](\d+)/)
+        if (rangeMatch) {
+          const start = parseInt(rangeMatch[1])
+          const end = parseInt(rangeMatch[2])
+          for (let i = start; i <= end; i++) grades.push(i)
+          return grades
+        }
+        // Single grade
+        const singleMatch = display.match(/(\d+)/)
+        if (singleMatch) grades.push(parseInt(singleMatch[1]))
+        return grades
+      }
+
+      const gradesA = parseGrades(gradeA)
+      const gradesB = parseGrades(gradeB)
+      return gradesA.some(g => gradesB.includes(g))
+    }
+
+    // Helper: check if a schedule entry matches a class definition
+    // A match requires: same teacher, same subject, and grades overlap
+    function entryMatchesClass(
+      teacher: string,
+      entryGrade: string,
+      entrySubject: string,
+      cls: ClassEntry
+    ): boolean {
+      if (cls.teacher !== teacher || cls.subject !== entrySubject) return false
+      // Check if entry's grade overlaps with class's grades
+      return gradesOverlapRepair(entryGrade, cls.gradeDisplay || cls.grade)
+    }
+
+    // Track session counts per class (using unique class identifier)
+    // Key: "teacher|gradeDisplay|subject" to handle same teacher teaching same subject to different grades
+    const classSessionCounts = new Map<string, {
+      cls: ClassEntry
       foundCount: number
-      locations: Array<{ day: string; block: number; gradeInSchedule: string }>
     }>()
 
     for (const cls of classes) {
       if (!cls.teacher || !cls.subject) continue
-      const key = `${cls.teacher}|${cls.subject}`
-      if (!expectedClasses.has(key)) {
-        expectedClasses.set(key, {
-          teacher: cls.teacher,
-          subject: cls.subject,
-          gradeDisplay: cls.gradeDisplay || cls.grade,
-          grades: cls.grades || [cls.grade],
-          daysPerWeek: cls.daysPerWeek,
-          foundCount: 0,
-          locations: []
-        })
-      } else {
-        // Same teacher+subject, aggregate daysPerWeek
-        const existing = expectedClasses.get(key)!
-        existing.daysPerWeek += cls.daysPerWeek
-      }
+      const key = `${cls.teacher}|${cls.gradeDisplay || cls.grade}|${cls.subject}`
+      classSessionCounts.set(key, { cls, foundCount: 0 })
     }
 
-    // Scan teacherSchedules and match entries to expected classes
+    // Scan teacherSchedules and match entries to classes
     let orphanCount = 0
     const phantomGradesFound = new Set<string>()
 
@@ -4266,47 +4364,24 @@ export default function HistoryDetailPage() {
 
           const gradeDisplay = entry[0]
           const subject = entry[1]
-          const key = `${teacher}|${subject}`
 
-          // Check if this grade display is valid or a phantom
-          const isPhantomGrade = /\d+(?:st|nd|rd|th)?[-–]\d+/.test(gradeDisplay)
-          if (isPhantomGrade) {
-            phantomGradesFound.add(gradeDisplay)
-          }
+          // Note: Range patterns like "6th-11th Grade" in teacherSchedules entries are VALID
+          // They represent multi-grade class displays from the solver
+          // We only flag phantom grades in gradeSchedules KEYS (not entry values)
 
-          // Check if this entry matches an expected class
-          const expectedClass = expectedClasses.get(key)
-          if (expectedClass) {
-            expectedClass.foundCount++
-            expectedClass.locations.push({ day, block, gradeInSchedule: gradeDisplay })
+          // Find a matching class in the snapshot
+          // An entry matches if: same teacher, same subject, and entry's grade is in class's grades
+          const matchingClass = classes.find(cls => entryMatchesClass(teacher, gradeDisplay, subject, cls))
 
-            // Check if grade display matches expected
-            if (gradeDisplay !== expectedClass.gradeDisplay) {
-              // Check if it's a valid variant (might be parsed differently)
-              const gradesInEntry = parseGradeDisplayToNames(gradeDisplay, validGradeNames)
-              const expectedGrades = expectedClass.grades
-
-              const matches = expectedGrades.every(g => gradesInEntry.includes(g)) &&
-                              gradesInEntry.every(g => expectedGrades.includes(g))
-
-              if (!matches && !isPhantomGrade) {
-                issues.push({
-                  type: 'grade_mismatch',
-                  severity: 'warning',
-                  teacher,
-                  day,
-                  block,
-                  gradeDisplay,
-                  subject,
-                  expected: expectedClass.gradeDisplay,
-                  found: gradeDisplay,
-                  description: `Grade display mismatch: expected "${expectedClass.gradeDisplay}" but found "${gradeDisplay}"`,
-                  canFix: true
-                })
-              }
+          if (matchingClass) {
+            // Found a match - increment session count for this class
+            const classKey = `${matchingClass.teacher}|${matchingClass.gradeDisplay || matchingClass.grade}|${matchingClass.subject}`
+            const counter = classSessionCounts.get(classKey)
+            if (counter) {
+              counter.foundCount++
             }
           } else {
-            // Entry doesn't match any expected class
+            // No matching class found - this is an orphan entry
             orphanCount++
             issues.push({
               type: 'orphan_entry',
@@ -4316,7 +4391,7 @@ export default function HistoryDetailPage() {
               block,
               gradeDisplay,
               subject,
-              description: `No matching class in snapshot for ${teacher}/${subject} at ${day} B${block}`,
+              description: `No matching class for ${teacher}/${gradeDisplay}/${subject} at ${day} B${block}`,
               canFix: false
             })
           }
@@ -4325,45 +4400,50 @@ export default function HistoryDetailPage() {
     }
 
     // Check for missing sessions (classes not fully scheduled)
-    for (const [key, cls] of expectedClasses) {
-      if (cls.foundCount < cls.daysPerWeek) {
+    for (const [, { cls, foundCount }] of classSessionCounts) {
+      if (foundCount < cls.daysPerWeek) {
         issues.push({
           type: 'missing_session',
           severity: 'error',
           teacher: cls.teacher,
           subject: cls.subject,
-          gradeDisplay: cls.gradeDisplay,
+          gradeDisplay: cls.gradeDisplay || cls.grade,
           expected: `${cls.daysPerWeek} sessions`,
-          found: `${cls.foundCount} sessions`,
-          description: `${cls.teacher}/${cls.gradeDisplay}/${cls.subject}: expected ${cls.daysPerWeek}x/week but found ${cls.foundCount}x`,
+          found: `${foundCount} sessions`,
+          description: `${cls.teacher}/${cls.gradeDisplay || cls.grade}/${cls.subject}: expected ${cls.daysPerWeek}x/week but found ${foundCount}x`,
           canFix: false
         })
-      } else if (cls.foundCount > cls.daysPerWeek) {
+      } else if (foundCount > cls.daysPerWeek) {
         issues.push({
           type: 'missing_session',
           severity: 'warning',
           teacher: cls.teacher,
           subject: cls.subject,
-          gradeDisplay: cls.gradeDisplay,
+          gradeDisplay: cls.gradeDisplay || cls.grade,
           expected: `${cls.daysPerWeek} sessions`,
-          found: `${cls.foundCount} sessions`,
-          description: `${cls.teacher}/${cls.gradeDisplay}/${cls.subject}: expected ${cls.daysPerWeek}x/week but found ${cls.foundCount}x (extra sessions)`,
+          found: `${foundCount} sessions`,
+          description: `${cls.teacher}/${cls.gradeDisplay || cls.grade}/${cls.subject}: expected ${cls.daysPerWeek}x/week but found ${foundCount}x (extra sessions)`,
           canFix: false
         })
       }
     }
 
-    // Check for phantom grades in gradeSchedules
+    // Check for phantom grades in gradeSchedules KEYS
+    // These are invalid grade names that shouldn't exist as keys
+    // (Range patterns in teacherSchedules ENTRIES are valid if they match a class - handled by orphan detection)
     const gradeScheduleKeys = Object.keys(option.gradeSchedules)
+    console.log('[Repair Analysis] gradeSchedules keys:', gradeScheduleKeys)
+    console.log('[Repair Analysis] valid grade names:', validGradeNames)
     for (const grade of gradeScheduleKeys) {
       if (!validGradeNames.includes(grade)) {
+        console.log('[Repair Analysis] Found phantom grade key:', grade)
         phantomGradesFound.add(grade)
         issues.push({
           type: 'phantom_grade',
           severity: 'error',
           teacher: '',
           gradeDisplay: grade,
-          description: `Phantom grade "${grade}" in gradeSchedules (not in grades snapshot)`,
+          description: `Phantom grade key "${grade}" in gradeSchedules (not in grades snapshot)`,
           canFix: true
         })
       }
@@ -4413,7 +4493,7 @@ export default function HistoryDetailPage() {
     return {
       issues,
       classesInSnapshot: classes.length,
-      classesFoundInSchedule: expectedClasses.size,
+      classesFoundInSchedule: classSessionCounts.size,
       orphanEntries: orphanCount,
       phantomGrades: Array.from(phantomGradesFound),
       summary,
@@ -4483,18 +4563,18 @@ export default function HistoryDetailPage() {
     // Save previous state for undo
     const previousOptions = JSON.parse(JSON.stringify(generation.options))
 
-    // Create updated option with repaired schedules
-    const rebuiltGradeSchedules = rebuildGradeSchedules(
-      repairPreview.teacherSchedules,
-      generation.stats?.grades_snapshot,
-      selectedResult.gradeSchedules
-    )
+    // Debug: log the grade keys before and after
+    console.log('[Repair] Original gradeSchedules keys:', Object.keys(selectedResult.gradeSchedules))
+    console.log('[Repair] Preview gradeSchedules keys:', Object.keys(repairPreview.gradeSchedules))
 
+    // Use the repaired schedules from preview (already rebuilt correctly)
     const updatedOption: ScheduleOption = {
       ...selectedResult,
       teacherSchedules: repairPreview.teacherSchedules,
-      gradeSchedules: rebuiltGradeSchedules,
+      gradeSchedules: repairPreview.gradeSchedules,
     }
+
+    console.log('[Repair] Updated option gradeSchedules keys:', Object.keys(updatedOption.gradeSchedules))
 
     // Update options array
     const optionIndex = parseInt(viewingOption) - 1
@@ -4509,6 +4589,13 @@ export default function HistoryDetailPage() {
       })
 
       if (!updateRes.ok) throw new Error("Failed to save")
+
+      const savedData = await updateRes.json()
+      console.log('[Repair] Saved to DB, response gradeSchedules keys:',
+        savedData.options?.[parseInt(viewingOption) - 1]?.gradeSchedules
+          ? Object.keys(savedData.options[parseInt(viewingOption) - 1].gradeSchedules)
+          : 'no data returned'
+      )
 
       setGeneration({ ...generation, options: updatedOptions })
       handleExitRepairMode()
