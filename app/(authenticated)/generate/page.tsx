@@ -21,6 +21,7 @@ import { Loader2, Play, Download, Coffee, History, AlertTriangle, X, Server, Eye
 import { generateSchedulesRemote, type ScheduleDiagnostics } from "@/lib/scheduler-remote"
 import type { Teacher, ClassEntry, ScheduleOption } from "@/lib/types"
 import { useGeneration } from "@/lib/generation-context"
+import { isScheduledClass } from "@/lib/schedule-utils"
 import toast from "react-hot-toast"
 
 // Sort grades: Kindergarten first, then by grade number
@@ -47,7 +48,7 @@ function analyzeTeacherGrades(schedule: Record<string, Record<number, [string, s
 
   for (const day of Object.values(schedule)) {
     for (const entry of Object.values(day)) {
-      if (entry && entry[0] && entry[1] !== "OPEN" && entry[1] !== "Study Hall") {
+      if (entry && entry[0] && isScheduledClass(entry[1])) {
         totalTeaching++
         const gradeStr = entry[0]
 

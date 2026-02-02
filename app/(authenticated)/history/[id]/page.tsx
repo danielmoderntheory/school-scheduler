@@ -2261,7 +2261,7 @@ export default function HistoryDetailPage() {
 
         // Must be same day and block (grade needs study hall at this time)
         const entry = schedule[source.day]?.[source.block]
-        if (entry && entry[1] === "OPEN") {
+        if (entry && isOpenBlock(entry[1])) {
           targets.push({ teacher, day: source.day, block: source.block })
         }
       } else {
@@ -2271,7 +2271,7 @@ export default function HistoryDetailPage() {
         for (const day of DAYS) {
           for (const block of BLOCKS) {
             const entry = schedule[day]?.[block]
-            if (entry && entry[1] === "OPEN") {
+            if (entry && isOpenBlock(entry[1])) {
               targets.push({ teacher, day, block })
             }
           }
@@ -2325,10 +2325,10 @@ export default function HistoryDetailPage() {
         const gradeEntry = gradeSchedule[day]?.[block]
 
         // Teacher must have OPEN at this slot
-        if (!teacherEntry || teacherEntry[1] !== "OPEN") continue
+        if (!teacherEntry || !isOpenBlock(teacherEntry[1])) continue
 
         // Grade must be free (no class)
-        if (gradeEntry && gradeEntry[1] !== "OPEN" && gradeEntry[1] !== "Study Hall") continue
+        if (gradeEntry && isScheduledClass(gradeEntry[1])) continue
 
         // No subject conflict - source subject can't already be on this day
         if (subjectsByDay[day].has(subject)) continue
@@ -2347,7 +2347,7 @@ export default function HistoryDetailPage() {
         const gradeEntry = gradeSchedule[day]?.[block]
 
         // Must be a class (not OPEN, Study Hall, or empty)
-        if (!gradeEntry || gradeEntry[1] === "OPEN" || gradeEntry[1] === "Study Hall") continue
+        if (!gradeEntry || !isScheduledClass(gradeEntry[1])) continue
 
         const [otherTeacher, otherSubject] = gradeEntry
 
@@ -2359,11 +2359,11 @@ export default function HistoryDetailPage() {
 
         // Check: source teacher must have OPEN at the other class's time
         const sourceTeacherAtOtherTime = teacherSchedule[day]?.[block]
-        if (!sourceTeacherAtOtherTime || sourceTeacherAtOtherTime[1] !== "OPEN") continue
+        if (!sourceTeacherAtOtherTime || !isOpenBlock(sourceTeacherAtOtherTime[1])) continue
 
         // Check: other teacher must have OPEN at source's time
         const otherTeacherAtSourceTime = otherTeacherSchedule[source.day]?.[source.block]
-        if (!otherTeacherAtSourceTime || otherTeacherAtSourceTime[1] !== "OPEN") continue
+        if (!otherTeacherAtSourceTime || !isOpenBlock(otherTeacherAtSourceTime[1])) continue
 
         // Check subject conflicts after swap
         const targetDaySubjects = new Set(subjectsByDay[day])
@@ -2422,10 +2422,10 @@ export default function HistoryDetailPage() {
         const gradeEntry = gradeSchedule[day]?.[block]
 
         // Teacher must have OPEN at this slot
-        if (!teacherEntry || teacherEntry[1] !== "OPEN") continue
+        if (!teacherEntry || !isOpenBlock(teacherEntry[1])) continue
 
         // Grade must be free (no class, or OPEN/Study Hall is ok to swap into conceptually but we're moving a class)
-        if (gradeEntry && gradeEntry[1] !== "OPEN" && gradeEntry[1] !== "Study Hall") continue
+        if (gradeEntry && isScheduledClass(gradeEntry[1])) continue
 
         // No subject conflict - source subject can't already be on this day
         if (subjectsByDay[day].has(source.subject)) continue
@@ -2444,7 +2444,7 @@ export default function HistoryDetailPage() {
         const gradeEntry = gradeSchedule[day]?.[block]
 
         // Must be a class (not OPEN, Study Hall, or empty)
-        if (!gradeEntry || gradeEntry[1] === "OPEN" || gradeEntry[1] === "Study Hall") continue
+        if (!gradeEntry || !isScheduledClass(gradeEntry[1])) continue
 
         const [otherTeacher, otherSubject] = gradeEntry
 
@@ -2456,11 +2456,11 @@ export default function HistoryDetailPage() {
 
         // Check: source teacher must have OPEN at the other class's time
         const sourceTeacherAtOtherTime = teacherSchedule[day]?.[block]
-        if (!sourceTeacherAtOtherTime || sourceTeacherAtOtherTime[1] !== "OPEN") continue
+        if (!sourceTeacherAtOtherTime || !isOpenBlock(sourceTeacherAtOtherTime[1])) continue
 
         // Check: other teacher must have OPEN at source's time
         const otherTeacherAtSourceTime = otherTeacherSchedule[source.day]?.[source.block]
-        if (!otherTeacherAtSourceTime || otherTeacherAtSourceTime[1] !== "OPEN") continue
+        if (!otherTeacherAtSourceTime || !isOpenBlock(otherTeacherAtSourceTime[1])) continue
 
         // Check subject conflicts after swap:
         // - Source subject moving to target day: can't have duplicate
@@ -2490,7 +2490,7 @@ export default function HistoryDetailPage() {
         t.grade === location.grade && t.day === location.day && t.block === location.block
       )) {
         // Determine which type of swap based on what was selected
-        if (selectedCell.subject && selectedCell.subject !== "Study Hall") {
+        if (selectedCell.subject && !isStudyHall(selectedCell.subject)) {
           performGradeSwap(selectedCell, location)
         } else {
           // Study hall swap in grade view - use the teacher swap logic
@@ -2547,8 +2547,8 @@ export default function HistoryDetailPage() {
       t.teacher === location.teacher && t.day === location.day && t.block === location.block
     )) {
       // Determine which type of swap based on what was selected
-      const selectedCellType = selectedCell.subject === "Study Hall" ? "study-hall"
-        : selectedCell.subject === "OPEN" ? "open"
+      const selectedCellType = isStudyHall(selectedCell.subject) ? "study-hall"
+        : isOpenBlock(selectedCell.subject) ? "open"
         : "class"
 
       if (selectedCellType === "class") {
@@ -2622,7 +2622,7 @@ export default function HistoryDetailPage() {
     newTeacherSchedules[target.teacher][target.day][target.block] = sourceEntry
 
     // Update grade schedules if it's a study hall
-    if (sourceEntry[1] === "Study Hall") {
+    if (isStudyHall(sourceEntry[1])) {
       const gradeGroup = sourceEntry[0] // e.g., "6th Grade" or "6th-7th"
 
       // Update study hall assignments
@@ -2743,7 +2743,7 @@ export default function HistoryDetailPage() {
 
     // Check if this is Option 1 (move to OPEN) or Option 2 (swap with another class)
     const targetGradeEntry = swapWorkingSchedules.gradeSchedules[grade]?.[target.day]?.[target.block]
-    const isOption1 = !targetGradeEntry || targetGradeEntry[1] === "OPEN" || targetGradeEntry[1] === "Study Hall"
+    const isOption1 = !targetGradeEntry || !isScheduledClass(targetGradeEntry[1])
 
     let successMessage = ""
     let destinationCells: CellLocation[] = []
@@ -2751,7 +2751,7 @@ export default function HistoryDetailPage() {
     if (isOption1) {
       // Option 1: Move class to an OPEN slot
       const targetTeacherEntry = newTeacherSchedules[sourceTeacher]?.[target.day]?.[target.block]
-      if (!targetTeacherEntry || targetTeacherEntry[1] !== "OPEN") {
+      if (!targetTeacherEntry || !isOpenBlock(targetTeacherEntry[1])) {
         toast.error("Invalid swap - teacher not available at target time")
         setSelectedCell(null)
         setValidTargets([])
@@ -2888,11 +2888,11 @@ export default function HistoryDetailPage() {
         let prevWasOpen = false
         for (let block = 1; block <= 5; block++) {
           const entry = schedule?.[day]?.[block]
-          if (!entry || entry[1] === "OPEN") {
+          if (!entry || isOpenBlock(entry[1])) {
             open++
             if (prevWasOpen && stat.status === "full-time") backToBackIssues++
             prevWasOpen = true
-          } else if (entry[1] === "Study Hall") {
+          } else if (isStudyHall(entry[1])) {
             studyHall++
             prevWasOpen = true
           } else {
@@ -3112,7 +3112,7 @@ export default function HistoryDetailPage() {
     if (!workingSchedules || !location.grade || !location.subject) return
 
     const entry = workingSchedules.teacherSchedules[location.teacher]?.[location.day]?.[location.block]
-    if (!entry || entry[1] === "OPEN") return
+    if (!entry || isOpenBlock(entry[1])) return
 
     // Check if this cell has already been picked up
     const alreadyPickedUp = floatingBlocks.some(b =>
@@ -3169,7 +3169,7 @@ export default function HistoryDetailPage() {
     const targetEntry = newTeacherSchedules[location.teacher]?.[location.day]?.[location.block]
     let newFloatingBlock: FloatingBlock | null = null
 
-    if (targetEntry && targetEntry[1] !== "OPEN") {
+    if (targetEntry && isOccupiedBlock(targetEntry[1])) {
       // Check this cell hasn't already been picked up
       const alreadyPickedUp = floatingBlocks.some(b =>
         b.sourceTeacher === location.teacher &&
@@ -3470,7 +3470,7 @@ export default function HistoryDetailPage() {
     function isValidPlacement(grade: string, subject: string, day: string, blockNum: number, teacher: string): boolean {
       // Check if slot is occupied (by a non-OPEN class)
       const currentEntry = newTeacherSchedules[teacher]?.[day]?.[blockNum]
-      if (currentEntry && currentEntry[1] !== "OPEN") return false
+      if (currentEntry && isOccupiedBlock(currentEntry[1])) return false
 
       // Check class restrictions (availableDays, availableBlocks)
       const restrictionKey = `${teacher}|${subject}`
@@ -3613,7 +3613,7 @@ export default function HistoryDetailPage() {
 
       // Get the blocker info from the conflict - use conflictingBlock for the exact position
       const blockerEntry = workingSchedules.teacherSchedules[conflict.conflictingTeacher]?.[conflict.placement.day]?.[conflict.conflictingBlock]
-      if (!blockerEntry || blockerEntry[1] === "OPEN" || blockerEntry[1] === "Study Hall") {
+      if (!blockerEntry || !isScheduledClass(blockerEntry[1])) {
         toast.error("Blocker no longer exists at that position")
         return
       }
@@ -3953,7 +3953,7 @@ export default function HistoryDetailPage() {
     // 2. Check Study Hall teacher eligibility (only full-time teachers)
     for (const placement of pendingPlacements) {
       const placedBlock = floatingBlocks.find(b => b.id === placement.blockId)
-      if (!placedBlock || placedBlock.subject !== "Study Hall") continue
+      if (!placedBlock || !isStudyHall(placedBlock.subject)) continue
 
       const status = teacherStatus.get(placement.teacher)
       if (status !== "full-time") {
@@ -4081,7 +4081,7 @@ export default function HistoryDetailPage() {
       // 6. Check fixed slot restrictions
       for (const placement of pendingPlacements) {
         const placedBlock = floatingBlocks.find(b => b.id === placement.blockId)
-        if (!placedBlock || placedBlock.subject === "Study Hall") continue
+        if (!placedBlock || isStudyHall(placedBlock.subject)) continue
 
         // Find the class definition for this placement (using gradesOverlap for multi-grade support)
         const classDef = freeformClasses.find(c =>
@@ -4108,7 +4108,7 @@ export default function HistoryDetailPage() {
       // 7. Check teacher availability (days and blocks)
       for (const placement of pendingPlacements) {
         const placedBlock = floatingBlocks.find(b => b.id === placement.blockId)
-        if (!placedBlock || placedBlock.subject === "Study Hall") continue
+        if (!placedBlock || isStudyHall(placedBlock.subject)) continue
 
         // Find the class definition (using gradesOverlap for multi-grade support)
         const classDef = freeformClasses.find(c =>
@@ -4242,7 +4242,7 @@ export default function HistoryDetailPage() {
 
         for (const [teacher, schedule] of Object.entries(option.teacherSchedules)) {
           const entry = schedule[day]?.[block]
-          if (!entry || entry[1] === "OPEN" || entry[1] === "Study Hall") continue
+          if (!entry || !isScheduledClass(entry[1])) continue
 
           const grade = entry[0]
           const subject = entry[1]
@@ -4279,7 +4279,7 @@ export default function HistoryDetailPage() {
       for (const day of DAYS) {
         for (let block = 1; block <= 5; block++) {
           const entry = schedule[day]?.[block]
-          if (!entry || entry[1] === "OPEN" || entry[1] === "Study Hall") continue
+          if (!entry || !isScheduledClass(entry[1])) continue
 
           const grade = entry[0]
           const subject = entry[1]
@@ -4352,7 +4352,7 @@ export default function HistoryDetailPage() {
           for (const day of DAYS) {
             for (let block = 1; block <= 5; block++) {
               const entry = schedule[day]?.[block]
-              if (!entry || entry[1] === "OPEN" || entry[1] === "Study Hall") continue
+              if (!entry || !isScheduledClass(entry[1])) continue
 
               const key = `${teacher}|${day}|${block}`
               allEntries.set(key, {
@@ -4642,7 +4642,7 @@ export default function HistoryDetailPage() {
       for (const day of DAYS) {
         for (let block = 1; block <= 5; block++) {
           const entry = schedule[day]?.[block]
-          if (!entry || entry[1] === "OPEN" || entry[1] === "Study Hall") continue
+          if (!entry || !isScheduledClass(entry[1])) continue
 
           const gradeDisplay = entry[0]
           const subject = entry[1]
@@ -5217,7 +5217,7 @@ export default function HistoryDetailPage() {
     let updatedStudyHallAssignments = [...selectedResult.studyHallAssignments]
     for (const placement of pendingPlacements) {
       const block = floatingBlocks.find(b => b.id === placement.blockId)
-      if (block && block.subject === "Study Hall") {
+      if (block && isStudyHall(block.subject)) {
         // Find the study hall assignment for this grade group and update it
         const assignmentIndex = updatedStudyHallAssignments.findIndex(sh =>
           sh.group === block.grade &&
@@ -5260,11 +5260,11 @@ export default function HistoryDetailPage() {
         let prevWasOpen = false
         for (let block = 1; block <= 5; block++) {
           const entry = schedule?.[day]?.[block]
-          if (!entry || entry[1] === "OPEN") {
+          if (!entry || isOpenBlock(entry[1])) {
             open++
             if (prevWasOpen && stat.status === "full-time") backToBackIssues++
             prevWasOpen = true
-          } else if (entry[1] === "Study Hall") {
+          } else if (isStudyHall(entry[1])) {
             studyHall++
             prevWasOpen = true
           } else {
@@ -5807,15 +5807,15 @@ export default function HistoryDetailPage() {
                         <p className="text-sm text-amber-600">
                           {viewMode === "teacher" ? (
                             selectedCell
-                              ? selectedCell.subject === "Study Hall"
+                              ? isStudyHall(selectedCell.subject)
                                 ? `Selected Study Hall (${selectedCell.day} B${selectedCell.block}). Click another teacher's OPEN slot to reassign supervision.`
-                                : selectedCell.subject === "OPEN"
+                                : isOpenBlock(selectedCell.subject)
                                   ? `Selected OPEN block (${selectedCell.day} B${selectedCell.block}). Click another OPEN to exchange.`
                                   : `Selected ${selectedCell.grade} ${selectedCell.subject} (${selectedCell.day} B${selectedCell.block}). Click a highlighted slot to exchange.`
                               : "Click a class to exchange a time slot. Or exchange a Study Hall with another teacher's OPEN slot."
                           ) : (
                             selectedCell
-                              ? selectedCell.subject === "Study Hall"
+                              ? isStudyHall(selectedCell.subject)
                                 ? `Selected Study Hall (${selectedCell.day} B${selectedCell.block}). Click another teacher's OPEN slot to reassign supervision.`
                                 : `Selected ${selectedCell.subject} (${selectedCell.day} B${selectedCell.block}). Click a highlighted slot to exchange.`
                               : "Click a class to exchange a time slot. Or exchange a Study Hall with another teacher's OPEN slot."
@@ -6760,7 +6760,7 @@ export default function HistoryDetailPage() {
                                   {teacherFloatingBlocks.map(block => {
                                     const isSelected = selectedFloatingBlock === block.id
                                     const error = validationErrors.find(e => e.blockId === block.id)
-                                    const isStudyHall = block.subject === "Study Hall"
+                                    const blockIsStudyHall = isStudyHall(block.subject)
 
                                     return (
                                       <div
@@ -6775,7 +6775,7 @@ export default function HistoryDetailPage() {
                                               ? 'ring-2 ring-indigo-500'
                                               : 'hover:ring-2 hover:ring-indigo-300'
                                           }
-                                          ${isStudyHall
+                                          ${blockIsStudyHall
                                             ? 'bg-blue-100 border-blue-200'
                                             : 'bg-green-50 border-green-200'
                                           }
