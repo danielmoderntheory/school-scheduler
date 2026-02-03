@@ -29,7 +29,9 @@ function LoginForm() {
       })
 
       if (res.ok) {
-        router.push(returnTo)
+        const data = await res.json()
+        const destination = returnTo !== "/" ? returnTo : (data.role === "admin" ? "/history" : returnTo)
+        router.push(destination)
         router.refresh()
       } else {
         const data = await res.json()

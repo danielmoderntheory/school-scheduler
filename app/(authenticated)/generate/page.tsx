@@ -343,7 +343,6 @@ export default function GeneratePage() {
         const placedStudyHalls = firstOption.studyHallsPlaced || 0
 
         if (placedStudyHalls < expectedStudyHalls) {
-          console.log(`[Generate] First pass placed ${placedStudyHalls}/${expectedStudyHalls} study halls, trying deep exploration...`)
           setProgress({ current: 0, total: 15, message: "Trying deeper exploration for better results..." })
 
           const deepResult = await generateSchedulesRemote(teacherList, classList, {
@@ -361,10 +360,8 @@ export default function GeneratePage() {
           if (deepResult.status === 'success' && deepResult.options.length > 0) {
             const deepPlaced = deepResult.options[0].studyHallsPlaced || 0
             if (deepPlaced > placedStudyHalls) {
-              console.log(`[Generate] Deep exploration found better result: ${deepPlaced}/${expectedStudyHalls} study halls`)
               result = deepResult
             } else {
-              console.log(`[Generate] Deep exploration didn't improve: ${deepPlaced}/${expectedStudyHalls}, keeping original`)
             }
           }
         }
@@ -375,14 +372,6 @@ export default function GeneratePage() {
         console.warn('Discarding stale generation result', { expected: generationIdRef.current, got: generationId })
         return
       }
-
-      // DEBUG: Log the actual result to track the stale results bug
-      console.log('=== GENERATION RESULT ===')
-      console.log('Generation ID:', generationId)
-      console.log('Result status:', result.status)
-      console.log('Result options count:', result.options?.length ?? 0)
-      console.log('Result message:', result.message)
-      console.log('=========================')
 
       if (result.status === 'infeasible') {
         setScheduleError({

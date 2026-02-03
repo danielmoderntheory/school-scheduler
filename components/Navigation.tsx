@@ -33,7 +33,7 @@ export function Navigation() {
   const pathname = usePathname()
   const router = useRouter()
   const { confirmNavigation } = useGeneration()
-  const [authState, setAuthState] = useState<{ checked: boolean; isAdmin: boolean }>({ checked: false, isAdmin: false })
+  const [authState, setAuthState] = useState<{ checked: boolean; isAdmin: boolean; isLoggedIn: boolean }>({ checked: false, isAdmin: false, isLoggedIn: false })
 
   // Check auth status for view mode
   useEffect(() => {
@@ -41,9 +41,9 @@ export function Navigation() {
       try {
         const res = await fetch('/api/auth')
         const data = await res.json()
-        setAuthState({ checked: true, isAdmin: data.role === 'admin' })
+        setAuthState({ checked: true, isAdmin: data.role === 'admin', isLoggedIn: data.isAuthenticated })
       } catch {
-        setAuthState({ checked: true, isAdmin: false })
+        setAuthState({ checked: true, isAdmin: false, isLoggedIn: false })
       }
     }
     checkAuth()
@@ -96,15 +96,22 @@ export function Navigation() {
                   </Button>
                 </DropdownMenuTrigger>
                 <DropdownMenuContent align="end">
-                  <DropdownMenuItem asChild>
-                    <Link
-                      href={`/login?returnTo=${encodeURIComponent(pathname)}`}
-                      className="flex items-center gap-2"
-                    >
-                      <LogIn className="h-4 w-4" />
-                      Login
-                    </Link>
-                  </DropdownMenuItem>
+                  {authState.isLoggedIn ? (
+                    <DropdownMenuItem onClick={handleLogout} className="flex items-center gap-2">
+                      <LogOut className="h-4 w-4" />
+                      Logout
+                    </DropdownMenuItem>
+                  ) : (
+                    <DropdownMenuItem asChild>
+                      <Link
+                        href={`/login?returnTo=${encodeURIComponent(pathname)}`}
+                        className="flex items-center gap-2"
+                      >
+                        <LogIn className="h-4 w-4" />
+                        Login
+                      </Link>
+                    </DropdownMenuItem>
+                  )}
                 </DropdownMenuContent>
               </DropdownMenu>
             </div>

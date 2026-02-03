@@ -1194,10 +1194,6 @@ export async function generateSchedules(
     }
   });
 
-  console.log('[Solver] isRefinementMode:', isRefinementMode);
-  console.log('[Solver] databaseGrades:', Array.from(databaseGrades));
-  console.log('[Solver] lockedTeachers count:', Object.keys(lockedTeachers).length);
-
   if (isRefinementMode) {
     for (const [teacher, schedule] of Object.entries(lockedTeachers)) {
       DAYS.forEach((day, dayIdx) => {
@@ -1211,9 +1207,7 @@ export async function generateSchedules(
             // Check if this class is an elective
             const isElective = electiveLookup.get(`${teacher}|${subject}`) === true;
 
-            // DEBUG: Log if parsing fails or succeeds
             if (parsedGrades.length === 0 && entry[0]) {
-              console.log(`[Solver] WARNING: No grades parsed for ${teacher} ${day} B${block}: gradeDisplay="${entry[0]}", subject="${entry[1]}"`);
             }
 
             // Add to appropriate map based on elective status
@@ -1229,15 +1223,12 @@ export async function generateSchedules(
       });
     }
     // Log total locked slots per grade
-    console.log('[Solver] Locked grade slots computed:');
     for (const [grade, slots] of lockedGradeSlots) {
       if (slots.size > 0) {
-        console.log(`  ${grade}: ${slots.size} slots blocked (non-elective)`);
       }
     }
     for (const [grade, slots] of lockedElectiveGradeSlots) {
       if (slots.size > 0) {
-        console.log(`  ${grade}: ${slots.size} slots blocked (elective)`);
       }
     }
   }
@@ -1492,7 +1483,6 @@ export async function generateSchedules(
 
   const totalTime = Date.now() - startTime;
   if (unique.length === 0) {
-    console.log(`[Scheduler] Failed after ${totalTime}ms - ${successCount} solutions found, ${timeoutCount} timeouts, ${infeasibleCount} infeasible`);
   }
 
   // Determine result status
@@ -1594,7 +1584,6 @@ export function reassignStudyHalls(
 
   // Check if study hall grades are configured
   const studyHallGrades = getStudyHallGrades(rules);
-  console.log(`[reassignStudyHalls] Configured study hall grades: ${studyHallGrades.join(', ')} (${studyHallGrades.length} total)`);
   if (studyHallGrades.length === 0) {
     return {
       success: false,
@@ -1646,16 +1635,12 @@ export function reassignStudyHalls(
     const shPlaced = shAssignments.filter(sh => sh.teacher !== null).length;
     const shTotal = shAssignments.length;
 
-    // DEBUG: Log attempt details
-    console.log(`[reassignStudyHalls] Attempt ${attempt + 1}/${maxAttempts}: placed ${shPlaced}/${shTotal} study halls`);
     if (shPlaced < shTotal) {
       const unplaced = shAssignments.filter(sh => sh.teacher === null);
-      console.log(`  Unplaced groups: ${unplaced.map(sh => sh.group).join(', ')}`);
 
       // Check why each grade couldn't be placed
       for (const sh of unplaced) {
         const grade = sh.group;
-        console.log(`  Checking why ${grade} couldn't be placed:`);
 
         // Check grade's free slots in gradeSchedules
         const gradeSchedule = gradeSchedules[grade];
@@ -1667,7 +1652,6 @@ export function reassignStudyHalls(
             }
           }
         }
-        console.log(`    ${grade} free slots in gradeSchedules: ${gradeFreeSlots.length > 0 ? gradeFreeSlots.join(', ') : 'NONE!'}`);
 
         // Check eligible teacher open slots
         for (const teacherName of eligible) {
@@ -1685,7 +1669,6 @@ export function reassignStudyHalls(
           if (teacherOpenSlots.length > 0) {
             // Check overlap with grade free slots
             const overlap = teacherOpenSlots.filter(s => gradeFreeSlots.includes(s));
-            console.log(`    ${teacherName}: ${teacherOpenSlots.length} open (overlap with grade: ${overlap.length > 0 ? overlap.join(', ') : 'NONE'})`);
           }
         }
       }
