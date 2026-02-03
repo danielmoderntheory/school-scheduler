@@ -1,6 +1,6 @@
 import XLSX from "xlsx-js-style"
-import type { ScheduleOption, TeacherSchedule, GradeSchedule } from "./types"
-import { BLOCK_TYPE_OPEN, BLOCK_TYPE_STUDY_HALL, isOpenBlock, isStudyHall, isScheduledClass } from "./schedule-utils"
+import type { ScheduleOption, TeacherSchedule, GradeSchedule, OpenBlockLabels } from "./types"
+import { BLOCK_TYPE_OPEN, BLOCK_TYPE_STUDY_HALL, isOpenBlock, isStudyHall, isScheduledClass, getOpenBlockAt, getOpenBlockLabel } from "./schedule-utils"
 import { formatGradeDisplayCompact } from "./grade-utils"
 
 const DAYS = ["Mon", "Tues", "Wed", "Thurs", "Fri"]
@@ -115,10 +115,11 @@ function sortTeachers(
 
 // Format schedule cell: "Grade - Subject" or just "OPEN" (no dash)
 // For teacher schedules: entry is [grade, subject]
-function formatCell(entry: [string, string] | null | undefined): string {
+// Optional label parameter for OPEN blocks with custom labels
+function formatCell(entry: [string, string] | null | undefined, label?: string): string {
   if (!entry) return ""
-  // OPEN blocks have no grade info
-  if (isOpenBlock(entry[1])) return BLOCK_TYPE_OPEN
+  // OPEN blocks - use custom label if provided, otherwise "OPEN"
+  if (isOpenBlock(entry[1])) return label || BLOCK_TYPE_OPEN
   // Format grade compactly (e.g., "6th-11th" instead of "6th, 7th, 8th...")
   const grade = entry[0] ? formatGradeDisplayCompact(entry[0]) : ""
   // Study Hall should show the grade
@@ -128,6 +129,20 @@ function formatCell(entry: [string, string] | null | undefined): string {
   // If first part is empty, just show subject
   if (!grade) return entry[1]
   return `${grade} - ${entry[1]}`
+}
+
+// Get the OPEN block label for a cell if applicable
+function getOpenLabelForCell(
+  schedule: TeacherSchedule,
+  teacher: string,
+  day: string,
+  block: number,
+  openBlockLabels?: OpenBlockLabels
+): string | undefined {
+  if (!openBlockLabels) return undefined
+  const openBlockInfo = getOpenBlockAt(schedule, day, block)
+  if (!openBlockInfo || openBlockInfo.type !== "open") return undefined
+  return getOpenBlockLabel(openBlockLabels, teacher, openBlockInfo.openIndex, openBlockInfo.type)
 }
 
 // Format grade schedule cell - handles array format [[teacher, subject], ...]
@@ -382,7 +397,8 @@ export function generateXLSX(option: ScheduleOption, metadata?: ExportMetadata):
       teacherRowInfo.push({ type: "block", row: teacherData.length })
       const row: (string | number)[] = [`Block ${block}`]
       DAYS.forEach((day) => {
-        row.push(formatCell(schedule[day]?.[block]))
+        const label = getOpenLabelForCell(schedule, teacher, day, block, option.openBlockLabels)
+        row.push(formatCell(schedule[day]?.[block], label))
       })
       teacherData.push(row)
     })
@@ -508,7 +524,8 @@ export function generateCSV(option: ScheduleOption, metadata?: ExportMetadata): 
     BLOCKS.forEach((block) => {
       const row: string[] = [`Block ${block}`]
       DAYS.forEach((day) => {
-        const cell = formatCell(schedule[day]?.[block])
+        const label = getOpenLabelForCell(schedule, teacher, day, block, option.openBlockLabels)
+        const cell = formatCell(schedule[day]?.[block], label)
         row.push(cell ? `"${cell}"` : "")
       })
       lines.push(row.join(","))

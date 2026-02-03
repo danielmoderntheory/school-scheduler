@@ -214,3 +214,128 @@ export function getBlockType(entry: ScheduleEntry): typeof BLOCK_TYPE_OPEN | typ
   if (!entry) return BLOCK_TYPE_OPEN
   return entry[1]
 }
+
+// -----------------------------------------------------------------------------
+// OPEN BLOCK LABEL UTILITIES
+// For assigning custom display labels to OPEN blocks.
+// Labels are indexed by "Nth open block" (counting both OPEN and Study Hall),
+// but only OPEN blocks can have labels (Study Halls always show their grade).
+// -----------------------------------------------------------------------------
+
+import type { TeacherSchedule, OpenBlockLabels } from "./types"
+
+const DAYS_ORDER = ["Mon", "Tues", "Wed", "Thurs", "Fri"]
+const BLOCKS_ORDER = [1, 2, 3, 4, 5]
+
+export interface OpenBlockInfo {
+  day: string
+  block: number
+  type: "open" | "study-hall"
+}
+
+/**
+ * Get all open blocks (OPEN + Study Hall) for a teacher in reading order (Mon B1 → Fri B5).
+ * Both types count toward the index, but only OPEN blocks can have custom labels.
+ */
+export function getTeacherOpenBlocks(schedule: TeacherSchedule): OpenBlockInfo[] {
+  const openBlocks: OpenBlockInfo[] = []
+
+  for (const day of DAYS_ORDER) {
+    for (const block of BLOCKS_ORDER) {
+      const entry = schedule[day]?.[block]
+      if (!entry) {
+        // null entry = OPEN
+        openBlocks.push({ day, block, type: "open" })
+      } else if (isOpenBlock(entry[1])) {
+        openBlocks.push({ day, block, type: "open" })
+      } else if (isStudyHall(entry[1])) {
+        openBlocks.push({ day, block, type: "study-hall" })
+      }
+    }
+  }
+
+  return openBlocks
+}
+
+/**
+ * Find the openIndex (0-based) for a specific cell.
+ * Returns the index if this is an OPEN or Study Hall block, null otherwise.
+ * Index counts BOTH OPEN and Study Hall blocks in reading order.
+ */
+export function getOpenBlockIndex(schedule: TeacherSchedule, day: string, block: number): number | null {
+  const openBlocks = getTeacherOpenBlocks(schedule)
+  const idx = openBlocks.findIndex(b => b.day === day && b.block === block)
+  return idx >= 0 ? idx : null
+}
+
+/**
+ * Get the open block info at a specific cell.
+ * Returns the info including type, or null if not an open block.
+ */
+export function getOpenBlockAt(schedule: TeacherSchedule, day: string, block: number): (OpenBlockInfo & { openIndex: number }) | null {
+  const openBlocks = getTeacherOpenBlocks(schedule)
+  const idx = openBlocks.findIndex(b => b.day === day && b.block === block)
+  if (idx >= 0) {
+    return { ...openBlocks[idx], openIndex: idx }
+  }
+  return null
+}
+
+/**
+ * Get label for a teacher's Nth open block.
+ * Returns undefined if no label is set, or if the block is a Study Hall (Study Halls can't have custom labels).
+ */
+export function getOpenBlockLabel(
+  labels: OpenBlockLabels | undefined,
+  teacher: string,
+  openIndex: number,
+  blockType: "open" | "study-hall"
+): string | undefined {
+  // Study Halls always show their grade, never custom labels
+  if (blockType === "study-hall") return undefined
+  if (!labels) return undefined
+  return labels.assignments[teacher]?.[openIndex]
+}
+
+/**
+ * Set a label for a teacher's Nth open block.
+ * Returns a new OpenBlockLabels object with the label set.
+ * If label is undefined or empty, removes the assignment.
+ */
+export function setOpenBlockLabel(
+  labels: OpenBlockLabels | undefined,
+  teacher: string,
+  openIndex: number,
+  label: string | undefined
+): OpenBlockLabels {
+  const result: OpenBlockLabels = labels
+    ? { availableLabels: [...labels.availableLabels], assignments: { ...labels.assignments } }
+    : { availableLabels: [], assignments: {} }
+
+  // Ensure teacher entry exists
+  if (!result.assignments[teacher]) {
+    result.assignments[teacher] = {}
+  } else {
+    result.assignments[teacher] = { ...result.assignments[teacher] }
+  }
+
+  if (label && label.trim()) {
+    // Set the label
+    result.assignments[teacher][openIndex] = label.trim()
+
+    // Add to available labels if not already present
+    if (!result.availableLabels.includes(label.trim())) {
+      result.availableLabels = [...result.availableLabels, label.trim()]
+    }
+  } else {
+    // Remove the label
+    delete result.assignments[teacher][openIndex]
+
+    // Clean up empty teacher entry
+    if (Object.keys(result.assignments[teacher]).length === 0) {
+      delete result.assignments[teacher]
+    }
+  }
+
+  return result
+}

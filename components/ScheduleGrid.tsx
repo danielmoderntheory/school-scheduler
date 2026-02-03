@@ -1,11 +1,13 @@
 "use client"
 
+import { useState, useEffect, useRef } from "react"
 import { cn } from "@/lib/utils"
 import { Badge } from "@/components/ui/badge"
 import { Checkbox } from "@/components/ui/checkbox"
-import { RefreshCw, AlertTriangle, Check, Ban } from "lucide-react"
-import type { TeacherSchedule, GradeSchedule, FloatingBlock, PendingPlacement, ValidationError, CellLocation } from "@/lib/types"
-import { BLOCK_TYPE_OPEN, isOpenBlock, isStudyHall, isScheduledClass, isFullTime } from "@/lib/schedule-utils"
+import { Input } from "@/components/ui/input"
+import { RefreshCw, AlertTriangle, Check, Ban, X } from "lucide-react"
+import type { TeacherSchedule, GradeSchedule, FloatingBlock, PendingPlacement, ValidationError, CellLocation, OpenBlockLabels } from "@/lib/types"
+import { BLOCK_TYPE_OPEN, isOpenBlock, isStudyHall, isScheduledClass, isFullTime, getOpenBlockAt, getOpenBlockLabel } from "@/lib/schedule-utils"
 import { formatGradeDisplayCompact, isClassElective, isClassCotaught, type ClassSnapshotEntry } from "@/lib/grade-utils"
 
 const DAYS = ["Mon", "Tues", "Wed", "Thurs", "Fri"]
@@ -48,6 +50,10 @@ interface ScheduleGridProps {
   onPlace?: (location: CellLocation) => void
   onUnplace?: (blockId: string) => void
   onDeselect?: () => void
+  // OPEN block label props
+  openBlockLabels?: OpenBlockLabels  // Custom labels for OPEN blocks
+  showOpenLabels?: boolean  // Whether to display labels on OPEN blocks
+  onOpenLabelChange?: (teacher: string, openIndex: number, label: string | undefined) => void  // Callback when label changes
 }
 
 export function ScheduleGrid({
@@ -80,7 +86,36 @@ export function ScheduleGrid({
   onPlace,
   onUnplace,
   onDeselect,
+  openBlockLabels,
+  showOpenLabels,
+  onOpenLabelChange,
 }: ScheduleGridProps) {
+  // State for OPEN block label editing dropdown
+  const [labelDropdownCell, setLabelDropdownCell] = useState<{ day: string; block: number; openIndex: number } | null>(null)
+  const [labelDropdownPos, setLabelDropdownPos] = useState<{ top: number; left: number } | null>(null)
+  const [labelSearch, setLabelSearch] = useState("")
+  const labelDropdownRef = useRef<HTMLDivElement>(null)
+  const labelInputRef = useRef<HTMLInputElement>(null)
+
+  // Close label dropdown when clicking outside
+  useEffect(() => {
+    function handleClickOutside(event: MouseEvent) {
+      if (labelDropdownRef.current && !labelDropdownRef.current.contains(event.target as Node)) {
+        setLabelDropdownCell(null)
+        setLabelDropdownPos(null)
+        setLabelSearch("")
+      }
+    }
+    document.addEventListener("mousedown", handleClickOutside)
+    return () => document.removeEventListener("mousedown", handleClickOutside)
+  }, [])
+
+  // Focus input when dropdown opens
+  useEffect(() => {
+    if (labelDropdownCell && labelInputRef.current) {
+      labelInputRef.current.focus()
+    }
+  }, [labelDropdownCell])
   // Returns [primary, secondary, isMultiple] where isMultiple indicates multiple entries (electives)
   function getCellContent(day: string, block: number): { entry: [string, string] | null; isMultiple: boolean } {
     const raw = schedule[day]?.[block]
@@ -494,8 +529,165 @@ export function ScheduleGrid({
                         )
                       }
                       if (isOpenBlock(displaySecondary)) {
-                        // OPEN cells just show "OPEN" without grade
-                        return <span className="text-xs text-muted-foreground">{BLOCK_TYPE_OPEN}</span>
+                        // OPEN cells - check for custom label
+                        const openBlockInfo = type === "teacher" ? getOpenBlockAt(schedule as TeacherSchedule, day, block) : null
+                        const label = openBlockInfo && showOpenLabels
+                          ? getOpenBlockLabel(openBlockLabels, name, openBlockInfo.openIndex, openBlockInfo.type)
+                          : undefined
+                        const displayText = label || BLOCK_TYPE_OPEN
+                        const isDropdownOpen = labelDropdownCell?.day === day && labelDropdownCell?.block === block
+
+                        // If label editing is enabled, show clickable cell with dropdown
+                        if (type === "teacher" && onOpenLabelChange && openBlockInfo) {
+                          return (
+                            <div className="relative">
+                              <span
+                                className={cn(
+                                  "text-xs cursor-pointer hover:underline",
+                                  label ? "text-gray-700 font-medium" : "text-muted-foreground"
+                                )}
+                                onClick={(e) => {
+                                  e.stopPropagation()
+                                  const rect = e.currentTarget.getBoundingClientRect()
+                                  setLabelDropdownPos({
+                                    top: rect.bottom + 4,
+                                    left: rect.left + rect.width / 2
+                                  })
+                                  setLabelDropdownCell({ day, block, openIndex: openBlockInfo.openIndex })
+                                  setLabelSearch("")
+                                }}
+                              >
+                                {displayText}
+                              </span>
+                              {isDropdownOpen && labelDropdownPos && (
+                                <div
+                                  ref={labelDropdownRef}
+                                  className="fixed z-[100] bg-popover border rounded-lg shadow-xl w-[240px] -translate-x-1/2"
+                                  style={{
+                                    top: labelDropdownPos.top,
+                                    left: labelDropdownPos.left,
+                                  }}
+                                  onClick={(e) => e.stopPropagation()}
+                                >
+                                  {/* Header with X button */}
+                                  <div className="flex items-center justify-between px-3 py-2 border-b bg-muted/30 rounded-t-lg">
+                                    <span className="text-xs font-medium text-muted-foreground">Label</span>
+                                    <button
+                                      onClick={() => {
+                                        setLabelDropdownCell(null)
+                                        setLabelDropdownPos(null)
+                                        setLabelSearch("")
+                                      }}
+                                      className="p-0.5 rounded hover:bg-muted"
+                                    >
+                                      <X className="h-3.5 w-3.5 text-muted-foreground" />
+                                    </button>
+                                  </div>
+                                  {/* Input */}
+                                  <div className="p-2">
+                                    <Input
+                                      ref={labelInputRef}
+                                      value={labelSearch}
+                                      onChange={(e) => setLabelSearch(e.target.value)}
+                                      placeholder="Type or select..."
+                                      className="h-8 text-sm"
+                                      onKeyDown={(e) => {
+                                        if (e.key === "Enter" && labelSearch.trim()) {
+                                          onOpenLabelChange(name, openBlockInfo.openIndex, labelSearch.trim())
+                                          setLabelDropdownCell(null)
+                                          setLabelDropdownPos(null)
+                                          setLabelSearch("")
+                                        } else if (e.key === "Escape") {
+                                          setLabelDropdownCell(null)
+                                          setLabelDropdownPos(null)
+                                          setLabelSearch("")
+                                        }
+                                      }}
+                                    />
+                                  </div>
+                                  {/* Options */}
+                                  <div className="max-h-40 overflow-auto border-t">
+                                    {/* Available labels */}
+                                    {(openBlockLabels?.availableLabels || [])
+                                      .filter(l => l.toLowerCase().includes(labelSearch.toLowerCase()))
+                                      .map((availLabel) => (
+                                        <div
+                                          key={availLabel}
+                                          onClick={() => {
+                                            onOpenLabelChange(name, openBlockInfo.openIndex, availLabel)
+                                            setLabelDropdownCell(null)
+                                            setLabelDropdownPos(null)
+                                            setLabelSearch("")
+                                          }}
+                                          className={cn(
+                                            "px-3 py-1.5 cursor-pointer hover:bg-accent text-sm flex items-center gap-2",
+                                            label === availLabel && "bg-accent"
+                                          )}
+                                        >
+                                          <div className={cn(
+                                            "w-3.5 h-3.5 rounded-full border-2 flex items-center justify-center flex-shrink-0",
+                                            label === availLabel ? "border-primary" : "border-muted-foreground/40"
+                                          )}>
+                                            {label === availLabel && (
+                                              <div className="w-1.5 h-1.5 rounded-full bg-primary" />
+                                            )}
+                                          </div>
+                                          <span>{availLabel}</span>
+                                        </div>
+                                      ))}
+                                    {/* Create new option */}
+                                    {labelSearch.trim() && !openBlockLabels?.availableLabels?.some(
+                                      l => l.toLowerCase() === labelSearch.toLowerCase()
+                                    ) && (
+                                      <div
+                                        onClick={() => {
+                                          onOpenLabelChange(name, openBlockInfo.openIndex, labelSearch.trim())
+                                          setLabelDropdownCell(null)
+                                          setLabelDropdownPos(null)
+                                          setLabelSearch("")
+                                        }}
+                                        className="px-3 py-1.5 cursor-pointer hover:bg-accent text-sm text-primary border-t flex items-center gap-2"
+                                      >
+                                        <div className="w-3.5 h-3.5 rounded-full border-2 border-primary/40 flex-shrink-0" />
+                                        <span>Create &quot;{labelSearch.trim()}&quot;</span>
+                                      </div>
+                                    )}
+                                    {/* No labels yet message */}
+                                    {(!openBlockLabels?.availableLabels || openBlockLabels.availableLabels.length === 0) && !labelSearch.trim() && (
+                                      <div className="px-3 py-2 text-xs text-muted-foreground">
+                                        Type to create a label
+                                      </div>
+                                    )}
+                                  </div>
+                                  {/* Clear option at bottom - only show if there's a label set */}
+                                  {label && (
+                                    <div
+                                      onClick={() => {
+                                        onOpenLabelChange(name, openBlockInfo.openIndex, undefined)
+                                        setLabelDropdownCell(null)
+                                        setLabelDropdownPos(null)
+                                        setLabelSearch("")
+                                      }}
+                                      className="px-3 py-1.5 cursor-pointer hover:bg-red-50 text-xs text-muted-foreground border-t"
+                                    >
+                                      Clear label
+                                    </div>
+                                  )}
+                                </div>
+                              )}
+                            </div>
+                          )
+                        }
+
+                        // Read-only display (or grade view)
+                        return (
+                          <span className={cn(
+                            "text-xs",
+                            label ? "text-gray-700 font-medium" : "text-muted-foreground"
+                          )}>
+                            {displayText}
+                          </span>
+                        )
                       }
                       if (isMultiple) {
                         // Multiple entries (electives) - show just "Elective" or "Multiple"

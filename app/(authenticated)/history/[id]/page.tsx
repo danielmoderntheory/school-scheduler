@@ -3,6 +3,7 @@
 import { useState, useEffect, useRef, useMemo, Fragment } from "react"
 import { useParams, useSearchParams, useRouter } from "next/navigation"
 import { Button } from "@/components/ui/button"
+import { Checkbox } from "@/components/ui/checkbox"
 import { ScheduleGrid } from "@/components/ScheduleGrid"
 import { ScheduleStats } from "@/components/ScheduleStats"
 import { Loader2, Download, ArrowLeft, Check, RefreshCw, Shuffle, Trash2, Star, MoreVertical, Users, GraduationCap, Printer, ArrowLeftRight, X, Hand, Pencil, Copy, ChevronDown, ChevronUp, AlertTriangle, Minus } from "lucide-react"
@@ -34,10 +35,10 @@ import {
 import { Textarea } from "@/components/ui/textarea"
 import { Label } from "@/components/ui/label"
 import Link from "next/link"
-import type { ScheduleOption, TeacherSchedule, GradeSchedule, Teacher, FloatingBlock, PendingPlacement, ValidationError, CellLocation, ClassEntry } from "@/lib/types"
+import type { ScheduleOption, TeacherSchedule, GradeSchedule, Teacher, FloatingBlock, PendingPlacement, ValidationError, CellLocation, ClassEntry, OpenBlockLabels } from "@/lib/types"
 import { parseClassesFromSnapshot, parseTeachersFromSnapshot, parseRulesFromSnapshot, hasValidSnapshots, detectClassChanges, type GenerationStats, type ChangeDetectionResult, type CurrentClass } from "@/lib/snapshot-utils"
 import { parseGradeDisplayToNumbers, parseGradeDisplayToNames, gradesOverlap, gradeNumToDisplay, isClassElective, shouldIgnoreGradeConflict, formatGradeDisplayCompact } from "@/lib/grade-utils"
-import { BLOCK_TYPE_OPEN, BLOCK_TYPE_STUDY_HALL, isOpenBlock, isStudyHall, isScheduledClass, isOccupiedBlock, entryIsOpen, entryIsOccupied, entryIsScheduledClass, isFullTime } from "@/lib/schedule-utils"
+import { BLOCK_TYPE_OPEN, BLOCK_TYPE_STUDY_HALL, isOpenBlock, isStudyHall, isScheduledClass, isOccupiedBlock, entryIsOpen, entryIsOccupied, entryIsScheduledClass, isFullTime, setOpenBlockLabel } from "@/lib/schedule-utils"
 import toast from "react-hot-toast"
 import { generateSchedules, reassignStudyHalls } from "@/lib/scheduler"
 import { generateSchedulesRemote } from "@/lib/scheduler-remote"
@@ -440,6 +441,7 @@ export default function HistoryDetailPage() {
   const [useCurrentClasses, setUseCurrentClasses] = useState(false) // When true, regen uses current DB classes instead of snapshot
   const [changesExpanded, setChangesExpanded] = useState(false) // Expandable changes list in regen banner
   const [skipStudyHalls, setSkipStudyHalls] = useState(false) // Skip study hall assignment during regen (can reassign after)
+  const [showOpenLabels, setShowOpenLabels] = useState(false) // Show custom labels on OPEN blocks
 
   // Compute which placements have conflicts and detailed info for validation errors
   const placementConflicts = useMemo(() => {
@@ -2087,6 +2089,53 @@ export default function HistoryDetailPage() {
     setSelectedForRegen(new Set())
     setUseCurrentClasses(false)
     toast("Preview discarded", { icon: "🗑️" })
+  }
+
+  // Handle OPEN block label changes - updates the current option and saves to database
+  async function handleOpenLabelChange(teacher: string, openIndex: number, label: string | undefined) {
+    if (!generation) return
+
+    const optionIndex = parseInt(viewingOption) - 1
+    const currentOption = generation.options[optionIndex]
+    if (!currentOption) return
+
+    // Update the labels
+    const newLabels = setOpenBlockLabel(currentOption.openBlockLabels, teacher, openIndex, label)
+
+    // Build updated option
+    const updatedOption: ScheduleOption = {
+      ...currentOption,
+      openBlockLabels: newLabels
+    }
+
+    // Build updated options array
+    const updatedOptions = [...generation.options]
+    updatedOptions[optionIndex] = updatedOption
+
+    // Optimistically update UI
+    setGeneration({
+      ...generation,
+      options: updatedOptions
+    })
+
+    // Save to database
+    try {
+      const res = await fetch(`/api/history/${id}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ options: updatedOptions })
+      })
+
+      if (!res.ok) {
+        // Revert on error
+        setGeneration(generation)
+        toast.error("Failed to save label")
+      }
+    } catch (error) {
+      console.error('Failed to save open block label:', error)
+      setGeneration(generation)
+      toast.error("Failed to save label")
+    }
   }
 
   function enterStudyHallMode(skipChangesCheck = false) {
@@ -6244,19 +6293,22 @@ export default function HistoryDetailPage() {
           <h3 className="font-semibold">
             {viewMode === "teacher" ? "Teacher Schedules" : "Grade Schedules"}
           </h3>
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={() => setViewMode(viewMode === "teacher" ? "grade" : "teacher")}
-            className="gap-1.5"
-          >
-            {viewMode === "teacher" ? (
-              <GraduationCap className="h-4 w-4" />
-            ) : (
-              <Users className="h-4 w-4" />
-            )}
-            View by {viewMode === "teacher" ? "Grade" : "Teacher"}
-          </Button>
+          <div className="flex items-center gap-3">
+{/* Public view always shows labels (read-only) */}
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => setViewMode(viewMode === "teacher" ? "grade" : "teacher")}
+              className="gap-1.5"
+            >
+              {viewMode === "teacher" ? (
+                <GraduationCap className="h-4 w-4" />
+              ) : (
+                <Users className="h-4 w-4" />
+              )}
+              View by {viewMode === "teacher" ? "Grade" : "Teacher"}
+            </Button>
+          </div>
         </div>
 
         {/* Schedule Grids */}
@@ -6298,6 +6350,8 @@ export default function HistoryDetailPage() {
                     name={teacher}
                     status={publicOption.teacherStats.find(s => s.teacher === teacher)?.status}
                     classesSnapshot={generation?.stats?.classes_snapshot}
+                    openBlockLabels={publicOption.openBlockLabels}
+                    showOpenLabels={true}
                   />
                 ))
             : Object.entries(publicOption.gradeSchedules)
@@ -7421,25 +7475,38 @@ export default function HistoryDetailPage() {
                   <h3 className="font-semibold">
                     {viewMode === "teacher" ? "Teacher Schedules" : "Grade Schedules"}
                   </h3>
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    onClick={() => {
-                      setViewMode(viewMode === "teacher" ? "grade" : "teacher")
-                      // Clear swap state when switching views
-                      setSelectedCell(null)
-                      setValidTargets([])
-                    }}
-                    disabled={isGenerating || freeformMode}
-                    className="gap-1.5 no-print"
-                  >
-                    {viewMode === "teacher" ? (
-                      <GraduationCap className="h-4 w-4" />
-                    ) : (
-                      <Users className="h-4 w-4" />
+                  <div className="flex items-center gap-3 no-print">
+                    {/* Edit OPEN Labels toggle - only in teacher view, hidden during edit modes */}
+                    {viewMode === "teacher" && !regenMode && !swapMode && !freeformMode && !studyHallMode && (
+                      <label className="flex items-center gap-1.5 cursor-pointer">
+                        <Checkbox
+                          checked={showOpenLabels}
+                          onCheckedChange={(checked) => setShowOpenLabels(checked === true)}
+                          className="data-[state=checked]:bg-slate-600 data-[state=checked]:border-slate-600"
+                        />
+                        <span className="text-xs text-muted-foreground">Edit OPEN Labels</span>
+                      </label>
                     )}
-                    View by {viewMode === "teacher" ? "Grade" : "Teacher"}
-                  </Button>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => {
+                        setViewMode(viewMode === "teacher" ? "grade" : "teacher")
+                        // Clear swap state when switching views
+                        setSelectedCell(null)
+                        setValidTargets([])
+                      }}
+                      disabled={isGenerating || freeformMode}
+                      className="gap-1.5"
+                    >
+                      {viewMode === "teacher" ? (
+                        <GraduationCap className="h-4 w-4" />
+                      ) : (
+                        <Users className="h-4 w-4" />
+                      )}
+                      View by {viewMode === "teacher" ? "Grade" : "Teacher"}
+                    </Button>
+                  </div>
                 </div>
                 {/* Show message when in regen preview mode */}
                 {previewOption && previewType === "regen" && previewTeachers.size > 0 && viewMode === "teacher" && (() => {
@@ -7562,6 +7629,9 @@ export default function HistoryDetailPage() {
                                 onPlace={handlePlaceBlock}
                                 onUnplace={handleUnplaceBlock}
                                 onDeselect={() => setSelectedFloatingBlock(null)}
+                                openBlockLabels={selectedResult.openBlockLabels}
+                                showOpenLabels={showOpenLabels}
+                                onOpenLabelChange={showOpenLabels && !regenMode && !swapMode && !freeformMode && !studyHallMode ? handleOpenLabelChange : undefined}
                               />
                               {/* Unplaced floating blocks from this teacher */}
                               {freeformMode && teacherFloatingBlocks.length > 0 && (

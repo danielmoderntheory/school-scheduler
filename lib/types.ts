@@ -95,6 +95,19 @@ export interface GradeSchedule {
   };
 }
 
+// Labels for OPEN blocks - allows custom display text (e.g., "Prep Time", "Planning")
+// Indexed by "Nth OPEN block for teacher" to survive regeneration
+export interface OpenBlockLabels {
+  // Available labels for dropdown (e.g., ["Prep Time", "Planning", "Meeting"])
+  availableLabels: string[];
+  // Assignments: teacher name → openIndex (0-based) → label
+  assignments: {
+    [teacher: string]: {
+      [openIndex: number]: string;
+    };
+  };
+}
+
 export interface ScheduleOption {
   optionNumber: number;
   seed: number;
@@ -105,6 +118,7 @@ export interface ScheduleOption {
   studyHallAssignments: StudyHallAssignment[];
   teacherStats: TeacherStat[];
   builtWithSnapshotVersion?: number; // Timestamp of snapshot this option was built with
+  openBlockLabels?: OpenBlockLabels; // Custom display labels for OPEN blocks
 }
 
 // Lightweight solution for alternative browsing (no stats computed)
