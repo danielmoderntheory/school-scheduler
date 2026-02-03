@@ -43,7 +43,7 @@ interface SolveRequest {
   startSeed?: number
   skipTopSolutions?: number
   randomizeScoring?: boolean
-  allowStudyHallReassignment?: boolean
+  skipStudyHalls?: boolean
   // Rules
   rules?: Array<{
     rule_key: string
@@ -88,7 +88,7 @@ export async function POST(request: NextRequest) {
         startSeed: body.startSeed || 0,
         skipTopSolutions: body.skipTopSolutions || 0,
         randomizeScoring: body.randomizeScoring || false,
-        allowStudyHallReassignment: body.allowStudyHallReassignment || false,
+        skipStudyHalls: body.skipStudyHalls || false,
         // Grade list for grade schedule initialization
         grades: body.grades,
       }),

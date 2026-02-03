@@ -21,6 +21,41 @@ export const BLOCK_TYPE_OPEN = "OPEN"
 export const BLOCK_TYPE_STUDY_HALL = "Study Hall"
 
 // -----------------------------------------------------------------------------
+// TEACHER STATUS CONSTANTS
+// These are the canonical values for teacher employment status.
+// -----------------------------------------------------------------------------
+
+/** Full-time teacher - can supervise study halls, tracked for back-to-back issues */
+export const TEACHER_STATUS_FULL_TIME = "full-time"
+
+/** Part-time teacher - cannot supervise study halls */
+export const TEACHER_STATUS_PART_TIME = "part-time"
+
+/** Teacher status type */
+export type TeacherStatus = typeof TEACHER_STATUS_FULL_TIME | typeof TEACHER_STATUS_PART_TIME
+
+// -----------------------------------------------------------------------------
+// TEACHER STATUS CHECKS
+// Use these functions for logic that depends on teacher employment status.
+// -----------------------------------------------------------------------------
+
+/**
+ * Check if a teacher is full-time.
+ * Full-time teachers can supervise study halls and are tracked for back-to-back issues.
+ */
+export function isFullTime(status: string | null | undefined): boolean {
+  return status === TEACHER_STATUS_FULL_TIME
+}
+
+/**
+ * Check if a teacher is part-time.
+ * Part-time teachers cannot supervise study halls.
+ */
+export function isPartTime(status: string | null | undefined): boolean {
+  return status === TEACHER_STATUS_PART_TIME
+}
+
+// -----------------------------------------------------------------------------
 // BLOCK TYPE CHECKS
 // Use these functions for ALL logic that needs to know what type a block is.
 // These check the underlying type, ignoring any display labels.

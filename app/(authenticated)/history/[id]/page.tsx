@@ -1,11 +1,11 @@
 "use client"
 
-import { useState, useEffect, useRef, useMemo } from "react"
+import { useState, useEffect, useRef, useMemo, Fragment } from "react"
 import { useParams, useSearchParams, useRouter } from "next/navigation"
 import { Button } from "@/components/ui/button"
 import { ScheduleGrid } from "@/components/ScheduleGrid"
 import { ScheduleStats } from "@/components/ScheduleStats"
-import { Loader2, Download, ArrowLeft, Check, RefreshCw, Shuffle, Trash2, Star, MoreVertical, Users, GraduationCap, Printer, ArrowLeftRight, X, Hand, Pencil, Copy, ChevronDown, ChevronUp, AlertTriangle } from "lucide-react"
+import { Loader2, Download, ArrowLeft, Check, RefreshCw, Shuffle, Trash2, Star, MoreVertical, Users, GraduationCap, Printer, ArrowLeftRight, X, Hand, Pencil, Copy, ChevronDown, ChevronUp, AlertTriangle, Minus } from "lucide-react"
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -36,8 +36,8 @@ import { Label } from "@/components/ui/label"
 import Link from "next/link"
 import type { ScheduleOption, TeacherSchedule, GradeSchedule, Teacher, FloatingBlock, PendingPlacement, ValidationError, CellLocation, ClassEntry } from "@/lib/types"
 import { parseClassesFromSnapshot, parseTeachersFromSnapshot, parseRulesFromSnapshot, hasValidSnapshots, detectClassChanges, type GenerationStats, type ChangeDetectionResult, type CurrentClass } from "@/lib/snapshot-utils"
-import { parseGradeDisplayToNumbers, gradesOverlap, gradeNumToDisplay, isClassElective, shouldIgnoreGradeConflict } from "@/lib/grade-utils"
-import { BLOCK_TYPE_OPEN, BLOCK_TYPE_STUDY_HALL, isOpenBlock, isStudyHall, isScheduledClass, isOccupiedBlock, entryIsOpen, entryIsOccupied, entryIsScheduledClass } from "@/lib/schedule-utils"
+import { parseGradeDisplayToNumbers, parseGradeDisplayToNames, gradesOverlap, gradeNumToDisplay, isClassElective, shouldIgnoreGradeConflict, formatGradeDisplayCompact } from "@/lib/grade-utils"
+import { BLOCK_TYPE_OPEN, BLOCK_TYPE_STUDY_HALL, isOpenBlock, isStudyHall, isScheduledClass, isOccupiedBlock, entryIsOpen, entryIsOccupied, entryIsScheduledClass, isFullTime } from "@/lib/schedule-utils"
 import toast from "react-hot-toast"
 import { generateSchedules, reassignStudyHalls } from "@/lib/scheduler"
 import { generateSchedulesRemote } from "@/lib/scheduler-remote"
@@ -324,6 +324,9 @@ export default function HistoryDetailPage() {
   const [previewStrategy, setPreviewStrategy] = useState<"normal" | "deep" | "suboptimal" | "randomized" | "js">("normal") // Strategy used for this preview
   const [studyHallMode, setStudyHallMode] = useState(false) // Whether we're in study hall reassignment mode
   const [studyHallSeed, setStudyHallSeed] = useState<number | null>(null) // Seed for study hall shuffling
+  const [excludedFromStudyHalls, setExcludedFromStudyHalls] = useState<Set<string>>(new Set()) // Teachers excluded from study hall assignment
+  const [lockedExclusions, setLockedExclusions] = useState<Set<string>>(new Set()) // Teachers that can't be un-excluded (ineligible by rule)
+  const [forceCreateNew, setForceCreateNew] = useState<boolean | null>(null) // null = auto (create if 1 revision), true = always create new, false = always update
 
   // Repair mode state - diagnose and fix schedule issues
   type RepairIssue = {
@@ -383,7 +386,7 @@ export default function HistoryDetailPage() {
   const [validationErrors, setValidationErrors] = useState<ValidationError[]>([])
   const [validationModal, setValidationModal] = useState<{
     isOpen: boolean
-    checks: Array<{ name: string; status: 'pending' | 'checking' | 'passed' | 'failed'; errorCount?: number; errors?: string[] }>
+    checks: Array<{ name: string; status: 'pending' | 'checking' | 'passed' | 'failed' | 'skipped'; errorCount?: number; errors?: string[] }>
     onComplete?: () => void
     mode: 'save' | 'review'  // 'save' auto-closes on success, 'review' stays open
     expandedChecks: Set<number>  // Which check indices are expanded
@@ -393,6 +396,15 @@ export default function HistoryDetailPage() {
     gradeSchedules: Record<string, GradeSchedule>
   } | null>(null)
   const [freeformClasses, setFreeformClasses] = useState<ClassEntry[] | null>(null)
+
+  // Study Hall stripping state - temporarily removes study halls for easier editing
+  const [studyHallsStripped, setStudyHallsStripped] = useState(false)
+  const [strippedStudyHalls, setStrippedStudyHalls] = useState<Array<{
+    teacher: string
+    day: string
+    block: number
+    grade: string  // The grade display (e.g., "7th Grade")
+  }>>([])
 
   // Conflict resolution state - tracks blockers that were moved to accommodate our placements
   const [conflictResolution, setConflictResolution] = useState<{
@@ -427,7 +439,7 @@ export default function HistoryDetailPage() {
   const [pendingModeEntry, setPendingModeEntry] = useState<'regen' | 'swap' | 'freeform' | 'studyHall' | null>(null)
   const [useCurrentClasses, setUseCurrentClasses] = useState(false) // When true, regen uses current DB classes instead of snapshot
   const [changesExpanded, setChangesExpanded] = useState(false) // Expandable changes list in regen banner
-  const [allowStudyHallReassignment, setAllowStudyHallReassignment] = useState(false) // Allow study halls to move to any eligible teacher
+  const [skipStudyHalls, setSkipStudyHalls] = useState(false) // Skip study hall assignment during regen (can reassign after)
 
   // Compute which placements have conflicts and detailed info for validation errors
   const placementConflicts = useMemo(() => {
@@ -510,6 +522,116 @@ export default function HistoryDetailPage() {
     [placementConflicts]
   )
 
+  // Compute validation issues for the saved schedule (shown in ScheduleStats)
+  // Only computes when not in edit modes and when we have a saved schedule
+  const savedScheduleValidationIssues = useMemo(() => {
+    if (!generation?.options || !generation.stats) return []
+
+    const savedOpt = generation.options[parseInt(viewingOption) - 1]
+    if (!savedOpt) return []
+
+    // Run validation on the saved schedule
+    const errors = validateFullSchedule(savedOpt, generation.stats)
+
+    // Extract only hard errors (grade conflicts, subject conflicts) for display
+    // Skip soft warnings like back-to-back issues
+    return errors
+      .filter(e => e.type === 'grade_conflict' || e.type === 'subject_conflict')
+      .map(e => ({
+        type: e.type as 'grade_conflict' | 'subject_conflict' | 'other',
+        message: e.message
+      }))
+  }, [generation?.options, generation?.stats, viewingOption])
+
+  // Compute health status for each revision tab
+  // Returns 'green' (perfect), 'yellow' (incomplete), or 'red' (conflicts)
+  const optionHealthStatuses = useMemo(() => {
+    if (!generation?.options || !generation.stats) return []
+
+    const DAYS = ["Mon", "Tues", "Wed", "Thurs", "Fri"]
+
+    return generation.options.map((opt) => {
+      // 1. Check for conflicts (red)
+      const errors = validateFullSchedule(opt, generation.stats)
+      const hasConflicts = errors.some(
+        e => e.type === 'grade_conflict' || e.type === 'subject_conflict'
+      )
+      if (hasConflicts) {
+        return 'red'
+      }
+
+      // 2. Check study halls
+      const shPlaced = opt?.studyHallsPlaced ?? 0
+      const shTotal = opt?.studyHallAssignments?.length || 6
+      const allStudyHallsPlaced = shPlaced >= shTotal
+
+      // 3. Count scheduled blocks vs expected (grade capacity)
+      // Uses same logic as ScheduleStats - iterate through teacher schedules with proper grade parsing
+      const BLOCKS_PER_WEEK = 25
+      const optGradeNames = Object.keys(opt.gradeSchedules || {})
+      const totalGrades = optGradeNames.length
+      const expectedBlocks = totalGrades * BLOCKS_PER_WEEK
+
+      // Build a set of filled slots per grade from teacher schedules (same as ScheduleStats)
+      const filledSlots: Record<string, Set<string>> = {}
+      for (const grade of optGradeNames) {
+        filledSlots[grade] = new Set()
+      }
+
+      // Iterate through all teacher schedules (same logic as ScheduleStats)
+      for (const teacher of Object.keys(opt.teacherSchedules)) {
+        const schedule = opt.teacherSchedules[teacher]
+        for (const day of DAYS) {
+          for (let block = 1; block <= 5; block++) {
+            const entry = schedule?.[day]?.[block]
+            if (entry && entry[1] && isOccupiedBlock(entry[1])) {
+              const gradeDisplay = entry[0]
+              // Parse which grades this entry applies to (handles multi-grade like "6th-7th Grade")
+              const targetGrades = parseGradeDisplayToNames(gradeDisplay, optGradeNames)
+              // Mark slot as filled for each target grade
+              for (const grade of targetGrades) {
+                if (filledSlots[grade]) {
+                  const slotKey = `${day}|${block}`
+                  filledSlots[grade].add(slotKey)
+                }
+              }
+            }
+          }
+        }
+      }
+
+      // Count total filled slots and grades that are full
+      let scheduledBlocks = 0
+      let gradesFullCount = 0
+      for (const grade of optGradeNames) {
+        const filledCount = filledSlots[grade].size
+        scheduledBlocks += filledCount
+        if (filledCount >= BLOCKS_PER_WEEK) {
+          gradesFullCount++
+        }
+      }
+
+      // Yellow if any incompleteness
+      const allGradesFull = gradesFullCount >= totalGrades
+      const isComplete = allStudyHallsPlaced && allGradesFull
+
+      // Debug logging
+      console.log(`[Health Check] Option ${generation.options.indexOf(opt) + 1}:`, {
+        allStudyHallsPlaced,
+        shPlaced,
+        shTotal,
+        scheduledBlocks,
+        expectedBlocks,
+        gradesFullCount,
+        totalGrades,
+        allGradesFull,
+        isComplete
+      })
+
+      return isComplete ? 'green' : 'yellow'
+    })
+  }, [generation?.options, generation?.stats])
+
   // Set validation errors when conflicts are detected
   useEffect(() => {
     if (placementConflicts.length > 0 && !conflictResolution) {
@@ -520,8 +642,9 @@ export default function HistoryDetailPage() {
         blockId: c.blockId
       })))
     } else if (placementConflicts.length === 0 && !conflictResolution) {
-      // Clear conflict-related validation errors when no more conflicts
-      setValidationErrors(prev => prev.filter(e => e.type !== 'grade_conflict'))
+      // Only clear errors that came from placement conflicts (have a blockId)
+      // Preserve initial validation errors (no blockId) set when entering freeform mode
+      setValidationErrors(prev => prev.filter(e => e.type !== 'grade_conflict' || !e.blockId))
     }
   }, [placementConflicts, conflictResolution])
 
@@ -597,7 +720,16 @@ export default function HistoryDetailPage() {
       if (res.ok) {
         const data = await res.json()
         setGeneration(data)
-        if (data.selected_option) {
+
+        // Check URL hash for revision number (e.g., #2 for Revision 2)
+        const hash = window.location.hash.replace('#', '')
+        const hashNum = parseInt(hash)
+
+        if (hash && !isNaN(hashNum) && hashNum >= 1 && hashNum <= (data.options?.length || 1)) {
+          // Use hash if valid
+          setViewingOption(hashNum.toString())
+        } else if (data.selected_option) {
+          // Fall back to primary (selected) option
           setViewingOption(data.selected_option.toString())
         }
       } else {
@@ -617,6 +749,16 @@ export default function HistoryDetailPage() {
       document.title = `${generation.quarter?.name || 'Schedule'} Rev ${viewingOption} - ${shortId}`
     }
   }, [generation, viewingOption])
+
+  // Update URL hash when viewing option changes (for shareable links to specific revisions)
+  // Skip for public view since only primary revision is shown
+  useEffect(() => {
+    if (generation && viewingOption && isPublicView === false) {
+      // Use replaceState to update hash without adding to browser history
+      const newUrl = `${window.location.pathname}#${viewingOption}`
+      window.history.replaceState(null, '', newUrl)
+    }
+  }, [generation, viewingOption, isPublicView])
 
   // Detect class changes when generation loads
   useEffect(() => {
@@ -717,28 +859,7 @@ export default function HistoryDetailPage() {
           const DAYS = ['Mon', 'Tues', 'Wed', 'Thurs', 'Fri']
           const missingClasses: Array<{ teacher: string; grade: string; subject: string; expected: number; found: number; locations: string[] }> = []
 
-          // Helper to check grade overlap
-          const gradesOverlap = (a: string, b: string): boolean => {
-            if (a === b) return true
-            const parseNums = (s: string): number[] => {
-              const nums: number[] = []
-              if (s.toLowerCase().includes('kindergarten') || s === 'K') { nums.push(0); return nums }
-              if (s.includes(',')) {
-                for (const p of s.split(',').map(x => x.trim())) {
-                  if (p.toLowerCase().includes('kindergarten') || p === 'K') nums.push(0)
-                  else { const m = p.match(/(\d+)/); if (m) nums.push(parseInt(m[1])) }
-                }
-                return nums
-              }
-              const range = s.match(/(\d+)(?:st|nd|rd|th)?[-–](\d+)/)
-              if (range) { for (let i = parseInt(range[1]); i <= parseInt(range[2]); i++) nums.push(i); return nums }
-              const single = s.match(/(\d+)/)
-              if (single) nums.push(parseInt(single[1]))
-              return nums
-            }
-            const numsA = parseNums(a), numsB = parseNums(b)
-            return numsA.some(n => numsB.includes(n))
-          }
+          // Note: Using imported gradesOverlap from grade-utils.ts
 
           for (const cls of snapshotClasses) {
             if (!cls.teacher || !cls.subject) continue
@@ -962,6 +1083,7 @@ export default function HistoryDetailPage() {
   }
 
   function enterRegenMode(skipChangesCheck = false) {
+    if (!selectedResult || !generation) return
     // If changes detected and not dismissed, show dialog first
     if (!skipChangesCheck && optionNeedsChanges && !dismissedForOptions.has(viewingOption)) {
       setPendingModeEntry('regen')
@@ -971,6 +1093,13 @@ export default function HistoryDetailPage() {
     setRegenMode(true)
     setSelectedForRegen(new Set())
     setRegenSeed(0) // Reset seed for fresh regeneration session
+
+    // Run validation to show existing conflicts
+    const existingErrors = validateFullSchedule(selectedResult, generation.stats)
+    const conflicts = existingErrors.filter(
+      e => e.type === 'grade_conflict' || e.type === 'subject_conflict'
+    )
+    setValidationErrors(conflicts)
   }
 
   function exitRegenMode() {
@@ -979,6 +1108,8 @@ export default function HistoryDetailPage() {
     setPreviewOption(null)
     setPreviewType(null)
     setUseCurrentClasses(false)
+    setValidationErrors([])
+    setForceCreateNew(null)
   }
 
   function toggleTeacherSelection(teacher: string) {
@@ -995,6 +1126,26 @@ export default function HistoryDetailPage() {
 
   function clearSelections() {
     setSelectedForRegen(new Set())
+  }
+
+  // Extract affected teachers from validation errors (for "select affected" feature)
+  function getAffectedTeachersFromErrors(errors: ValidationError[]): Set<string> {
+    const teachers = new Set<string>()
+    for (const error of errors) {
+      if (error.cells && error.cells.length > 0) {
+        for (const cell of error.cells) {
+          if (cell.teacher) {
+            teachers.add(cell.teacher)
+          }
+        }
+      }
+    }
+    return teachers
+  }
+
+  function selectAffectedTeachers() {
+    const affected = getAffectedTeachersFromErrors(validationErrors)
+    setSelectedForRegen(affected)
   }
 
   async function handleRegenerate() {
@@ -1153,6 +1304,22 @@ export default function HistoryDetailPage() {
         }
       }
       console.log('[Regen] Built lockedSchedules from actualOriginalSchedule (generation.options), NOT selectedResult')
+      console.log('[Regen] Locked teachers:', Object.keys(lockedSchedules))
+      console.log('[Regen] Selected for regen:', Array.from(selectedForRegen))
+      console.log('[Regen] Grades passed to solver:', grades)
+
+      // DEBUG: Log Tenie's locked schedule if she exists
+      if (lockedSchedules['Tenie']) {
+        console.log('[Regen] Tenie is LOCKED. Her schedule entries:')
+        for (const day of ['Mon', 'Tues', 'Wed', 'Thurs', 'Fri']) {
+          for (let block = 1; block <= 5; block++) {
+            const entry = lockedSchedules['Tenie'][day]?.[block]
+            if (entry && entry[1] !== 'OPEN') {
+              console.log(`  ${day} B${block}: [${entry[0]}, ${entry[1]}]`)
+            }
+          }
+        }
+      }
 
       // Find which regenerated teachers had study halls in the original schedule
       // These teachers must be assigned study halls again
@@ -1227,7 +1394,7 @@ export default function HistoryDetailPage() {
           teachersNeedingStudyHalls,
           rules,
           startSeed: 0, // Use 0 for optimal results on first press
-          allowStudyHallReassignment,
+          skipStudyHalls,
           grades,
           onProgress: (current, total, message) => {
             setGenerationProgress({ current, total, message: `[OR-Tools] ${message}` })
@@ -1249,7 +1416,7 @@ export default function HistoryDetailPage() {
           teachersNeedingStudyHalls,
           rules,
           startSeed: currentSeed * 100 + seedOffset,
-          allowStudyHallReassignment,
+          skipStudyHalls,
           grades,
           onProgress: (current, total, message) => {
             setGenerationProgress({ current, total, message: `[OR-Tools Deep] ${message}` })
@@ -1272,7 +1439,7 @@ export default function HistoryDetailPage() {
           rules,
           startSeed: currentSeed * 100 + seedOffset,
           skipTopSolutions: 3,
-          allowStudyHallReassignment,
+          skipStudyHalls,
           grades,
           onProgress: (current, total, message) => {
             setGenerationProgress({ current, total, message: `[OR-Tools Suboptimal] ${message}` })
@@ -1296,7 +1463,7 @@ export default function HistoryDetailPage() {
               rules,
               startSeed: currentSeed * 100 + seedOffset + 50,
               randomizeScoring: true,
-              allowStudyHallReassignment,
+              skipStudyHalls,
               grades,
               onProgress: (current, total, message) => {
                 setGenerationProgress({ current, total, message: `[OR-Tools Randomized] ${message}` })
@@ -1321,7 +1488,7 @@ export default function HistoryDetailPage() {
           rules,
           startSeed: currentSeed * 100 + seedOffset + 50,
           randomizeScoring: true,
-          allowStudyHallReassignment,
+          skipStudyHalls,
           grades,
           onProgress: (current, total, message) => {
             setGenerationProgress({ current, total, message: `[OR-Tools Randomized] ${message}` })
@@ -1355,7 +1522,7 @@ export default function HistoryDetailPage() {
           teachersNeedingStudyHalls,
           seed: currentSeed * 12345,
           rules,
-          allowStudyHallReassignment,
+          skipStudyHalls,
           grades,
           onProgress: (current, total, message) => {
             setGenerationProgress({ current, total, message: `[JS] ${message}` })
@@ -1381,6 +1548,17 @@ export default function HistoryDetailPage() {
       // Validate the full schedule to catch any logic errors
       // Use statsForRegenValidation which has updated class config when using current classes
       console.log('[Regen Validation] useCurrentClasses:', useCurrentClasses)
+      console.log('[Regen Validation] Total classes in snapshot:', statsForRegenValidation?.classes_snapshot?.length || 0)
+
+      // DEBUG: Log all elective classes in snapshot
+      const electiveClasses = statsForRegenValidation?.classes_snapshot?.filter(c => c.is_elective) || []
+      console.log('[Regen Validation] Elective classes in snapshot:', electiveClasses.map(c => ({
+        teacher: c.teacher_name,
+        subject: c.subject_name,
+        is_elective: c.is_elective,
+        grades: c.grades?.map(g => g.display_name).join(', ')
+      })))
+
       const selectedTeacherSnapshotClasses = statsForRegenValidation?.classes_snapshot?.filter(
         c => selectedForRegen.has(c.teacher_name || '')
       ) || []
@@ -1389,7 +1567,8 @@ export default function HistoryDetailPage() {
           teacher: c.teacher_name,
           grade: c.grades?.map(g => g.display_name).join(', ') || 'none',
           subject: c.subject_name,
-          days_per_week: c.days_per_week
+          days_per_week: c.days_per_week,
+          is_elective: c.is_elective
         }))
       )
       const scheduleErrors = validateFullSchedule(newOption, statsForRegenValidation)
@@ -1753,6 +1932,11 @@ export default function HistoryDetailPage() {
     }
     console.log('[Save] optionToSave updated with rebuilt gradeSchedules')
 
+    // Store previous state for undo
+    const previousOptions: ScheduleOption[] = JSON.parse(JSON.stringify(generation.options))
+    const previousSelectedOption = viewingOption
+    const previousStats = generation.stats
+
     // Define the save logic
     const doSave = async () => {
       let updatedOptions: ScheduleOption[]
@@ -1823,7 +2007,58 @@ export default function HistoryDetailPage() {
             return next
           })
         }
-        toast.success(successMessage)
+
+        // Dismiss any existing undo toast
+        if (undoToastId.current) toast.dismiss(undoToastId.current)
+
+        // Show success toast with undo option (60 seconds)
+        const toastId = toast(
+          (t) => (
+            <div className="flex items-center gap-3">
+              <span className="text-sm">{successMessage}</span>
+              <button
+                onClick={async () => {
+                  toast.dismiss(t.id)
+                  undoToastId.current = null
+                  try {
+                    const undoRes = await fetch(`/api/history/${id}`, {
+                      method: "PUT",
+                      headers: { "Content-Type": "application/json" },
+                      body: JSON.stringify({
+                        options: previousOptions,
+                        ...(previousStats !== generation.stats && { stats: previousStats }),
+                      }),
+                    })
+                    if (undoRes.ok) {
+                      setGeneration((prev) => prev ? {
+                        ...prev,
+                        options: previousOptions,
+                        stats: previousStats,
+                      } : prev)
+                      if (saveAsNew) {
+                        setViewingOption(previousSelectedOption)
+                      }
+                      toast.success("Changes undone")
+                    } else {
+                      toast.error("Failed to undo changes")
+                    }
+                  } catch (error) {
+                    console.error('Undo error:', error)
+                    toast.error("Failed to undo changes")
+                  }
+                }}
+                className="px-2 py-1 text-sm font-medium text-amber-600 hover:text-amber-800 hover:bg-amber-50 rounded transition-colors"
+              >
+                Undo
+              </button>
+            </div>
+          ),
+          {
+            duration: 60000,
+            icon: <Check className="h-4 w-4 text-emerald-600" />,
+          }
+        )
+        undoToastId.current = toastId
       } else {
         toast.error("Failed to save changes")
       }
@@ -1831,8 +2066,11 @@ export default function HistoryDetailPage() {
 
     // Run validation with visual modal on the MERGED option, then save if passed
     // Use statsForValidation which has updated class snapshots when using current classes
+    // Skip study hall check if user chose to skip study halls during regen
     console.log('[Save] About to call runValidationWithModal')
-    runValidationWithModal(optionToSave, statsForValidation, doSave)
+    runValidationWithModal(optionToSave, statsForValidation, doSave, 'save', {
+      skipStudyHallCheck: skipStudyHalls
+    })
     console.log('[Save] runValidationWithModal called')
 
     } catch (error) {
@@ -1852,6 +2090,7 @@ export default function HistoryDetailPage() {
   }
 
   function enterStudyHallMode(skipChangesCheck = false) {
+    if (!selectedResult || !generation) return
     // If changes detected and not dismissed, show dialog first
     if (!skipChangesCheck && optionNeedsChanges && !dismissedForOptions.has(viewingOption)) {
       setPendingModeEntry('studyHall')
@@ -1859,6 +2098,68 @@ export default function HistoryDetailPage() {
       return
     }
     setStudyHallMode(true)
+
+    // Initialize excluded teachers based on:
+    // 1. Rule: study_hall_teacher_eligibility (which statuses can supervise)
+    // 2. Individual: canSuperviseStudyHall = false
+    const teachersSnapshot = generation.stats?.teachers_snapshot
+    const rulesSnapshot = generation.stats?.rules_snapshot
+
+    if (teachersSnapshot) {
+      const excluded = new Set<string>()
+      const locked = new Set<string>() // Can't be un-excluded (ineligible by rule)
+
+      // Check eligibility rule - which statuses are allowed
+      // Logic must match solver's getStudyHallEligibleStatuses():
+      // - Rule disabled or not found → full-time only (default)
+      // - Rule enabled → use config (allow_full_time defaults true, allow_part_time defaults false)
+      // - If somehow both unchecked → full-time only
+      const eligibilityRule = rulesSnapshot?.find(r => r.rule_key === 'study_hall_teacher_eligibility')
+      const ruleEnabled = eligibilityRule?.enabled !== false // default true if not found
+
+      let allowFullTime: boolean
+      let allowPartTime: boolean
+
+      if (!ruleEnabled) {
+        // Rule disabled → default to full-time only
+        allowFullTime = true
+        allowPartTime = false
+      } else {
+        // Rule enabled → use config
+        const config = eligibilityRule?.config as { allow_full_time?: boolean; allow_part_time?: boolean } | undefined
+        allowFullTime = config?.allow_full_time !== false // default true
+        allowPartTime = config?.allow_part_time === true // default false
+
+        // If somehow both are unchecked, default to full-time
+        if (!allowFullTime && !allowPartTime) {
+          allowFullTime = true
+        }
+      }
+
+      for (const t of teachersSnapshot) {
+        // Exclude if individual setting says no (locked - can't change)
+        if (t.canSuperviseStudyHall === false) {
+          excluded.add(t.name)
+          locked.add(t.name)
+          continue
+        }
+        // Exclude if status not allowed (locked - can't change)
+        if (t.status === 'full-time' && !allowFullTime) {
+          excluded.add(t.name)
+          locked.add(t.name)
+        } else if (t.status === 'part-time' && !allowPartTime) {
+          excluded.add(t.name)
+          locked.add(t.name)
+        }
+      }
+      setExcludedFromStudyHalls(excluded)
+      setLockedExclusions(locked)
+    } else {
+      setExcludedFromStudyHalls(new Set())
+      setLockedExclusions(new Set())
+    }
+    // Note: No validation here - Study Hall mode only assigns to OPEN blocks,
+    // so it can't fix grade/subject conflicts. Showing them would just be confusing.
   }
 
   function exitStudyHallMode() {
@@ -1866,6 +2167,160 @@ export default function HistoryDetailPage() {
     setPreviewOption(null)
     setPreviewType(null)
     setStudyHallSeed(null)
+    setExcludedFromStudyHalls(new Set())
+    setLockedExclusions(new Set())
+    setValidationErrors([])
+    setForceCreateNew(null)
+  }
+
+  function toggleStudyHallExclusion(teacher: string) {
+    setExcludedFromStudyHalls(prev => {
+      const next = new Set(prev)
+      if (next.has(teacher)) {
+        next.delete(teacher)
+      } else {
+        next.add(teacher)
+      }
+      return next
+    })
+  }
+
+  /**
+   * Clear all study halls from the schedule, converting them to OPEN.
+   * Creates a preview that can be saved. Useful for cleaning up before running other modes.
+   */
+  async function clearAllStudyHalls() {
+    const currentOption = generation?.options?.[parseInt(viewingOption) - 1]
+    if (!generation || !currentOption) return
+
+    const DAYS = ['Mon', 'Tues', 'Wed', 'Thurs', 'Fri']
+
+    // Deep copy the current option
+    const newTeacherSchedules = JSON.parse(JSON.stringify(currentOption.teacherSchedules))
+    const newGradeSchedules = JSON.parse(JSON.stringify(currentOption.gradeSchedules))
+    let clearedCount = 0
+
+    // Remove all study halls from teacher schedules
+    for (const [teacher, schedule] of Object.entries(newTeacherSchedules) as [string, TeacherSchedule][]) {
+      for (const day of DAYS) {
+        for (let block = 1; block <= 5; block++) {
+          const entry = schedule[day]?.[block]
+          if (entry && isStudyHall(entry[1])) {
+            schedule[day][block] = ['', 'OPEN']
+            clearedCount++
+          }
+        }
+      }
+    }
+
+    // Remove study halls from grade schedules too
+    for (const [grade, schedule] of Object.entries(newGradeSchedules) as [string, GradeSchedule][]) {
+      for (const day of DAYS) {
+        for (let block = 1; block <= 5; block++) {
+          const entry = schedule[day]?.[block]
+          if (entry && isStudyHall(entry[1])) {
+            schedule[day][block] = null
+          }
+        }
+      }
+    }
+
+    // Create the cleared option
+    const clearedOption: ScheduleOption = {
+      ...currentOption,
+      teacherSchedules: newTeacherSchedules,
+      gradeSchedules: newGradeSchedules,
+      studyHallsPlaced: 0,
+      // Keep study hall assignments but mark as unplaced
+      studyHallAssignments: currentOption.studyHallAssignments?.map(sh => ({
+        ...sh,
+        teacher: null,
+        day: null,
+        block: null
+      })) || []
+    }
+
+    // Save directly without validation (user explicitly requested to clear)
+    // Respect user's toggle for create new vs update
+    const createNew = forceCreateNew !== null ? forceCreateNew : (generation.options.length === 1)
+    const updatedOptions = createNew
+      ? [...generation.options, { ...clearedOption, optionNumber: generation.options.length + 1 }]
+      : generation.options.map((opt, idx) =>
+          idx === parseInt(viewingOption) - 1 ? clearedOption : opt
+        )
+
+    // Store previous state for undo
+    const previousOptions = generation.options
+    const previousSelectedOption = viewingOption
+
+    try {
+      const updateRes = await fetch(`/api/history/${id}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ options: updatedOptions }),
+      })
+
+      if (updateRes.ok) {
+        setGeneration({ ...generation, options: updatedOptions })
+        if (createNew) {
+          setViewingOption((generation.options.length + 1).toString())
+        }
+        // Exit study hall mode
+        setStudyHallMode(false)
+        setPreviewOption(null)
+        setPreviewType(null)
+
+        // Dismiss any existing undo toast
+        if (undoToastId.current) toast.dismiss(undoToastId.current)
+
+        // Show success toast with undo option (60 seconds)
+        const toastId = toast(
+          (t) => (
+            <div className="flex items-center gap-3">
+              <span className="text-sm">Cleared {clearedCount} study hall{clearedCount !== 1 ? 's' : ''}</span>
+              <button
+                onClick={async () => {
+                  toast.dismiss(t.id)
+                  undoToastId.current = null
+                  try {
+                    const undoRes = await fetch(`/api/history/${id}`, {
+                      method: "PUT",
+                      headers: { "Content-Type": "application/json" },
+                      body: JSON.stringify({ options: previousOptions }),
+                    })
+                    if (undoRes.ok) {
+                      setGeneration((prev) => prev ? { ...prev, options: previousOptions } : prev)
+                      if (createNew) {
+                        setViewingOption(previousSelectedOption)
+                      }
+                      toast.success("Study halls restored")
+                    } else {
+                      toast.error("Failed to undo")
+                    }
+                  } catch (error) {
+                    console.error('Undo error:', error)
+                    toast.error("Failed to undo")
+                  }
+                }}
+                className="px-2 py-1 text-sm font-medium text-violet-600 hover:text-violet-800 hover:bg-violet-50 rounded transition-colors"
+              >
+                Undo
+              </button>
+            </div>
+          ),
+          {
+            duration: 60000,
+            icon: <Check className="h-4 w-4 text-emerald-600" />,
+          }
+        )
+        undoToastId.current = toastId
+      } else {
+        toast.error("Failed to save changes")
+      }
+    } catch (error) {
+      console.error('Clear study halls error:', error)
+      toast.error("Failed to save changes")
+    }
   }
 
   function generateStudyHallArrangement() {
@@ -1903,7 +2358,8 @@ export default function HistoryDetailPage() {
     }
     console.log(`[Study Hall Reassign] Total BEFORE: ${beforeStudyHalls.length}`)
 
-    const result = reassignStudyHalls(currentOption, teachers, seed, rules)
+    // Pass all teachers for stats, but exclude UI-selected teachers from study hall assignment
+    const result = reassignStudyHalls(currentOption, teachers, seed, rules, excludedFromStudyHalls)
 
     if (!result.success) {
       toast.error(result.message || "Could not reassign study halls")
@@ -2075,6 +2531,19 @@ export default function HistoryDetailPage() {
   function handleValidateSchedule() {
     if (!selectedResult || !generation) return
 
+    // DEBUG: Log what data source we're validating
+    console.log('[handleValidateSchedule] Validating selectedResult from:', {
+      generationId: generation.id,
+      viewingOption,
+      teacherCount: Object.keys(selectedResult.teacherSchedules).length,
+      // Sample a few specific entries that might show the issue
+      sampleEntries: {
+        Oscar_Tues_B3: selectedResult.teacherSchedules['Oscar']?.['Tues']?.[3],
+        Eugenia_Tues_B5: selectedResult.teacherSchedules['Eugenia']?.['Tues']?.[5],
+        Miguel_Thurs_B4: selectedResult.teacherSchedules['Miguel']?.['Thurs']?.[4],
+      }
+    })
+
     // Run validation with modal in review mode (stays open to show results)
     runValidationWithModal(selectedResult, generation.stats, () => {}, 'review')
   }
@@ -2082,13 +2551,15 @@ export default function HistoryDetailPage() {
   /**
    * Run validation with a visual modal showing each check as it runs.
    * @param mode - 'save' auto-closes on success and calls onComplete, 'review' stays open to show results
+   * @param options.skipStudyHallCheck - Skip study hall coverage validation (for stripped study halls mode)
    * Returns true if validation passed (only soft warnings), false if hard errors.
    */
   async function runValidationWithModal(
     option: ScheduleOption,
     stats: GenerationStats | undefined,
     onComplete: () => void,
-    mode: 'save' | 'review' = 'save'
+    mode: 'save' | 'review' = 'save',
+    options?: { skipStudyHallCheck?: boolean }
   ): Promise<boolean> {
     const DAYS = ["Mon", "Tues", "Wed", "Thurs", "Fri"]
     const softWarningTypes = ['back_to_back']
@@ -2107,25 +2578,30 @@ export default function HistoryDetailPage() {
       { name: 'Back-to-back blocks', key: 'back_to_back' },
     ]
 
-    // Initialize modal with all checks pending
-    type CheckStatus = 'pending' | 'checking' | 'passed' | 'failed'
+    // Initialize modal with all checks pending (mark study hall as skipped if applicable)
+    type CheckStatus = 'pending' | 'checking' | 'passed' | 'failed' | 'skipped'
     const initialChecks: Array<{ name: string; status: CheckStatus; errorCount: number; errors?: string[] }> =
       checkDefinitions.map(c => ({
         name: c.name,
-        status: 'pending' as CheckStatus,
+        status: (options?.skipStudyHallCheck && c.key === 'study_hall_coverage') ? 'skipped' as CheckStatus : 'pending' as CheckStatus,
         errorCount: 0
       }))
 
     setValidationModal({ isOpen: true, checks: initialChecks, onComplete, mode, expandedChecks: new Set() })
 
     // Run full validation
-    const allErrors = validateFullSchedule(option, stats)
+    const allErrors = validateFullSchedule(option, stats, options)
 
     // Animate through checks
     const updatedChecks = [...initialChecks]
     let hasHardErrors = false
 
     for (let i = 0; i < checkDefinitions.length; i++) {
+      // Skip checks that are already marked as skipped
+      if (updatedChecks[i].status === 'skipped') {
+        continue
+      }
+
       // Mark current check as "checking"
       updatedChecks[i] = { ...updatedChecks[i], status: 'checking' as CheckStatus }
       setValidationModal(prev => prev ? { ...prev, checks: [...updatedChecks] } : null)
@@ -2257,7 +2733,7 @@ export default function HistoryDetailPage() {
       // For study hall swaps, only allow full-time teachers who can supervise
       if (cellType === "study-hall") {
         const stat = selectedResult.teacherStats.find(s => s.teacher === teacher)
-        if (stat?.status !== "full-time") continue
+        if (!isFullTime(stat?.status)) continue
 
         // Must be same day and block (grade needs study hall at this time)
         const entry = schedule[source.day]?.[source.block]
@@ -2822,7 +3298,7 @@ export default function HistoryDetailPage() {
   }
 
   function enterSwapMode(skipChangesCheck = false) {
-    if (!selectedResult) return
+    if (!selectedResult || !generation) return
     // If changes detected and not dismissed, show dialog first
     if (!skipChangesCheck && optionNeedsChanges && !dismissedForOptions.has(viewingOption)) {
       setPendingModeEntry('swap')
@@ -2840,6 +3316,13 @@ export default function HistoryDetailPage() {
     setSwapCount(0)
     setSelectedCell(null)
     setValidTargets([])
+
+    // Run validation to show existing conflicts
+    const existingErrors = validateFullSchedule(selectedResult, generation.stats)
+    const conflicts = existingErrors.filter(
+      e => e.type === 'grade_conflict' || e.type === 'subject_conflict'
+    )
+    setValidationErrors(conflicts)
   }
 
   function exitSwapMode() {
@@ -2849,6 +3332,8 @@ export default function HistoryDetailPage() {
     setHighlightedCells([])
     setSwapWorkingSchedules(null)
     setSwapCount(0)
+    setValidationErrors([])
+    setForceCreateNew(null)
     if (highlightTimeout) clearTimeout(highlightTimeout)
   }
 
@@ -2890,7 +3375,7 @@ export default function HistoryDetailPage() {
           const entry = schedule?.[day]?.[block]
           if (!entry || isOpenBlock(entry[1])) {
             open++
-            if (prevWasOpen && stat.status === "full-time") backToBackIssues++
+            if (prevWasOpen && isFullTime(stat.status)) backToBackIssues++
             prevWasOpen = true
           } else if (isStudyHall(entry[1])) {
             studyHall++
@@ -3090,11 +3575,22 @@ export default function HistoryDetailPage() {
     setFloatingBlocks([])
     setPendingPlacements([])
     setSelectedFloatingBlock(null)
-    setValidationErrors([])
 
     // Parse classes from snapshot for validation
     const classes = parseClassesFromSnapshot(generation.stats!.classes_snapshot!)
     setFreeformClasses(classes)
+
+    // Run validation on the current schedule to show any existing conflicts
+    // This helps users know what issues exist when entering freeform mode
+    console.log('[enterFreeformMode] Running validation on current schedule...')
+    const existingErrors = validateFullSchedule(selectedResult, generation.stats)
+    console.log('[enterFreeformMode] Full validation returned', existingErrors.length, 'errors:', existingErrors.map(e => e.type))
+    // Filter to only show grade/subject conflicts (the actionable ones in freeform)
+    const conflicts = existingErrors.filter(
+      e => e.type === 'grade_conflict' || e.type === 'subject_conflict'
+    )
+    console.log('[enterFreeformMode] After filtering for conflicts:', conflicts.length, 'conflicts')
+    setValidationErrors(conflicts)
   }
 
   function exitFreeformMode() {
@@ -3106,6 +3602,86 @@ export default function HistoryDetailPage() {
     setWorkingSchedules(null)
     setFreeformClasses(null)
     setConflictResolution(null)
+    // Reset study hall stripping state
+    setStudyHallsStripped(false)
+    setStrippedStudyHalls([])
+    setForceCreateNew(null)
+  }
+
+  /**
+   * Strip all Study Halls from the working schedule, converting them to OPEN.
+   * Stores the original positions so they can be restored later.
+   */
+  function handleStripStudyHalls() {
+    if (!workingSchedules) return
+
+    const DAYS = ["Mon", "Tues", "Wed", "Thurs", "Fri"]
+    const stripped: typeof strippedStudyHalls = []
+    const newTeacherSchedules = JSON.parse(JSON.stringify(workingSchedules.teacherSchedules))
+
+    for (const [teacher, schedule] of Object.entries(newTeacherSchedules) as [string, TeacherSchedule][]) {
+      for (const day of DAYS) {
+        for (let block = 1; block <= 5; block++) {
+          const entry = schedule[day]?.[block]
+          if (entry && isStudyHall(entry[1])) {
+            // Store the position and grade
+            stripped.push({
+              teacher,
+              day,
+              block,
+              grade: entry[0]
+            })
+            // Convert to OPEN
+            schedule[day][block] = ["", "OPEN"]
+          }
+        }
+      }
+    }
+
+    // Rebuild grade schedules from the modified teacher schedules
+    const newGradeSchedules = rebuildGradeSchedules(
+      newTeacherSchedules,
+      generation?.stats?.grades_snapshot,
+      workingSchedules.gradeSchedules
+    )
+
+    setStrippedStudyHalls(stripped)
+    setStudyHallsStripped(true)
+    setWorkingSchedules({ teacherSchedules: newTeacherSchedules, gradeSchedules: newGradeSchedules })
+    setValidationErrors([])
+    toast.success(`Stripped ${stripped.length} Study Hall${stripped.length !== 1 ? 's' : ''} (will be reassigned on save)`)
+  }
+
+  /**
+   * Restore stripped Study Halls to their original positions.
+   */
+  function handleRestoreStudyHalls() {
+    if (!workingSchedules || strippedStudyHalls.length === 0) return
+
+    const newTeacherSchedules = JSON.parse(JSON.stringify(workingSchedules.teacherSchedules))
+
+    for (const sh of strippedStudyHalls) {
+      if (newTeacherSchedules[sh.teacher]?.[sh.day]) {
+        // Only restore if the slot is still OPEN
+        const currentEntry = newTeacherSchedules[sh.teacher][sh.day][sh.block]
+        if (!currentEntry || isOpenBlock(currentEntry[1])) {
+          newTeacherSchedules[sh.teacher][sh.day][sh.block] = [sh.grade, "Study Hall"]
+        }
+      }
+    }
+
+    // Rebuild grade schedules
+    const newGradeSchedules = rebuildGradeSchedules(
+      newTeacherSchedules,
+      generation?.stats?.grades_snapshot,
+      workingSchedules.gradeSchedules
+    )
+
+    setStrippedStudyHalls([])
+    setStudyHallsStripped(false)
+    setWorkingSchedules({ teacherSchedules: newTeacherSchedules, gradeSchedules: newGradeSchedules })
+    setValidationErrors([])
+    toast.success("Study Halls restored")
   }
 
   function handlePickUpBlock(location: CellLocation) {
@@ -3494,12 +4070,16 @@ export default function HistoryDetailPage() {
 
       // Check grade conflict - overlapping grade at same time on another teacher
       // Uses global gradesOverlap() helper for multi-grade class detection
-      // In freeform mode, Study Halls are legitimate blocks (just another class)
+      // Exception: Two electives can share slots (use shouldIgnoreGradeConflict)
+      const classesSnapshot = generation?.stats?.classes_snapshot
       for (const [t, sched] of Object.entries(newTeacherSchedules)) {
         const entry = (sched as TeacherSchedule)[day]?.[blockNum]
         if (entry && isOccupiedBlock(entry[1])) {
           if (gradesOverlap(entry[0], grade)) {
-            return false
+            // Check if both are electives (they can share the slot)
+            if (!shouldIgnoreGradeConflict(t, entry[1], teacher, subject, classesSnapshot)) {
+              return false
+            }
           }
         }
       }
@@ -3645,6 +4225,36 @@ export default function HistoryDetailPage() {
 
     // Try to fix by moving blockers to new positions
     const attemptIndex = conflictResolution ? conflictResolution.attemptIndex + 1 : 0
+
+    // If no blockers, still show the UI with empty movedBlockers for consistency
+    if (blockers.length === 0) {
+      // Create a preview of the current state with pending placements applied
+      const previewSchedules = JSON.parse(JSON.stringify(workingSchedules))
+
+      // Apply pending placements to the preview
+      for (const { block, placement } of placedBlocks) {
+        previewSchedules.teacherSchedules[placement.teacher][placement.day][placement.block] = [
+          block.grade,
+          block.subject
+        ]
+      }
+
+      // Rebuild grade schedules
+      previewSchedules.gradeSchedules = rebuildGradeSchedules(
+        previewSchedules.teacherSchedules,
+        generation?.stats?.grades_snapshot,
+        workingSchedules.gradeSchedules
+      )
+
+      setConflictResolution({
+        movedBlockers: [],
+        blockersList: [],
+        schedules: previewSchedules,
+        attemptIndex
+      })
+      setValidationErrors([])
+      return
+    }
 
     const result = findConflictResolution(
       workingSchedules,
@@ -3810,12 +4420,362 @@ export default function HistoryDetailPage() {
     toast.success("Undo complete - blocking classes restored to original positions")
   }
 
+  // =============================================================================
+  // VALIDATION ARCHITECTURE
+  // =============================================================================
+  //
+  // This section contains all schedule validation logic, organized as:
+  //
+  // 1. SHARED TYPES - Common interfaces used across validation functions
+  //
+  // 2. CORE VALIDATION FUNCTIONS - Shared logic for checking specific rules
+  //    These are pure functions that take teacherSchedules and return errors.
+  //    Both validatePlacements() and validateFullSchedule() call these.
+  //
+  //    - checkGradeConflictsCore()    - No grade has two classes at same time
+  //    - checkSubjectConflictsCore()  - No subject twice on same day for a grade
+  //    - checkFixedSlotViolationsCore() - Classes with fixed slots are honored
+  //    - checkAvailabilityViolationsCore() - Classes within available days/blocks
+  //    - validateScheduleConsistency() - Grade names are valid/parseable
+  //
+  // 3. FREEFORM-SPECIFIC HELPERS - Only used by validatePlacements()
+  //    - checkUnplacedBlocks()        - All floating blocks must be placed
+  //    - checkStudyHallEligibility()  - Only full-time teachers for study hall
+  //    - checkTeacherConflictsPending() - No double-booking in pending placements
+  //    - checkCoTaughtClasses()       - Co-taught classes at same time
+  //
+  // 4. COMPREHENSIVE CHECK HELPERS - Only used by validateFullSchedule() with stats
+  //    - checkSessionCounts()         - Correct sessions per class (soft)
+  //    - checkUnknownClasses()        - No unmatched schedule entries (soft)
+  //    - checkStudyHallCoverage()     - All grades have study halls (soft)
+  //    - checkBackToBackIssues()      - Minimize consecutive open blocks (soft)
+  //
+  // 5. MAIN VALIDATION FUNCTIONS
+  //    - validatePlacements()    - Freeform mode, hard constraints only
+  //    - validateFullSchedule()  - Save-time, all constraints including soft
+  //
+  // =============================================================================
+
+  // ---------------------------------------------------------------------------
+  // SHARED TYPES
+  // ---------------------------------------------------------------------------
+
+  interface ClassAtSlot {
+    teacher: string
+    subject: string
+    gradeDisplay: string
+    isElective?: boolean  // Optional - detected from snapshot if not provided
+  }
+
+  interface GradeConflict {
+    gradeNum: number
+    gradeName: string
+    nonElectives: Array<{ teacher: string; subject: string; gradeDisplay: string }>
+    electives: Array<{ teacher: string; subject: string; gradeDisplay: string }>
+    conflictType: 'multiple_non_electives' | 'non_elective_with_electives'
+  }
+
+  type ClassesSnapshotItem = { teacher_name: string | null; subject_name: string | null; is_elective?: boolean }
+
+  // ---------------------------------------------------------------------------
+  // CORE VALIDATION FUNCTIONS
+  // ---------------------------------------------------------------------------
+
   /**
-   * Shared validation: Check that grade displays in teacher schedules are parseable.
-   * This catches bugs where grade parsing fails or unknown grades appear.
+   * Detect grade conflicts at a single time slot.
+   * Expands multi-grade classes (e.g., "6th-11th Grade") to individual grades.
    *
-   * Note: Teacher schedules are the source of truth. We no longer validate against
-   * gradeSchedules since they can only store one entry per slot (missing electives, etc.)
+   * Conflict types:
+   * - multiple_non_electives: Multiple required classes at same grade/slot
+   * - non_elective_with_electives: Required class blocks elective attendance
+   * - Multiple electives at same slot is OK (students choose one)
+   */
+  function detectGradeConflictsAtSlot(
+    classesAtSlot: ClassAtSlot[],
+    classesSnapshot?: ClassesSnapshotItem[]
+  ): GradeConflict[] {
+    const conflicts: GradeConflict[] = []
+
+    // DEBUG: Log snapshot availability
+    if (classesAtSlot.length > 1) {
+      console.log('[detectGradeConflictsAtSlot] Checking slot with', classesAtSlot.length, 'classes')
+      console.log('[detectGradeConflictsAtSlot] classesSnapshot available:', !!classesSnapshot, 'count:', classesSnapshot?.length || 0)
+    }
+
+    // Build a map of individual grade number -> classes at this slot
+    const gradeTeachers = new Map<number, Array<{ teacher: string; subject: string; gradeDisplay: string; isElective: boolean }>>()
+
+    for (const cls of classesAtSlot) {
+      const isElective = cls.isElective ?? isClassElective(cls.teacher, cls.subject, classesSnapshot)
+      const gradeNums = parseGradeDisplayToNumbers(cls.gradeDisplay)
+
+      // DEBUG: Log elective detection for each class when multiple classes at slot
+      if (classesAtSlot.length > 1) {
+        const snapshotMatch = classesSnapshot?.find(c => c.teacher_name === cls.teacher && c.subject_name === cls.subject)
+        console.log('[detectGradeConflictsAtSlot] Class:', {
+          teacher: cls.teacher,
+          subject: cls.subject,
+          gradeDisplay: cls.gradeDisplay,
+          isElective,
+          snapshotMatch: snapshotMatch ? {
+            teacher: snapshotMatch.teacher_name,
+            subject: snapshotMatch.subject_name,
+            is_elective: snapshotMatch.is_elective
+          } : 'NOT FOUND IN SNAPSHOT'
+        })
+      }
+
+      for (const gradeNum of gradeNums) {
+        if (!gradeTeachers.has(gradeNum)) {
+          gradeTeachers.set(gradeNum, [])
+        }
+        gradeTeachers.get(gradeNum)!.push({
+          teacher: cls.teacher,
+          subject: cls.subject,
+          gradeDisplay: cls.gradeDisplay,
+          isElective
+        })
+      }
+    }
+
+    for (const [gradeNum, teachers] of gradeTeachers) {
+      const nonElectives = teachers.filter(t => !t.isElective)
+      const electives = teachers.filter(t => t.isElective)
+
+      if (nonElectives.length > 1) {
+        conflicts.push({
+          gradeNum,
+          gradeName: gradeNumToDisplay(gradeNum),
+          nonElectives: nonElectives.map(t => ({ teacher: t.teacher, subject: t.subject, gradeDisplay: t.gradeDisplay })),
+          electives: electives.map(t => ({ teacher: t.teacher, subject: t.subject, gradeDisplay: t.gradeDisplay })),
+          conflictType: 'multiple_non_electives'
+        })
+      } else if (nonElectives.length > 0 && electives.length > 0) {
+        conflicts.push({
+          gradeNum,
+          gradeName: gradeNumToDisplay(gradeNum),
+          nonElectives: nonElectives.map(t => ({ teacher: t.teacher, subject: t.subject, gradeDisplay: t.gradeDisplay })),
+          electives: electives.map(t => ({ teacher: t.teacher, subject: t.subject, gradeDisplay: t.gradeDisplay })),
+          conflictType: 'non_elective_with_electives'
+        })
+      }
+    }
+
+    return conflicts
+  }
+
+  /**
+   * CORE: Check for grade conflicts across all slots in a schedule.
+   * Rule: No grade can have two different classes at the same time.
+   * (Study halls don't conflict; multiple electives at same slot is OK)
+   */
+  function checkGradeConflictsCore(
+    teacherSchedules: Record<string, TeacherSchedule>,
+    classesSnapshot?: ClassesSnapshotItem[]
+  ): ValidationError[] {
+    const errors: ValidationError[] = []
+    const DAYS = ["Mon", "Tues", "Wed", "Thurs", "Fri"]
+
+    // DEBUG: Log what data we're validating
+    console.log('[checkGradeConflictsCore] Starting validation with', Object.keys(teacherSchedules).length, 'teachers')
+
+    for (const day of DAYS) {
+      for (let block = 1; block <= 5; block++) {
+        const classesAtSlot: ClassAtSlot[] = []
+
+        for (const [teacher, schedule] of Object.entries(teacherSchedules)) {
+          const entry = schedule[day]?.[block]
+          if (!entry || !isScheduledClass(entry[1])) continue
+          if (isStudyHall(entry[1])) continue  // Study halls don't cause conflicts
+
+          classesAtSlot.push({
+            teacher,
+            subject: entry[1],
+            gradeDisplay: entry[0]
+          })
+        }
+
+        const conflicts = detectGradeConflictsAtSlot(classesAtSlot, classesSnapshot)
+        for (const conflict of conflicts) {
+          // DEBUG: Log each conflict detected with full context
+          console.log(`[checkGradeConflictsCore] CONFLICT at ${day} B${block}:`, {
+            gradeName: conflict.gradeName,
+            type: conflict.conflictType,
+            classesAtSlot: classesAtSlot.map(c => `${c.teacher}/${c.gradeDisplay}/${c.subject}`),
+            nonElectives: conflict.nonElectives,
+            electives: conflict.electives
+          })
+
+          if (conflict.conflictType === 'multiple_non_electives') {
+            errors.push({
+              type: 'grade_conflict',
+              message: `[Grade Conflict] ${conflict.gradeName} has ${conflict.nonElectives.length} classes at ${day} B${block}: ${conflict.nonElectives.map(t => `${t.teacher}/${t.subject}`).join(', ')}`,
+              cells: conflict.nonElectives.map(t => ({ teacher: t.teacher, day, block, grade: conflict.gradeName }))
+            })
+          } else if (conflict.conflictType === 'non_elective_with_electives') {
+            const allInConflict = [...conflict.nonElectives, ...conflict.electives]
+            errors.push({
+              type: 'grade_conflict',
+              message: `[Grade Conflict] ${conflict.gradeName} has required class (${conflict.nonElectives.map(t => `${t.teacher}/${t.subject}`).join(', ')}) conflicting with elective(s) (${conflict.electives.map(t => `${t.teacher}/${t.subject}`).join(', ')}) at ${day} B${block}`,
+              cells: allInConflict.map(t => ({ teacher: t.teacher, day, block, grade: conflict.gradeName }))
+            })
+          }
+        }
+      }
+    }
+
+    console.log('[checkGradeConflictsCore] Found', errors.length, 'grade conflicts')
+    return errors
+  }
+
+  /**
+   * CORE: Check for subject conflicts - same subject twice on same day for a grade.
+   * Rule: A grade shouldn't have the same subject at different times on the same day.
+   * (Multiple teachers at same block = electives/co-taught, which is valid)
+   */
+  function checkSubjectConflictsCore(
+    teacherSchedules: Record<string, TeacherSchedule>
+  ): ValidationError[] {
+    const errors: ValidationError[] = []
+    const DAYS = ["Mon", "Tues", "Wed", "Thurs", "Fri"]
+
+    // Group by grade -> day -> subject -> occurrences
+    const gradeSubjectsByDay = new Map<string, Map<string, Map<string, Array<{ teacher: string; block: number }>>>>()
+
+    for (const [teacher, schedule] of Object.entries(teacherSchedules)) {
+      for (const day of DAYS) {
+        for (let block = 1; block <= 5; block++) {
+          const entry = schedule[day]?.[block]
+          if (!entry || !isScheduledClass(entry[1])) continue
+
+          const grade = entry[0]
+          const subject = entry[1]
+
+          if (!gradeSubjectsByDay.has(grade)) {
+            gradeSubjectsByDay.set(grade, new Map())
+          }
+          const dayMap = gradeSubjectsByDay.get(grade)!
+          if (!dayMap.has(day)) {
+            dayMap.set(day, new Map())
+          }
+          const subjectMap = dayMap.get(day)!
+          if (!subjectMap.has(subject)) {
+            subjectMap.set(subject, [])
+          }
+          subjectMap.get(subject)!.push({ teacher, block })
+        }
+      }
+    }
+
+    for (const [grade, dayMap] of gradeSubjectsByDay) {
+      for (const [day, subjectMap] of dayMap) {
+        for (const [subject, occurrences] of subjectMap) {
+          const uniqueBlocks = new Set(occurrences.map(o => o.block))
+          if (uniqueBlocks.size > 1) {
+            errors.push({
+              type: 'subject_conflict',
+              message: `[Subject Conflict] ${grade} has ${subject} at ${uniqueBlocks.size} different times on ${day}`,
+              cells: occurrences.map(o => ({ teacher: o.teacher, day, block: o.block, grade, subject }))
+            })
+          }
+        }
+      }
+    }
+
+    return errors
+  }
+
+  /**
+   * CORE: Check fixed slot violations - classes with fixed slots must be in those slots.
+   * Rule: If a class has fixed_slot restrictions, it must be scheduled at those times.
+   */
+  function checkFixedSlotViolationsCore(
+    teacherSchedules: Record<string, TeacherSchedule>,
+    classes: ClassEntry[]
+  ): ValidationError[] {
+    const errors: ValidationError[] = []
+    const DAYS = ["Mon", "Tues", "Wed", "Thurs", "Fri"]
+
+    for (const cls of classes) {
+      if (!cls.fixedSlots || cls.fixedSlots.length === 0) continue
+      if (!cls.teacher || !cls.subject) continue
+
+      const teacherSchedule = teacherSchedules[cls.teacher]
+      if (!teacherSchedule) continue
+
+      for (const [day, block] of cls.fixedSlots) {
+        const entry = teacherSchedule[day]?.[block]
+        const entrySubject = entry?.[1]
+
+        if (entrySubject !== cls.subject) {
+          errors.push({
+            type: 'fixed_slot_violation',
+            message: `[Fixed Slot] ${cls.teacher}/${cls.subject} should be at ${day} B${block} but found ${entrySubject || 'empty'}`,
+            cells: [{ teacher: cls.teacher, day, block, grade: cls.grade, subject: cls.subject }]
+          })
+        }
+      }
+    }
+
+    return errors
+  }
+
+  /**
+   * CORE: Check availability violations - classes must be within available days/blocks.
+   * Rule: If a class has day or block restrictions, it must be scheduled within them.
+   */
+  function checkAvailabilityViolationsCore(
+    teacherSchedules: Record<string, TeacherSchedule>,
+    classes: ClassEntry[]
+  ): ValidationError[] {
+    const errors: ValidationError[] = []
+    const DAYS = ["Mon", "Tues", "Wed", "Thurs", "Fri"]
+
+    for (const cls of classes) {
+      if (!cls.teacher || !cls.subject) continue
+
+      const hasRestrictedDays = cls.availableDays && cls.availableDays.length < 5
+      const hasRestrictedBlocks = cls.availableBlocks && cls.availableBlocks.length < 5
+
+      if (!hasRestrictedDays && !hasRestrictedBlocks) continue
+
+      const teacherSchedule = teacherSchedules[cls.teacher]
+      if (!teacherSchedule) continue
+
+      for (const day of DAYS) {
+        for (let block = 1; block <= 5; block++) {
+          const entry = teacherSchedule[day]?.[block]
+          if (!entry || entry[1] !== cls.subject) continue
+
+          // Check if entry's grade overlaps with class's grades
+          const entryMatches = gradesOverlap(entry[0], cls.gradeDisplay || cls.grade)
+          if (!entryMatches) continue
+
+          if (hasRestrictedDays && !cls.availableDays!.includes(day)) {
+            errors.push({
+              type: 'availability_violation',
+              message: `[Availability] ${cls.teacher}/${cls.subject} at ${day} B${block} but only available on ${cls.availableDays!.join(', ')}`,
+              cells: [{ teacher: cls.teacher, day, block, grade: cls.grade, subject: cls.subject }]
+            })
+          }
+
+          if (hasRestrictedBlocks && !cls.availableBlocks!.includes(block)) {
+            errors.push({
+              type: 'availability_violation',
+              message: `[Availability] ${cls.teacher}/${cls.subject} at ${day} B${block} but only available in blocks ${cls.availableBlocks!.join(', ')}`,
+              cells: [{ teacher: cls.teacher, day, block, grade: cls.grade, subject: cls.subject }]
+            })
+          }
+        }
+      }
+    }
+
+    return errors
+  }
+
+  /**
+   * CORE: Check that grade displays in teacher schedules are parseable.
+   * This catches bugs where grade parsing fails or unknown grades appear.
    */
   function validateScheduleConsistency(
     teacherSchedules: Record<string, TeacherSchedule>,
@@ -3922,23 +4882,47 @@ export default function HistoryDetailPage() {
     return errors
   }
 
+  // ---------------------------------------------------------------------------
+  // FREEFORM-SPECIFIC HELPERS
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Freeform mode validation - checks HARD CONSTRAINTS only.
+   *
+   * Purpose: Real-time feedback while user is placing floating blocks.
+   * Focus: Validates pending user actions, not full schedule state.
+   *
+   * Checks:
+   * - Unplaced blocks (floating blocks without placements)
+   * - Study Hall teacher eligibility (full-time only)
+   * - Teacher conflicts (double-booked teachers)
+   * - Grade conflicts (between pending placements)
+   * - Subject conflicts (same subject twice per day)
+   * - Fixed slot restrictions
+   * - Teacher availability (days/blocks)
+   * - Co-taught classes (must be at same time)
+   *
+   * Does NOT check (handled by validateFullSchedule at save time):
+   * - Back-to-back OPEN issues (soft constraint)
+   * - Session counts (informational)
+   * - Study Hall coverage (can be adjusted later)
+   * - Unknown classes (informational)
+   */
   function validatePlacements(): ValidationError[] {
     if (!workingSchedules || !selectedResult) return []
 
     const errors: ValidationError[] = []
-    const DAYS = ["Mon", "Tues", "Wed", "Thurs", "Fri"]
-
-    // Build a set of picked-up source locations to exclude from "existing" checks
-    const pickedUpLocations = new Set(
-      floatingBlocks.map(b => `${b.grade}|${b.sourceDay}|${b.sourceBlock}`)
-    )
 
     // Build a map of teacher status for eligibility checks
     const teacherStatus = new Map(
       selectedResult.teacherStats.map(s => [s.teacher, s.status])
     )
 
-    // 1. Check unplaced blocks
+    // -------------------------------------------------------------------------
+    // FREEFORM-SPECIFIC CHECKS (pending placements)
+    // -------------------------------------------------------------------------
+
+    // 1. Unplaced blocks - all floating blocks must be placed before saving
     for (const block of floatingBlocks) {
       if (!pendingPlacements.find(p => p.blockId === block.id)) {
         errors.push({
@@ -3950,13 +4934,13 @@ export default function HistoryDetailPage() {
       }
     }
 
-    // 2. Check Study Hall teacher eligibility (only full-time teachers)
+    // 2. Study Hall teacher eligibility - only full-time teachers can supervise
     for (const placement of pendingPlacements) {
       const placedBlock = floatingBlocks.find(b => b.id === placement.blockId)
       if (!placedBlock || !isStudyHall(placedBlock.subject)) continue
 
       const status = teacherStatus.get(placement.teacher)
-      if (status !== "full-time") {
+      if (!isFullTime(status)) {
         errors.push({
           type: 'teacher_conflict',
           message: `[Study Hall Rule] ${placement.teacher} is ${status || 'unknown'}, only full-time teachers can supervise Study Hall`,
@@ -3965,183 +4949,51 @@ export default function HistoryDetailPage() {
       }
     }
 
-    // 3. Check teacher conflicts (same teacher, same day, same block)
-    for (const [teacher, schedule] of Object.entries(workingSchedules.teacherSchedules)) {
-      for (const day of DAYS) {
-        for (let block = 1; block <= 5; block++) {
-          const entry = schedule[day]?.[block]
-          if (!entry || !isScheduledClass(entry[1])) continue
-
-          // Count how many classes this teacher has at this slot (should be 1)
-          const placementsHere = pendingPlacements.filter(p =>
-            p.teacher === teacher && p.day === day && p.block === block
-          )
-          if (placementsHere.length > 1) {
-            errors.push({
-              type: 'teacher_conflict',
-              message: `[No Teacher Conflicts] ${teacher} has ${placementsHere.length} classes at ${day} B${block}`,
-              cells: placementsHere.map(p => ({ teacher: p.teacher, day: p.day, block: p.block }))
-            })
-          }
-        }
+    // 3. Teacher conflicts - check if multiple floating blocks placed at same teacher/slot
+    const placementsByTeacherSlot = new Map<string, PendingPlacement[]>()
+    for (const p of pendingPlacements) {
+      const key = `${p.teacher}|${p.day}|${p.block}`
+      if (!placementsByTeacherSlot.has(key)) {
+        placementsByTeacherSlot.set(key, [])
+      }
+      placementsByTeacherSlot.get(key)!.push(p)
+    }
+    for (const [key, placements] of placementsByTeacherSlot) {
+      if (placements.length > 1) {
+        const [teacher, day, blockStr] = key.split('|')
+        errors.push({
+          type: 'teacher_conflict',
+          message: `[No Teacher Conflicts] ${teacher} has ${placements.length} classes placed at ${day} B${blockStr}`,
+          cells: placements.map(p => ({ teacher: p.teacher, day: p.day, block: p.block }))
+        })
       }
     }
 
-    // 4. Check grade conflicts - multiple placements at same grade/day/block
-    // (Skip Study Halls - they don't conflict with regular classes)
-    // Note: We check the working schedule for actual conflicts, not the original
-    for (const placement of pendingPlacements) {
-      const placedBlock = floatingBlocks.find(b => b.id === placement.blockId)
-      if (!placedBlock) continue
+    // -------------------------------------------------------------------------
+    // CORE CHECKS (use shared functions on working schedule)
+    // -------------------------------------------------------------------------
 
-      // Skip Study Halls - they don't cause grade conflicts
-      if (isStudyHall(placedBlock.subject)) continue
+    // 4. Grade conflicts - use shared core function
+    const gradeConflictErrors = checkGradeConflictsCore(
+      workingSchedules.teacherSchedules,
+      generation?.stats?.classes_snapshot
+    )
+    errors.push(...gradeConflictErrors)
 
-      const grade = placedBlock.grade
-      const { day, block } = placement
+    // 5. Subject conflicts - use shared core function
+    const subjectConflictErrors = checkSubjectConflictsCore(workingSchedules.teacherSchedules)
+    errors.push(...subjectConflictErrors)
 
-      // Check for multiple placements at same grade/slot (excluding Study Halls)
-      // Use gradesOverlap() to handle multi-grade classes like "6th-11th Grade"
-      const classesSnapshot = generation?.stats?.classes_snapshot
-      const otherPlacementsAtSlot = pendingPlacements.filter(p => {
-        if (p === placement) return false
-        const otherBlock = floatingBlocks.find(b => b.id === p.blockId)
-        // Skip Study Halls
-        if (isStudyHall(otherBlock?.subject)) return false
-        if (!otherBlock || !gradesOverlap(otherBlock.grade, grade) || p.day !== day || p.block !== block) return false
-        // Skip if both are electives (they can share the slot)
-        if (shouldIgnoreGradeConflict(otherBlock.sourceTeacher || p.teacher, otherBlock.subject, placedBlock.sourceTeacher || placement.teacher, placedBlock.subject, classesSnapshot)) {
-          return false
-        }
-        return true
-      })
-      if (otherPlacementsAtSlot.length > 0) {
-        // Only report once per conflict set
-        const allInConflict = [placement, ...otherPlacementsAtSlot]
-        const alreadyReported = errors.some(e =>
-          e.type === 'grade_conflict' && e.message.includes(`${grade}`) && e.message.includes(`${day} B${block}`)
-        )
-        if (!alreadyReported) {
-          errors.push({
-            type: 'grade_conflict',
-            message: `[No Grade Conflicts] ${grade} has ${allInConflict.length} classes scheduled at ${day} B${block}`,
-            cells: allInConflict.map(p => ({ teacher: p.teacher, day: p.day, block: p.block, grade }))
-          })
-        }
-      }
-    }
-
-    // 5. Check subject conflicts (same subject twice on same day for a grade)
-    // Built from teacher schedules (source of truth)
-    const gradeSubjectsByDay = new Map<string, Map<string, Map<string, CellLocation[]>>>()
-
-    for (const [teacher, schedule] of Object.entries(workingSchedules.teacherSchedules)) {
-      for (const day of DAYS) {
-        for (let block = 1; block <= 5; block++) {
-          const entry = schedule[day]?.[block]
-          if (!entry || !isScheduledClass(entry[1])) continue
-
-          const grade = entry[0]
-          const subject = entry[1]
-
-          if (!gradeSubjectsByDay.has(grade)) {
-            gradeSubjectsByDay.set(grade, new Map())
-          }
-          const dayMap = gradeSubjectsByDay.get(grade)!
-          if (!dayMap.has(day)) {
-            dayMap.set(day, new Map())
-          }
-          const subjectMap = dayMap.get(day)!
-          if (!subjectMap.has(subject)) {
-            subjectMap.set(subject, [])
-          }
-          subjectMap.get(subject)!.push({ teacher, day, block, grade, subject })
-        }
-      }
-    }
-
-    for (const [grade, dayMap] of gradeSubjectsByDay) {
-      for (const [day, subjectMap] of dayMap) {
-        for (const [subject, locations] of subjectMap) {
-          // Only flag if same subject at DIFFERENT blocks (multiple teachers at same block = electives, which is valid)
-          const uniqueBlocks = new Set(locations.map(loc => loc.block))
-          if (uniqueBlocks.size > 1) {
-            errors.push({
-              type: 'subject_conflict',
-              message: `[No Duplicate Subjects] ${grade} has ${subject} at ${uniqueBlocks.size} different times on ${day}`,
-              cells: locations
-            })
-          }
-        }
-      }
-    }
-
-    // Additional validations using class definitions (if loaded)
+    // 6. Fixed slot & availability - use shared core functions if class definitions available
     if (freeformClasses) {
-      // 6. Check fixed slot restrictions
-      for (const placement of pendingPlacements) {
-        const placedBlock = floatingBlocks.find(b => b.id === placement.blockId)
-        if (!placedBlock || isStudyHall(placedBlock.subject)) continue
+      const fixedSlotErrors = checkFixedSlotViolationsCore(workingSchedules.teacherSchedules, freeformClasses)
+      errors.push(...fixedSlotErrors)
 
-        // Find the class definition for this placement (using gradesOverlap for multi-grade support)
-        const classDef = freeformClasses.find(c =>
-          c.teacher === placement.teacher &&
-          gradesOverlap(c.gradeDisplay || c.grade, placedBlock.grade) &&
-          c.subject === placedBlock.subject
-        )
+      const availabilityErrors = checkAvailabilityViolationsCore(workingSchedules.teacherSchedules, freeformClasses)
+      errors.push(...availabilityErrors)
 
-        if (classDef?.fixedSlots && classDef.fixedSlots.length > 0) {
-          const isValidSlot = classDef.fixedSlots.some(
-            ([day, block]) => day === placement.day && block === placement.block
-          )
-          if (!isValidSlot) {
-            const validSlots = classDef.fixedSlots.map(([d, b]) => `${d} B${b}`).join(', ')
-            errors.push({
-              type: 'teacher_conflict',
-              message: `[Fixed Slot] ${placedBlock.grade} ${placedBlock.subject} with ${placement.teacher} must be at: ${validSlots}`,
-              cells: [{ teacher: placement.teacher, day: placement.day, block: placement.block }]
-            })
-          }
-        }
-      }
-
-      // 7. Check teacher availability (days and blocks)
-      for (const placement of pendingPlacements) {
-        const placedBlock = floatingBlocks.find(b => b.id === placement.blockId)
-        if (!placedBlock || isStudyHall(placedBlock.subject)) continue
-
-        // Find the class definition (using gradesOverlap for multi-grade support)
-        const classDef = freeformClasses.find(c =>
-          c.teacher === placement.teacher &&
-          gradesOverlap(c.gradeDisplay || c.grade, placedBlock.grade) &&
-          c.subject === placedBlock.subject
-        )
-
-        if (classDef) {
-          // Check available days (default to all days if not specified)
-          const availDays = classDef.availableDays ?? ['Mon', 'Tues', 'Wed', 'Thurs', 'Fri']
-          if (!availDays.includes(placement.day)) {
-            errors.push({
-              type: 'teacher_conflict',
-              message: `[Teacher Availability] ${placement.teacher} is not available on ${placement.day} for ${placedBlock.subject}`,
-              cells: [{ teacher: placement.teacher, day: placement.day, block: placement.block }]
-            })
-          }
-
-          // Check available blocks (default to all blocks if not specified)
-          const availBlocks = classDef.availableBlocks ?? [1, 2, 3, 4, 5]
-          if (!availBlocks.includes(placement.block)) {
-            errors.push({
-              type: 'teacher_conflict',
-              message: `[Teacher Availability] ${placement.teacher} is not available at B${placement.block} for ${placedBlock.subject}`,
-              cells: [{ teacher: placement.teacher, day: placement.day, block: placement.block }]
-            })
-          }
-        }
-      }
-
-      // 8. Check co-taught classes (same grade+subject with different teachers must be at same time)
-      // Group classes by grade+subject to find co-taught pairs
+      // 7. Co-taught classes - same grade+subject with different teachers must be at same time
+      // (Freeform-specific: checks pending placements for co-taught consistency)
       const coTaughtGroups = new Map<string, typeof freeformClasses>()
       for (const cls of freeformClasses) {
         const key = `${cls.grade}|${cls.subject}`
@@ -4151,7 +5003,6 @@ export default function HistoryDetailPage() {
         coTaughtGroups.get(key)!.push(cls)
       }
 
-      // For each co-taught group with multiple teachers, check that placements are at the same slot
       for (const [key, classes] of coTaughtGroups) {
         if (classes.length <= 1) continue // Not co-taught
 
@@ -4182,7 +5033,11 @@ export default function HistoryDetailPage() {
       }
     }
 
-    // 9. Check teacher-grade consistency (shared validation)
+    // -------------------------------------------------------------------------
+    // DATA INTEGRITY CHECK
+    // -------------------------------------------------------------------------
+
+    // 8. Grade consistency - check all grade names are valid/parseable
     // Use grades from stats snapshot if available
     const knownGrades = generation?.stats?.grades_snapshot?.map(g => g.display_name)
     const consistencyErrors = validateScheduleConsistency(
@@ -4204,130 +5059,39 @@ export default function HistoryDetailPage() {
    * - Back-to-back issues
    * - Fixed slot violations
    * - Availability violations
+   *
+   * @param options.skipStudyHallCheck - Skip study hall coverage validation (for stripped study halls mode)
    */
-  function validateFullSchedule(option: ScheduleOption, stats?: GenerationStats): ValidationError[] {
+  function validateFullSchedule(
+    option: ScheduleOption,
+    stats?: GenerationStats,
+    options?: { skipStudyHallCheck?: boolean }
+  ): ValidationError[] {
     const errors: ValidationError[] = []
     const DAYS = ["Mon", "Tues", "Wed", "Thurs", "Fri"]
 
-    // 1. Check teacher conflicts - no teacher in two places at once
-    for (const [teacher, schedule] of Object.entries(option.teacherSchedules)) {
-      for (const day of DAYS) {
-        for (let block = 1; block <= 5; block++) {
-          const entries: Array<{ grade: string; subject: string }> = []
-          const entry = schedule[day]?.[block]
-          if (entry && isOccupiedBlock(entry[1])) {
-            // Count this as an entry (grade, subject)
-            entries.push({ grade: entry[0], subject: entry[1] })
-          }
-          // If somehow there's more than one class at a slot (shouldn't happen but let's check)
-          if (entries.length > 1) {
-            errors.push({
-              type: 'teacher_conflict',
-              message: `[Teacher Conflict] ${teacher} has ${entries.length} classes at ${day} B${block}`,
-              cells: entries.map(e => ({ teacher, day, block, grade: e.grade, subject: e.subject }))
-            })
-          }
-        }
-      }
-    }
+    // -------------------------------------------------------------------------
+    // CORE CHECKS (use shared functions)
+    // -------------------------------------------------------------------------
 
-    // 2. Check grade conflicts - no grade has two different classes at the same time
-    // Built from teacher schedules (source of truth) - a grade conflict is when the same grade
-    // appears with different non-elective teachers at the same day/block
-    // (Study halls and electives don't conflict)
-    for (const day of DAYS) {
-      for (let block = 1; block <= 5; block++) {
-        // Build a map of grade -> teachers at this slot
-        const gradeTeachers = new Map<string, Array<{ teacher: string; subject: string; isElective: boolean }>>()
+    // 1. Grade conflicts - use shared core function
+    const gradeConflictErrors = checkGradeConflictsCore(option.teacherSchedules, stats?.classes_snapshot)
+    errors.push(...gradeConflictErrors)
 
-        for (const [teacher, schedule] of Object.entries(option.teacherSchedules)) {
-          const entry = schedule[day]?.[block]
-          if (!entry || !isScheduledClass(entry[1])) continue
+    // 2. Subject conflicts - use shared core function
+    const subjectConflictErrors = checkSubjectConflictsCore(option.teacherSchedules)
+    errors.push(...subjectConflictErrors)
 
-          const grade = entry[0]
-          const subject = entry[1]
-          // Check if this is an elective (from classes snapshot)
-          const isElective = isClassElective(teacher, subject, stats?.classes_snapshot)
-
-          if (!gradeTeachers.has(grade)) {
-            gradeTeachers.set(grade, [])
-          }
-          gradeTeachers.get(grade)!.push({ teacher, subject, isElective })
-        }
-
-        // Check each grade for conflicts
-        for (const [grade, teachers] of gradeTeachers) {
-          // Filter to non-elective classes only
-          const nonElectives = teachers.filter(t => !t.isElective)
-          if (nonElectives.length > 1) {
-            errors.push({
-              type: 'grade_conflict',
-              message: `[Grade Conflict] ${grade} has ${nonElectives.length} classes at ${day} B${block}: ${nonElectives.map(t => t.teacher).join(', ')}`,
-              cells: nonElectives.map(t => ({ teacher: t.teacher, day, block, grade }))
-            })
-          }
-        }
-      }
-    }
-
-    // 3. Check subject conflicts - same subject twice on same day for a grade
-    // Built from teacher schedules (source of truth)
-    // Group by grade, then by day, then count subjects
-    const gradeSubjectsByDay = new Map<string, Map<string, Map<string, Array<{ teacher: string; block: number }>>>>()
-
-    for (const [teacher, schedule] of Object.entries(option.teacherSchedules)) {
-      for (const day of DAYS) {
-        for (let block = 1; block <= 5; block++) {
-          const entry = schedule[day]?.[block]
-          if (!entry || !isScheduledClass(entry[1])) continue
-
-          const grade = entry[0]
-          const subject = entry[1]
-
-          if (!gradeSubjectsByDay.has(grade)) {
-            gradeSubjectsByDay.set(grade, new Map())
-          }
-          const dayMap = gradeSubjectsByDay.get(grade)!
-          if (!dayMap.has(day)) {
-            dayMap.set(day, new Map())
-          }
-          const subjectMap = dayMap.get(day)!
-          if (!subjectMap.has(subject)) {
-            subjectMap.set(subject, [])
-          }
-          subjectMap.get(subject)!.push({ teacher, block })
-        }
-      }
-    }
-
-    for (const [grade, dayMap] of gradeSubjectsByDay) {
-      for (const [day, subjectMap] of dayMap) {
-        for (const [subject, occurrences] of subjectMap) {
-          // Only flag if same subject at DIFFERENT blocks (multiple teachers at same block = electives, which is valid)
-          const uniqueBlocks = new Set(occurrences.map(o => o.block))
-          if (uniqueBlocks.size > 1) {
-            errors.push({
-              type: 'subject_conflict',
-              message: `[Subject Conflict] ${grade} has ${subject} at ${uniqueBlocks.size} different times on ${day}`,
-              cells: occurrences.map(o => ({ teacher: o.teacher, day, block: o.block, grade, subject }))
-            })
-          }
-        }
-      }
-    }
-
-    // 4. Check teacher-grade consistency (shared validation)
-    // Use grades from stats snapshot if available
+    // 3. Grade consistency - use shared core function
     const knownGrades = stats?.grades_snapshot?.map(g => g.display_name)
-    const consistencyErrors = validateScheduleConsistency(
-      option.teacherSchedules,
-      knownGrades
-    )
+    const consistencyErrors = validateScheduleConsistency(option.teacherSchedules, knownGrades)
     errors.push(...consistencyErrors)
 
-    // === Comprehensive checks (require stats) ===
+    // -------------------------------------------------------------------------
+    // COMPREHENSIVE CHECKS (require stats - includes soft constraints)
+    // -------------------------------------------------------------------------
     if (stats) {
-      // 5. Class Session Count + Unknown Class Detection
+      // 4. Class Session Count + Unknown Class Detection (informational)
       if (stats.classes_snapshot) {
         const classes = parseClassesFromSnapshot(stats.classes_snapshot)
 
@@ -4434,7 +5198,8 @@ export default function HistoryDetailPage() {
       }
 
       // 6. Study Hall Coverage - check all required grades have study halls
-      if (stats.rules_snapshot) {
+      // Skip if study halls were stripped for editing (will be reassigned after save)
+      if (stats.rules_snapshot && !options?.skipStudyHallCheck) {
         const rules = parseRulesFromSnapshot(stats.rules_snapshot)
         const studyHallRule = rules.find(r => r.rule_key === 'study_hall_grades')
 
@@ -4447,7 +5212,7 @@ export default function HistoryDetailPage() {
             for (const day of DAYS) {
               for (let block = 1; block <= 5; block++) {
                 const entry = schedule[day]?.[block]
-                if (entry && entry[1] === 'Study Hall') {
+                if (entry && isStudyHall(entry[1])) {
                   const gradeDisplay = entry[0]
                   for (const g of requiredGrades) {
                     if (gradeDisplay === g || gradeDisplay?.includes(g.replace(' Grade', ''))) {
@@ -4473,7 +5238,7 @@ export default function HistoryDetailPage() {
       // 7. Back-to-Back OPEN Issues - warn about consecutive open blocks for full-time teachers
       if (stats.teachers_snapshot) {
         const teachers = parseTeachersFromSnapshot(stats.teachers_snapshot)
-        const fullTimeTeachers = teachers.filter(t => t.status === 'full-time').map(t => t.name)
+        const fullTimeTeachers = teachers.filter(t => isFullTime(t.status)).map(t => t.name)
 
         for (const teacher of fullTimeTeachers) {
           const schedule = option.teacherSchedules[teacher]
@@ -4485,8 +5250,8 @@ export default function HistoryDetailPage() {
               const entry1 = schedule[day]?.[block]
               const entry2 = schedule[day]?.[block + 1]
 
-              const isOpen1 = !entry1 || entry1[1] === 'OPEN' || entry1[1] === 'Study Hall'
-              const isOpen2 = !entry2 || entry2[1] === 'OPEN' || entry2[1] === 'Study Hall'
+              const isOpen1 = !entry1 || isOpenBlock(entry1[1]) || isStudyHall(entry1[1])
+              const isOpen2 = !entry2 || isOpenBlock(entry2[1]) || isStudyHall(entry2[1])
 
               if (isOpen1 && isOpen2) {
                 backToBackCount++
@@ -4504,75 +5269,18 @@ export default function HistoryDetailPage() {
         }
       }
 
-      // 8. Fixed Slot Violations - check classes with fixed slots are in those slots
+      // 8. Fixed Slot Violations - use shared core function
       if (stats.classes_snapshot) {
         const classes = parseClassesFromSnapshot(stats.classes_snapshot)
-
-        for (const cls of classes) {
-          if (!cls.fixedSlots || cls.fixedSlots.length === 0) continue
-          if (!cls.teacher || !cls.subject) continue
-
-          const teacherSchedule = option.teacherSchedules[cls.teacher]
-          if (!teacherSchedule) continue
-
-          for (const [day, block] of cls.fixedSlots) {
-            const entry = teacherSchedule[day]?.[block]
-            const entrySubject = entry?.[1]
-
-            if (entrySubject !== cls.subject) {
-              errors.push({
-                type: 'fixed_slot_violation',
-                message: `[Fixed Slot] ${cls.teacher}/${cls.subject} should be at ${day} B${block} but found ${entrySubject || 'empty'}`,
-                cells: [{ teacher: cls.teacher, day, block, grade: cls.grade, subject: cls.subject }]
-              })
-            }
-          }
-        }
+        const fixedSlotErrors = checkFixedSlotViolationsCore(option.teacherSchedules, classes)
+        errors.push(...fixedSlotErrors)
       }
 
-      // 9. Availability Violations - check classes are within available days/blocks
+      // 9. Availability Violations - use shared core function
       if (stats.classes_snapshot) {
         const classes = parseClassesFromSnapshot(stats.classes_snapshot)
-
-        for (const cls of classes) {
-          if (!cls.teacher || !cls.subject) continue
-
-          const hasRestrictedDays = cls.availableDays && cls.availableDays.length < 5
-          const hasRestrictedBlocks = cls.availableBlocks && cls.availableBlocks.length < 5
-
-          if (!hasRestrictedDays && !hasRestrictedBlocks) continue
-
-          const teacherSchedule = option.teacherSchedules[cls.teacher]
-          if (!teacherSchedule) continue
-
-          for (const day of DAYS) {
-            for (let block = 1; block <= 5; block++) {
-              const entry = teacherSchedule[day]?.[block]
-              if (!entry || entry[1] !== cls.subject) continue
-
-              // Check if entry's grade overlaps with class's grades (using global helper)
-              const entryMatches = gradesOverlap(entry[0], cls.gradeDisplay || cls.grade)
-
-              if (!entryMatches) continue
-
-              if (hasRestrictedDays && !cls.availableDays!.includes(day)) {
-                errors.push({
-                  type: 'availability_violation',
-                  message: `[Availability] ${cls.teacher}/${cls.subject} at ${day} B${block} but only available on ${cls.availableDays!.join(', ')}`,
-                  cells: [{ teacher: cls.teacher, day, block, grade: cls.grade, subject: cls.subject }]
-                })
-              }
-
-              if (hasRestrictedBlocks && !cls.availableBlocks!.includes(block)) {
-                errors.push({
-                  type: 'availability_violation',
-                  message: `[Availability] ${cls.teacher}/${cls.subject} at ${day} B${block} but only available in blocks ${cls.availableBlocks!.join(', ')}`,
-                  cells: [{ teacher: cls.teacher, day, block, grade: cls.grade, subject: cls.subject }]
-                })
-              }
-            }
-          }
-        }
+        const availabilityErrors = checkAvailabilityViolationsCore(option.teacherSchedules, classes)
+        errors.push(...availabilityErrors)
       }
     }
 
@@ -4804,11 +5512,29 @@ export default function HistoryDetailPage() {
       }
     }
 
+    // Track elective slots per grade to avoid double-counting
+    // Multiple electives at the same time slot only count as 1 session per grade
+    const seenElectiveSlots = new Set<string>() // "gradeName:day:block"
+
     for (const cls of classes) {
       const gradeNums = parseGradeDisplayToNumbers(cls.gradeDisplay || cls.grade)
       for (const num of gradeNums) {
         const gradeName = numToGradeName(num)
-        if (validGradeNames.includes(gradeName)) {
+        if (!validGradeNames.includes(gradeName)) continue
+
+        if (cls.isElective) {
+          // Electives: count each unique time slot once per grade
+          // Multiple elective options at the same slot share that slot
+          const fixedSlots = cls.fixedSlots || []
+          for (const [day, block] of fixedSlots) {
+            const slotKey = `${gradeName}:${day}:${block}`
+            if (!seenElectiveSlots.has(slotKey)) {
+              seenElectiveSlots.add(slotKey)
+              expectedPerGrade.set(gradeName, (expectedPerGrade.get(gradeName) || 0) + 1)
+            }
+          }
+        } else {
+          // Non-elective: count daysPerWeek normally
           expectedPerGrade.set(gradeName, (expectedPerGrade.get(gradeName) || 0) + cls.daysPerWeek)
         }
       }
@@ -4837,11 +5563,16 @@ export default function HistoryDetailPage() {
     for (const grade of validGradeNames) {
       const expected = expectedPerGrade.get(grade) || 0
       const actual = actualPerGrade.get(grade) || 0
-      const status = actual === expected ? '✓' : actual < expected ? '⚠️ UNDER' : '⚠️ OVER'
-      console.log(`  ${grade}: expected=${expected}, actual=${actual} ${status}`)
+      // Note: expected can exceed 25 due to slot sharing (electives, multi-grade classes)
+      // Compare against min(expected, 25) since a grade can only have 25 slots max
+      const effectiveExpected = Math.min(expected, 25)
+      const status = actual >= effectiveExpected ? '✓' : '⚠️ UNDER'
+      console.log(`  ${grade}: expected=${expected}${expected > 25 ? ` (capped to ${effectiveExpected})` : ''}, actual=${actual} ${status}`)
 
-      // If actual < expected, list the missing slots
-      if (actual < expected) {
+      // Only check for missing slots if there are actual empty slots
+      // (actual < 25 means there are unfilled slots that could potentially have classes)
+      const emptySlotCount = 25 - actual
+      if (emptySlotCount > 0) {
         const schedule = option.gradeSchedules[grade]
         const emptySlots: string[] = []
         for (const day of DAYS) {
@@ -4875,16 +5606,20 @@ export default function HistoryDetailPage() {
           }
         }
 
-        issues.push({
-          type: 'grade_gap',
-          severity: 'warning',
-          teacher: '',
-          gradeDisplay: grade,
-          expected: `${expected} sessions`,
-          found: `${actual} sessions`,
-          description: `Grade "${grade}" has ${25 - actual} empty slots (expected ${expected} from snapshot, found ${actual})`,
-          canFix: false
-        })
+        // Only push a warning if actual < effectiveExpected (truly missing sessions)
+        // Note: empty slots might be Study Halls which don't appear in gradeSchedules
+        if (actual < effectiveExpected) {
+          issues.push({
+            type: 'grade_gap',
+            severity: 'warning',
+            teacher: '',
+            gradeDisplay: grade,
+            expected: `${effectiveExpected} sessions`,
+            found: `${actual} sessions`,
+            description: `Grade "${grade}" has ${emptySlotCount} empty slots (expected ${effectiveExpected} from snapshot, found ${actual})`,
+            canFix: false
+          })
+        }
       }
     }
 
@@ -5262,7 +5997,7 @@ export default function HistoryDetailPage() {
           const entry = schedule?.[day]?.[block]
           if (!entry || isOpenBlock(entry[1])) {
             open++
-            if (prevWasOpen && stat.status === "full-time") backToBackIssues++
+            if (prevWasOpen && isFullTime(stat.status)) backToBackIssues++
             prevWasOpen = true
           } else if (isStudyHall(entry[1])) {
             studyHall++
@@ -5379,7 +6114,10 @@ export default function HistoryDetailPage() {
     }
 
     // Run validation with visual modal, then save if passed
-    runValidationWithModal(updatedOption, generation.stats, doSave)
+    // Skip study hall check if study halls were stripped (will be reassigned after save)
+    runValidationWithModal(updatedOption, generation.stats, doSave, 'save', {
+      skipStudyHallCheck: studyHallsStripped
+    })
   }
 
   // TWO DISTINCT CONCEPTS - DO NOT CONFUSE:
@@ -5403,6 +6141,27 @@ export default function HistoryDetailPage() {
     return optionVersion !== generation.stats.snapshotVersion
   })()
   const optionNeedsChanges = snapshotNeedsUpdate || optionNeedsAlignment
+
+  // Determine if we should create a new revision or update existing
+  // forceCreateNew: null = auto (create if only 1 revision), true = always create, false = always update
+  const shouldCreateNew = forceCreateNew !== null
+    ? forceCreateNew
+    : (generation?.options?.length === 1)
+
+  // Toggle function for the revision selector
+  const toggleCreateNew = () => {
+    const defaultBehavior = generation?.options?.length === 1
+    if (forceCreateNew === null) {
+      // Currently on auto - switch to opposite of default
+      setForceCreateNew(!defaultBehavior)
+    } else if (forceCreateNew === defaultBehavior) {
+      // Same as default - go back to auto
+      setForceCreateNew(null)
+    } else {
+      // Opposite of default - go back to auto (which equals default)
+      setForceCreateNew(null)
+    }
+  }
 
   if (loading || isPublicView === null) {
     return (
@@ -5538,6 +6297,7 @@ export default function HistoryDetailPage() {
                     type="teacher"
                     name={teacher}
                     status={publicOption.teacherStats.find(s => s.teacher === teacher)?.status}
+                    classesSnapshot={generation?.stats?.classes_snapshot}
                   />
                 ))
             : Object.entries(publicOption.gradeSchedules)
@@ -5548,6 +6308,7 @@ export default function HistoryDetailPage() {
                     schedule={schedule}
                     type="grade"
                     name={grade}
+                    classesSnapshot={generation?.stats?.classes_snapshot}
                   />
                 ))
           }
@@ -5620,14 +6381,23 @@ export default function HistoryDetailPage() {
                 {generation.options.map((opt, i) => {
                   const isThisOption = viewingOption === (i + 1).toString()
                   const isActive = isThisOption && (!previewOption || !showingPreview)
-                  const shPlaced = opt?.studyHallsPlaced ?? 0
-                  const shTotal = opt?.studyHallAssignments?.length || 6
-                  const allStudyHallsPlaced = shPlaced >= shTotal
                   const isSelected = generation.selected_option === i + 1
                   // Disable switching options while in an edit mode
                   const inEditMode = swapMode || freeformMode || studyHallMode || regenMode
                   // During preview, allow clicking current option to toggle to original view
                   const isClickable = !isGenerating && !inEditMode && (!previewOption || isThisOption)
+                  // Health status: green (perfect), yellow (incomplete), red (conflicts)
+                  const healthStatus = optionHealthStatuses[i] || 'yellow'
+                  const healthColor = healthStatus === 'green'
+                    ? 'bg-emerald-500'
+                    : healthStatus === 'yellow'
+                      ? 'bg-amber-400'
+                      : 'bg-red-500'
+                  const healthTitle = healthStatus === 'green'
+                    ? 'Complete schedule with no conflicts'
+                    : healthStatus === 'yellow'
+                      ? 'Incomplete schedule (missing blocks, grades, or study halls)'
+                      : 'Schedule has conflicts'
                   return (
                     <button
                       key={i}
@@ -5639,7 +6409,7 @@ export default function HistoryDetailPage() {
                         }
                       }}
                       disabled={!isClickable}
-                      title={inEditMode ? "Exit current mode before switching options" : undefined}
+                      title={inEditMode ? "Exit current mode before switching options" : healthTitle}
                       className={`
                         px-3 py-1.5 rounded-md text-sm transition-all flex items-center gap-1.5
                         ${isActive
@@ -5655,9 +6425,7 @@ export default function HistoryDetailPage() {
                         <Check className="h-3.5 w-3.5 text-emerald-600" />
                       )}
                       Revision {i + 1}
-                      {allStudyHallsPlaced && (
-                        <span className="w-2 h-2 rounded-full bg-emerald-500" title="All study halls placed" />
-                      )}
+                      <span className={`w-2 h-2 rounded-full ${healthColor}`} title={healthTitle} />
                     </button>
                   )
                 })}
@@ -5789,6 +6557,7 @@ export default function HistoryDetailPage() {
                     backToBackIssues={selectedResult.backToBackIssues}
                     studyHallsPlaced={selectedResult.studyHallsPlaced}
                     defaultExpanded={isNewGeneration}
+                    validationIssues={savedScheduleValidationIssues}
                   />
                 </div>
               )}
@@ -5835,7 +6604,7 @@ export default function HistoryDetailPage() {
                       </Button>
                       <Button
                         size="sm"
-                        onClick={() => handleApplySwap(generation.options.length === 1)}
+                        onClick={() => handleApplySwap(shouldCreateNew)}
                         className="bg-amber-600 hover:bg-amber-700 text-white"
                         disabled={swapCount === 0}
                       >
@@ -5878,27 +6647,33 @@ export default function HistoryDetailPage() {
                       )}
                       {validationErrors.length > 0 && (
                         <span className="text-red-600 font-medium">
-                          {validationErrors.length} validation issue{validationErrors.length !== 1 ? 's' : ''}
+                          {validationErrors.length} {swapCount === 0 ? 'existing conflict' : 'conflict'}{validationErrors.length !== 1 ? 's' : ''}
                         </span>
                       )}
                     </div>
-                    <span className="text-amber-600/70">
-                      {generation.options.length === 1 ? "Will create Revision 2" : `Will update Revision ${viewingOption}`}
-                    </span>
+                    <button
+                      onClick={toggleCreateNew}
+                      className="text-amber-600/70 hover:text-amber-700 cursor-pointer select-none"
+                      title="Click to toggle"
+                    >
+                      {shouldCreateNew ? 'Save as new revision' : `Update Revision ${viewingOption}`}
+                    </button>
                   </div>
-                  {/* Validation errors warning */}
+                  {/* Validation errors list */}
                   {validationErrors.length > 0 && (
-                    <div className="mt-2 text-red-600 text-sm bg-red-50 border border-red-200 rounded px-3 py-2">
-                      <div className="flex items-center gap-2 font-medium mb-1">
-                        <AlertTriangle className="h-4 w-4 flex-shrink-0" />
-                        <span>Schedule conflicts detected:</span>
+                    <div className="mt-3 pt-3 border-t border-amber-200">
+                      <div className="text-xs font-medium text-red-600 mb-1">
+                        {swapCount === 0 ? 'Existing conflicts in schedule:' : 'Schedule conflicts:'}
                       </div>
-                      <ul className="text-xs space-y-0.5 ml-6">
+                      <ul className="text-xs space-y-1 text-red-600">
                         {validationErrors.slice(0, 5).map((error, idx) => (
-                          <li key={idx}>• {error.message}</li>
+                          <li key={idx} className="flex items-center gap-2">
+                            <span className="text-red-400">•</span>
+                            <span>{error.message}</span>
+                          </li>
                         ))}
                         {validationErrors.length > 5 && (
-                          <li className="text-red-500">...and {validationErrors.length - 5} more</li>
+                          <li className="text-red-500 ml-4">...and {validationErrors.length - 5} more</li>
                         )}
                       </ul>
                     </div>
@@ -5948,7 +6723,7 @@ export default function HistoryDetailPage() {
                       </Button>
                       <Button
                         size="sm"
-                        onClick={() => handleApplyFreeform(generation.options.length === 1)}
+                        onClick={() => handleApplyFreeform(shouldCreateNew)}
                         className="bg-indigo-600 hover:bg-indigo-700 text-white"
                         disabled={floatingBlocks.length === 0 || !!conflictResolution}
                       >
@@ -6003,17 +6778,46 @@ export default function HistoryDetailPage() {
                           {validationErrors.length} issue{validationErrors.length !== 1 ? 's' : ''}
                         </span>
                       )}
+                      {/* Study Hall hide toggle - inline with status indicators */}
+                      {!conflictResolution && (
+                        <label className="border-l border-indigo-300 pl-3 ml-1 flex items-center gap-1.5 cursor-pointer group">
+                          <input
+                            type="checkbox"
+                            checked={studyHallsStripped}
+                            onChange={() => {
+                              if (studyHallsStripped) {
+                                handleRestoreStudyHalls()
+                              } else {
+                                handleStripStudyHalls()
+                              }
+                            }}
+                            className="rounded border-slate-300 text-indigo-600 focus:ring-indigo-500"
+                          />
+                          <span className={studyHallsStripped ? "text-indigo-700" : "text-indigo-600"}>
+                            Clear Study Halls
+                          </span>
+                          {studyHallsStripped ? (
+                            <span className="text-indigo-500 font-medium">({strippedStudyHalls.length} cleared)</span>
+                          ) : (
+                            <span className="text-slate-400 group-hover:text-slate-500">(easier editing)</span>
+                          )}
+                        </label>
+                      )}
                     </div>
-                    <span className="text-indigo-600/70">
-                      {generation.options.length === 1 ? "Will create Revision 2" : `Will update Revision ${viewingOption}`}
-                    </span>
+                    <button
+                      onClick={toggleCreateNew}
+                      className="text-indigo-600/70 hover:text-indigo-700 cursor-pointer select-none"
+                      title="Click to toggle"
+                    >
+                      {shouldCreateNew ? 'Save as new revision' : `Update Revision ${viewingOption}`}
+                    </button>
                   </div>
                   {/* Validation errors list - includes Fix buttons for auto-fixable conflicts */}
                   {validationErrors.length > 0 && !conflictResolution && (
                     <div className="mt-3 pt-3 border-t border-indigo-200">
                       <div className="flex items-center justify-between mb-1">
                         <div className={`text-xs font-medium ${conflictingBlockIds.length > 0 ? 'text-amber-600' : 'text-red-600'}`}>
-                          {conflictingBlockIds.length > 0 ? 'Conflicts:' : 'Validation Issues:'}
+                          {conflictingBlockIds.length > 0 ? 'Conflicts:' : 'Existing conflicts in schedule:'}
                         </div>
                         {conflictingBlockIds.length > 1 && (
                           <button
@@ -6042,6 +6846,7 @@ export default function HistoryDetailPage() {
                       </ul>
                     </div>
                   )}
+
                 </div>
               )}
 
@@ -6128,6 +6933,16 @@ export default function HistoryDetailPage() {
                       <Button
                         variant="outline"
                         size="sm"
+                        onClick={clearAllStudyHalls}
+                        className="text-amber-600 border-amber-300 hover:bg-amber-100"
+                        title="Remove all study halls (convert to OPEN)"
+                      >
+                        <Trash2 className="h-4 w-4 mr-1" />
+                        Clear All
+                      </Button>
+                      <Button
+                        variant="outline"
+                        size="sm"
                         onClick={exitStudyHallMode}
                         className="text-slate-600 border-slate-300 hover:bg-slate-100"
                       >
@@ -6136,7 +6951,7 @@ export default function HistoryDetailPage() {
                       </Button>
                       <Button
                         size="sm"
-                        onClick={() => handleKeepPreview(generation.options.length === 1)}
+                        onClick={() => handleKeepPreview(shouldCreateNew)}
                         className="bg-violet-600 hover:bg-violet-700 text-white"
                         disabled={!previewOption}
                       >
@@ -6147,59 +6962,42 @@ export default function HistoryDetailPage() {
                   </div>
                   <div className="flex items-center justify-between mt-2 text-xs">
                     <div className="flex items-center gap-4">
-                      {previewOption && (
-                        <div className="inline-flex rounded-md bg-white border border-slate-200 p-0.5">
-                          <button
-                            onClick={() => setShowingPreview(false)}
-                            className={`px-2 py-0.5 font-medium rounded transition-colors ${
-                              !showingPreview
-                                ? 'bg-slate-700 text-white'
-                                : 'text-slate-600 hover:text-slate-800'
-                            }`}
-                          >
-                            Original
-                          </button>
-                          <button
-                            onClick={() => setShowingPreview(true)}
-                            className={`px-2 py-0.5 font-medium rounded transition-colors ${
-                              showingPreview
-                                ? 'bg-violet-600 text-white'
-                                : 'text-slate-600 hover:text-slate-800'
-                            }`}
-                          >
-                            Preview
-                          </button>
-                        </div>
-                      )}
-                    </div>
-                    {previewOption && validationErrors.length > 0 && (
-                      <span className="text-amber-600 font-medium">
-                        {validationErrors.length} issue{validationErrors.length !== 1 ? 's' : ''}
-                      </span>
-                    )}
-                    {previewOption && (
-                      <span className="text-violet-600/70">
-                        {generation.options.length === 1 ? "Will create Revision 2" : `Will update Revision ${viewingOption}`}
-                      </span>
-                    )}
-                  </div>
-                  {/* Validation errors warning */}
-                  {previewOption && validationErrors.length > 0 && (
-                    <div className="mt-2 text-red-600 text-sm bg-red-50 border border-red-200 rounded px-3 py-2">
-                      <div className="flex items-center gap-2 font-medium mb-1">
-                        <AlertTriangle className="h-4 w-4 flex-shrink-0" />
-                        <span>Schedule conflicts detected:</span>
+                      <div className="inline-flex rounded-md bg-white border border-slate-200 p-0.5">
+                        <button
+                          onClick={() => setShowingPreview(false)}
+                          className={`px-2 py-0.5 font-medium rounded transition-colors ${
+                            !showingPreview
+                              ? 'bg-slate-700 text-white'
+                              : 'text-slate-600 hover:text-slate-800'
+                          }`}
+                        >
+                          Original
+                        </button>
+                        <button
+                          onClick={() => previewOption && setShowingPreview(true)}
+                          disabled={!previewOption}
+                          className={`px-2 py-0.5 font-medium rounded transition-colors ${
+                            showingPreview && previewOption
+                              ? 'bg-violet-600 text-white'
+                              : previewOption
+                                ? 'text-slate-600 hover:text-slate-800'
+                                : 'text-slate-400 cursor-not-allowed'
+                          }`}
+                        >
+                          Preview
+                        </button>
                       </div>
-                      <ul className="text-xs space-y-0.5 ml-6">
-                        {validationErrors.slice(0, 5).map((error, idx) => (
-                          <li key={idx}>• {error.message}</li>
-                        ))}
-                        {validationErrors.length > 5 && (
-                          <li className="text-red-500">...and {validationErrors.length - 5} more</li>
-                        )}
-                      </ul>
                     </div>
-                  )}
+                    <button
+                      onClick={toggleCreateNew}
+                      className="text-violet-600/70 hover:text-violet-700 cursor-pointer select-none"
+                      title="Click to toggle"
+                    >
+                      {shouldCreateNew ? 'Save as new revision' : `Update Revision ${viewingOption}`}
+                    </button>
+                  </div>
+                  {/* Note: No validation errors shown here - Study Hall mode only assigns to OPEN blocks,
+                      so it can't create or fix grade/subject conflicts */}
                 </div>
               )}
 
@@ -6499,7 +7297,7 @@ export default function HistoryDetailPage() {
                           </Button>
                           <Button
                             size="sm"
-                            onClick={() => handleKeepPreview(generation.options.length === 1)}
+                            onClick={() => handleKeepPreview(shouldCreateNew)}
                             className="bg-sky-600 hover:bg-sky-700 text-white"
                             disabled={!previewOption}
                           >
@@ -6545,83 +7343,68 @@ export default function HistoryDetailPage() {
                               clear selection
                             </button>
                           )}
-                          {!previewOption && (
-                            <label className="flex items-center gap-1.5 text-slate-500 cursor-pointer select-none group" title="When enabled, study halls can move to any eligible teacher (not just selected ones). This may help find a valid schedule when constraints are tight.">
-                              <input
-                                type="checkbox"
-                                checked={allowStudyHallReassignment}
-                                onChange={(e) => setAllowStudyHallReassignment(e.target.checked)}
-                                className="rounded border-slate-300 text-sky-600 focus:ring-sky-500"
-                              />
-                              <span>Reassign study halls to any teacher</span>
-                              <span className="text-slate-400 group-hover:text-slate-500">(may improve results)</span>
-                            </label>
-                          )}
-                        </div>
-                        {previewOption && validationErrors.length > 0 && (
-                          <span className="text-red-600 font-medium">
-                            {validationErrors.length} validation issue{validationErrors.length !== 1 ? 's' : ''}
-                          </span>
-                        )}
-                        {previewOption && (
-                          <span className="text-sky-600/70">
-                            {generation.options.length === 1 ? "Will create Revision 2" : `Will update Revision ${viewingOption}`}
-                          </span>
-                        )}
-                      </div>
-                      {/* Validation errors warning */}
-                      {previewOption && validationErrors.length > 0 && (
-                        <div className="mt-2 text-red-600 text-sm bg-red-50 border border-red-200 rounded px-3 py-2">
-                          <div className="flex items-center gap-2 font-medium mb-1">
-                            <AlertTriangle className="h-4 w-4 flex-shrink-0" />
-                            <span>Schedule conflicts detected:</span>
-                          </div>
-                          <ul className="text-xs space-y-0.5 ml-6">
-                            {validationErrors.slice(0, 5).map((error, idx) => (
-                              <li key={idx}>• {error.message}</li>
-                            ))}
-                            {validationErrors.length > 5 && (
-                              <li className="text-red-500">...and {validationErrors.length - 5} more</li>
-                            )}
-                          </ul>
-                        </div>
-                      )}
-                      {/* Warning for suboptimal results */}
-                      {previewOption && (() => {
-                        const expectedSH = previewOption.studyHallAssignments?.length || 0
-                        const placedSH = previewOption.studyHallsPlaced || 0
-                        const missingSH = expectedSH - placedSH
-                        const btbIssues = previewOption.backToBackIssues || 0
-                        const isSuboptimal = missingSH > 0 || previewStrategy === "suboptimal" || previewStrategy === "randomized" || previewStrategy === "js"
-
-                        if (!isSuboptimal) return null
-
-                        // Build the warning message
-                        const issues: string[] = []
-                        if (missingSH > 0) {
-                          issues.push(`only ${placedSH}/${expectedSH} study halls placed`)
-                        }
-                        if (btbIssues > 0) {
-                          issues.push(`${btbIssues} back-to-back issue${btbIssues !== 1 ? 's' : ''}`)
-                        }
-
-                        const strategyNote = previewStrategy === "js"
-                          ? "JS fallback"
-                          : previewStrategy === "suboptimal"
-                            ? "suboptimal mode"
-                            : previewStrategy === "randomized"
-                              ? "randomized mode"
-                              : null
-
-                        return (
-                          <div className="flex items-center gap-2 mt-2 text-amber-600 text-sm bg-amber-50 border border-amber-200 rounded px-3 py-1.5">
-                            <AlertTriangle className="h-4 w-4 flex-shrink-0" />
-                            <span>
-                              {issues.length > 0
-                                ? `Results: ${issues.join(', ')}${strategyNote ? ` (${strategyNote})` : ''}.`
-                                : `Used ${strategyNote} — results may not be optimal.`}
-                              {' '}Press Regenerate to try again.
+                          {/* Show "select affected" when there are conflicts and not all affected teachers are selected */}
+                          {!previewOption && validationErrors.length > 0 && (() => {
+                            const affected = getAffectedTeachersFromErrors(validationErrors)
+                            const allSelected = affected.size > 0 && Array.from(affected).every(t => selectedForRegen.has(t))
+                            if (affected.size === 0 || allSelected) return null
+                            return (
+                              <button
+                                onClick={selectAffectedTeachers}
+                                className="text-red-500 hover:text-red-700 hover:underline"
+                              >
+                                select affected ({affected.size})
+                              </button>
+                            )
+                          })()}
+                          <label className="border-l border-sky-300 pl-3 ml-1 flex items-center gap-1.5 cursor-pointer group" title="When enabled, study halls are not assigned during regeneration. You can reassign them manually after saving.">
+                            <input
+                              type="checkbox"
+                              checked={skipStudyHalls}
+                              onChange={(e) => setSkipStudyHalls(e.target.checked)}
+                              className="rounded border-slate-300 text-sky-600 focus:ring-sky-500"
+                            />
+                            <span className={skipStudyHalls ? "text-sky-700" : "text-sky-600"}>
+                              Skip Study Halls
                             </span>
+                            {skipStudyHalls ? (
+                              <span className="text-sky-500 font-medium">(reassign after)</span>
+                            ) : (
+                              <span className="text-slate-400 group-hover:text-slate-500">(faster results)</span>
+                            )}
+                          </label>
+                        </div>
+                        <button
+                          onClick={toggleCreateNew}
+                          className="text-sky-600/70 hover:text-sky-700 cursor-pointer select-none"
+                          title="Click to toggle"
+                        >
+                          {shouldCreateNew ? 'Save as new revision' : `Update Revision ${viewingOption}`}
+                        </button>
+                      </div>
+                      {/* Validation errors list */}
+                      {(() => {
+                        // Filter out study_hall_coverage errors when showing preview (already shown in amber warning)
+                        const displayErrors = previewOption
+                          ? validationErrors.filter(e => e.type !== 'study_hall_coverage')
+                          : validationErrors
+                        if (displayErrors.length === 0) return null
+                        return (
+                          <div className="mt-3 pt-3 border-t border-sky-200">
+                            <div className="text-xs font-medium text-red-600 mb-1">
+                              {previewOption ? 'Schedule conflicts:' : 'Existing conflicts in schedule:'}
+                            </div>
+                            <ul className="text-xs space-y-1 text-red-600">
+                              {displayErrors.slice(0, 5).map((error, idx) => (
+                                <li key={idx} className="flex items-center gap-2">
+                                  <span className="text-red-400">•</span>
+                                  <span>{error.message}</span>
+                                </li>
+                              ))}
+                              {displayErrors.length > 5 && (
+                                <li className="text-red-500 ml-4">...and {displayErrors.length - 5} more</li>
+                              )}
+                            </ul>
                           </div>
                         )
                       })()}
@@ -6659,11 +7442,32 @@ export default function HistoryDetailPage() {
                   </Button>
                 </div>
                 {/* Show message when in regen preview mode */}
-                {previewOption && previewType === "regen" && previewTeachers.size > 0 && viewMode === "teacher" && (
-                  <div className="col-span-full mb-4 text-sm text-sky-600 bg-sky-50 border border-sky-200 rounded-lg px-3 py-2">
-                    Comparing {previewTeachers.size} regenerated teacher{previewTeachers.size !== 1 ? 's' : ''}. Toggle between Original and Preview to compare.
-                  </div>
-                )}
+                {previewOption && previewType === "regen" && previewTeachers.size > 0 && viewMode === "teacher" && (() => {
+                  const btbIssues = previewOption.backToBackIssues || 0
+                  const strategyNote = previewStrategy === "js"
+                    ? "JS fallback"
+                    : previewStrategy === "suboptimal"
+                      ? "suboptimal"
+                      : previewStrategy === "randomized"
+                        ? "randomized"
+                        : null
+
+                  return (
+                    <div className="col-span-full mb-4 text-sm bg-sky-50 border border-sky-200 rounded-lg px-3 py-2 flex items-center justify-between">
+                      <span className="text-sky-600">
+                        Comparing {previewTeachers.size} regenerated teacher{previewTeachers.size !== 1 ? 's' : ''}. Toggle between Original and Preview to compare.
+                      </span>
+                      {(btbIssues > 0 || strategyNote) && (
+                        <span className="text-amber-600 flex items-center gap-1.5">
+                          <AlertTriangle className="h-3.5 w-3.5" />
+                          {btbIssues > 0 && `${btbIssues} back-to-back`}
+                          {btbIssues > 0 && strategyNote && ' · '}
+                          {strategyNote}
+                        </span>
+                      )}
+                    </div>
+                  )
+                })()}
                 <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 print-grid">
                   {viewMode === "teacher"
                     ? Object.entries(selectedResult.teacherSchedules)
@@ -6733,6 +7537,10 @@ export default function HistoryDetailPage() {
                                 showCheckbox={regenMode && !isGenerating}
                                 isSelected={selectedForRegen.has(teacher)}
                                 onToggleSelect={() => toggleTeacherSelection(teacher)}
+                                showExcludeCheckbox={studyHallMode}
+                                isExcluded={excludedFromStudyHalls.has(teacher)}
+                                isExclusionLocked={lockedExclusions.has(teacher)}
+                                onToggleExclude={() => toggleStudyHallExclusion(teacher)}
                                 swapMode={swapMode && showingPreview}
                                 selectedCell={selectedCell}
                                 validTargets={validTargets}
@@ -6749,6 +7557,7 @@ export default function HistoryDetailPage() {
                                   day: m.to.day,
                                   block: m.to.block
                                 })) || []}
+                                classesSnapshot={generation?.stats?.classes_snapshot}
                                 onPickUp={handlePickUpBlock}
                                 onPlace={handlePlaceBlock}
                                 onUnplace={handleUnplaceBlock}
@@ -6825,6 +7634,7 @@ export default function HistoryDetailPage() {
                             validTargets={validTargets}
                             highlightedCells={highlightedCells}
                             onCellClick={handleCellClick}
+                            classesSnapshot={generation?.stats?.classes_snapshot}
                           />
                         ))}
                 </div>
@@ -6942,7 +7752,7 @@ export default function HistoryDetailPage() {
               {validationModal?.mode === 'review' ? 'Schedule Validation' : 'Validating Schedule'}
             </DialogTitle>
             <DialogDescription>
-              {validationModal?.checks.every(c => c.status === 'passed' || c.status === 'failed')
+              {validationModal?.checks.every(c => c.status === 'passed' || c.status === 'failed' || c.status === 'skipped')
                 ? validationModal?.mode === 'review'
                   ? 'Validation complete. See results below.'
                   : 'Validation complete.'
@@ -6987,15 +7797,24 @@ export default function HistoryDetailPage() {
                       {check.status === 'failed' && (
                         <X className="h-4 w-4 text-red-500" />
                       )}
+                      {check.status === 'skipped' && (
+                        <Minus className="h-4 w-4 text-slate-400" />
+                      )}
                     </div>
                     <span className={`flex-1 text-sm ${
                       check.status === 'checking' ? 'text-blue-600 font-medium' :
                       check.status === 'passed' ? 'text-slate-600' :
                       check.status === 'failed' ? 'text-red-600 font-medium' :
+                      check.status === 'skipped' ? 'text-slate-400' :
                       'text-slate-400'
                     }`}>
                       {check.name}
                     </span>
+                    {check.status === 'skipped' && (
+                      <span className="text-xs px-1.5 py-0.5 rounded flex-shrink-0 bg-slate-100 text-slate-500">
+                        skipped
+                      </span>
+                    )}
                     {check.status === 'failed' && check.errorCount && check.errorCount > 0 && (
                       <span className={`text-xs px-1.5 py-0.5 rounded flex-shrink-0 ${
                         check.name === 'Back-to-back blocks'
@@ -7024,7 +7843,7 @@ export default function HistoryDetailPage() {
             })}
           </div>
           {/* Footer - shown when checks complete */}
-          {validationModal?.checks.every(c => c.status === 'passed' || c.status === 'failed') && (
+          {validationModal?.checks.every(c => c.status === 'passed' || c.status === 'failed' || c.status === 'skipped') && (
             <DialogFooter className="flex-col sm:flex-col gap-2 pt-2 border-t">
               {/* Summary message */}
               {(() => {
@@ -7131,6 +7950,95 @@ export default function HistoryDetailPage() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      {/* Floating Grade Schedule Preview - shows when a floating block is selected in freeform mode */}
+      {freeformMode && selectedFloatingBlock && !conflictResolution && selectedResult && (() => {
+        const selectedBlock = floatingBlocks.find(b => b.id === selectedFloatingBlock)
+        if (!selectedBlock || !workingSchedules) return null
+
+        const gradeSchedule = workingSchedules.gradeSchedules[selectedBlock.grade]
+        if (!gradeSchedule) return null
+
+        // Get sorted teacher list to determine position
+        const sortedTeachers = Object.keys(selectedResult.teacherSchedules).sort((a, b) => {
+          const statusA = selectedResult.teacherStats.find(s => s.teacher === a)?.status || ''
+          const statusB = selectedResult.teacherStats.find(s => s.teacher === b)?.status || ''
+          if (statusA !== statusB) return statusA === 'full-time' ? -1 : 1
+          return a.localeCompare(b)
+        })
+        const teacherIndex = sortedTeachers.indexOf(selectedBlock.sourceTeacher)
+        // Even index = left column, odd index = right column (in 2-col grid)
+        // Put panel on opposite side
+        const panelOnRight = teacherIndex % 2 === 0
+
+        const DAYS = ['Mon', 'Tues', 'Wed', 'Thurs', 'Fri']
+
+        return (
+          <div className={`fixed top-1/2 -translate-y-1/2 z-50 bg-white border border-indigo-200 rounded-lg shadow-lg p-3 w-80 overflow-hidden no-print ${panelOnRight ? 'right-4' : 'left-4'}`}>
+            <div className="text-sm font-medium text-indigo-700 mb-2">
+              {formatGradeDisplayCompact(selectedBlock.grade)} Schedule
+              <span className="font-normal text-indigo-500 ml-1">— place {selectedBlock.subject}</span>
+            </div>
+            <div className="grid gap-1 text-[10px]" style={{ gridTemplateColumns: 'auto repeat(5, 1fr)' }}>
+              {/* Header row */}
+              <div className="pb-1"></div>
+              {DAYS.map(day => (
+                <div key={day} className="text-center font-medium text-slate-600 pb-1 border-b">
+                  {day}
+                </div>
+              ))}
+              {/* Schedule grid - 5 blocks x 5 days */}
+              {[1, 2, 3, 4, 5].map(block => (
+                <Fragment key={block}>
+                  <div className="text-center font-medium text-slate-600 flex items-center justify-center pr-1">
+                    B{block}
+                  </div>
+                  {DAYS.map(day => {
+                    const entry = gradeSchedule[day]?.[block]
+                    const isOpen = !entry || entry[1] === 'OPEN'
+                    const isSH = entry && isStudyHall(entry[1])
+                    const teacher = entry?.[0] || ''
+                    const subject = entry?.[1] || ''
+
+                    return (
+                      <div
+                        key={`${day}-${block}`}
+                        className={`px-1 py-1 rounded text-center overflow-hidden ${
+                          isOpen
+                            ? 'bg-emerald-100 text-emerald-700 font-medium border border-emerald-300'
+                            : isSH
+                              ? 'bg-blue-50 text-blue-600 border border-blue-200'
+                              : 'bg-slate-50 text-slate-600 border border-slate-200'
+                        }`}
+                        title={isOpen ? `OPEN - ${day} B${block}` : `${teacher}: ${subject}`}
+                      >
+                        {isOpen ? (
+                          <div className="font-semibold">OPEN</div>
+                        ) : (
+                          <>
+                            <div className="truncate text-[9px]">{subject}</div>
+                            <div className="text-[8px] text-slate-400 truncate">{teacher}</div>
+                          </>
+                        )}
+                      </div>
+                    )
+                  })}
+                </Fragment>
+              ))}
+            </div>
+            <div className="text-[10px] text-slate-500 mt-2 flex items-center gap-2">
+              <span className="flex items-center gap-1">
+                <span className="inline-block w-3 h-3 bg-emerald-100 border border-emerald-300 rounded" />
+                OPEN
+              </span>
+              <span className="flex items-center gap-1">
+                <span className="inline-block w-3 h-3 bg-blue-50 border border-blue-200 rounded" />
+                Study Hall
+              </span>
+            </div>
+          </div>
+        )
+      })()}
 
     </div>
   )

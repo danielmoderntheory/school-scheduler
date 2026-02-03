@@ -16,6 +16,7 @@ import {
 import { ChevronDown, ChevronUp, Loader2, Plus, X, Clock, Users, Upload, Download, Check, History, Star } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { GradeSelector, formatGradeDisplay } from "@/components/GradeSelector"
+import { TEACHER_STATUS_FULL_TIME, isPartTime, type TeacherStatus } from "@/lib/schedule-utils"
 import toast from "react-hot-toast"
 
 interface LastRun {
@@ -31,7 +32,7 @@ interface LastRun {
 interface Teacher {
   id: string
   name: string
-  status: "full-time" | "part-time"
+  status: TeacherStatus
 }
 
 interface Grade {
@@ -471,7 +472,7 @@ export default function ClassesPage() {
       const res = await fetch("/api/teachers", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name, status: "full-time" }),
+        body: JSON.stringify({ name, status: TEACHER_STATUS_FULL_TIME }),
       })
       if (res.ok) {
         const teacher = await res.json()
@@ -1894,7 +1895,7 @@ function ClassRow({
           options={teachers.map((t) => ({
             id: t.id,
             label: t.name,
-            tag: t.status === "part-time" ? "PT" : undefined
+            tag: isPartTime(t.status) ? "PT" : undefined
           }))}
           onChange={(id) => onUpdate(cls.id, "teacher_id", id)}
           onCreateNew={async (name) => {
@@ -2017,7 +2018,7 @@ function NewClassRow({
           options={teachers.map((t) => ({
             id: t.id,
             label: t.name,
-            tag: t.status === "part-time" ? "PT" : undefined
+            tag: isPartTime(t.status) ? "PT" : undefined
           }))}
           onChange={(id) => {
             setData((d) => ({ ...d, teacher_id: id }))

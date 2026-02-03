@@ -1,6 +1,7 @@
 import XLSX from "xlsx-js-style"
 import type { ScheduleOption, TeacherSchedule, GradeSchedule } from "./types"
 import { BLOCK_TYPE_OPEN, BLOCK_TYPE_STUDY_HALL, isOpenBlock, isStudyHall, isScheduledClass } from "./schedule-utils"
+import { formatGradeDisplayCompact } from "./grade-utils"
 
 const DAYS = ["Mon", "Tues", "Wed", "Thurs", "Fri"]
 const BLOCKS = [1, 2, 3, 4, 5]
@@ -118,13 +119,15 @@ function formatCell(entry: [string, string] | null | undefined): string {
   if (!entry) return ""
   // OPEN blocks have no grade info
   if (isOpenBlock(entry[1])) return BLOCK_TYPE_OPEN
+  // Format grade compactly (e.g., "6th-11th" instead of "6th, 7th, 8th...")
+  const grade = entry[0] ? formatGradeDisplayCompact(entry[0]) : ""
   // Study Hall should show the grade
   if (isStudyHall(entry[1])) {
-    return entry[0] ? `${entry[0]} - ${BLOCK_TYPE_STUDY_HALL}` : BLOCK_TYPE_STUDY_HALL
+    return grade ? `${grade} - ${BLOCK_TYPE_STUDY_HALL}` : BLOCK_TYPE_STUDY_HALL
   }
   // If first part is empty, just show subject
-  if (!entry[0]) return entry[1]
-  return `${entry[0]} - ${entry[1]}`
+  if (!grade) return entry[1]
+  return `${grade} - ${entry[1]}`
 }
 
 // Format grade schedule cell - handles array format [[teacher, subject], ...]

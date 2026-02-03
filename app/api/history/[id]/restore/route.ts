@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server"
 import { supabase } from "@/lib/supabase"
+import { TEACHER_STATUS_FULL_TIME } from "@/lib/schedule-utils"
 
 interface ClassSnapshot {
   teacher_id: string
@@ -119,7 +120,7 @@ export async function POST(
         // Create teacher
         const { data: newTeacher, error } = await supabase
           .from("teachers")
-          .insert({ name: cls.teacher_name, status: "full-time" })
+          .insert({ name: cls.teacher_name, status: TEACHER_STATUS_FULL_TIME })
           .select()
           .single()
 

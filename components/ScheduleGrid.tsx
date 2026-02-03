@@ -3,9 +3,10 @@
 import { cn } from "@/lib/utils"
 import { Badge } from "@/components/ui/badge"
 import { Checkbox } from "@/components/ui/checkbox"
-import { RefreshCw, AlertTriangle, Check } from "lucide-react"
+import { RefreshCw, AlertTriangle, Check, Ban } from "lucide-react"
 import type { TeacherSchedule, GradeSchedule, FloatingBlock, PendingPlacement, ValidationError, CellLocation } from "@/lib/types"
-import { BLOCK_TYPE_OPEN, isOpenBlock, isStudyHall, isScheduledClass } from "@/lib/schedule-utils"
+import { BLOCK_TYPE_OPEN, isOpenBlock, isStudyHall, isScheduledClass, isFullTime } from "@/lib/schedule-utils"
+import { formatGradeDisplayCompact, isClassElective, isClassCotaught, type ClassSnapshotEntry } from "@/lib/grade-utils"
 
 const DAYS = ["Mon", "Tues", "Wed", "Thurs", "Fri"]
 const BLOCKS = [1, 2, 3, 4, 5]
@@ -19,10 +20,15 @@ interface ScheduleGridProps {
   status?: string
   // Change indicator: 'pending' = changes will be applied, 'applied' = changes have been applied in preview
   changeStatus?: 'pending' | 'applied'
-  // Selection mode props
+  // Selection mode props (regen mode)
   showCheckbox?: boolean
   isSelected?: boolean
   onToggleSelect?: () => void
+  // Exclude mode props (study hall mode)
+  showExcludeCheckbox?: boolean
+  isExcluded?: boolean
+  isExclusionLocked?: boolean // Can't be un-excluded (ineligible by rule)
+  onToggleExclude?: () => void
   // Swap mode props
   swapMode?: boolean
   selectedCell?: CellLocation | null
@@ -37,6 +43,7 @@ interface ScheduleGridProps {
   validationErrors?: ValidationError[]
   autoFixedBlockIds?: string[]  // Our placements that have conflicts (amber)
   movedBlockerCells?: Array<{ teacher: string; day: string; block: number }>  // Cells where blockers were moved to (cyan)
+  classesSnapshot?: ClassSnapshotEntry[]  // For elective detection
   onPickUp?: (location: CellLocation) => void
   onPlace?: (location: CellLocation) => void
   onUnplace?: (blockId: string) => void
@@ -52,6 +59,10 @@ export function ScheduleGrid({
   showCheckbox,
   isSelected,
   onToggleSelect,
+  showExcludeCheckbox,
+  isExcluded,
+  isExclusionLocked,
+  onToggleExclude,
   swapMode,
   selectedCell,
   validTargets = [],
@@ -64,6 +75,7 @@ export function ScheduleGrid({
   validationErrors = [],
   autoFixedBlockIds = [],
   movedBlockerCells = [],
+  classesSnapshot,
   onPickUp,
   onPlace,
   onUnplace,
@@ -362,7 +374,7 @@ export function ScheduleGrid({
               variant="outline"
               className={cn(
                 "text-xs",
-                status === "full-time"
+                isFullTime(status)
                   ? "border-sky-400 text-sky-700 bg-sky-50"
                   : "border-slate-300 text-slate-500"
               )}
@@ -379,6 +391,24 @@ export function ScheduleGrid({
               checked={isSelected}
               onCheckedChange={onToggleSelect}
               className="data-[state=checked]:bg-sky-600 data-[state=checked]:border-sky-600"
+            />
+          </label>
+        )}
+        {showExcludeCheckbox && type === "teacher" && (
+          <label
+            className={cn(
+              "flex items-center gap-1.5 no-print",
+              isExclusionLocked ? "cursor-not-allowed opacity-60" : "cursor-pointer"
+            )}
+            title={isExclusionLocked ? "Ineligible for study hall supervision (by rule or teacher setting)" : undefined}
+          >
+            <Ban className={cn("h-3 w-3", isExcluded ? "text-violet-600" : "text-muted-foreground")} />
+            <span className={cn("text-xs", isExcluded ? "text-violet-600" : "text-muted-foreground")}>Exclude</span>
+            <Checkbox
+              checked={isExcluded}
+              onCheckedChange={isExclusionLocked ? undefined : onToggleExclude}
+              disabled={isExclusionLocked}
+              className="data-[state=checked]:bg-violet-600 data-[state=checked]:border-violet-600"
             />
           </label>
         )}
@@ -433,42 +463,66 @@ export function ScheduleGrid({
                     )}
                     title={error ? error.message : undefined}
                   >
-                    {placement ? (
-                      // Show the placed block's content
-                      <div className="max-w-full overflow-hidden">
-                        <div className="font-medium text-xs leading-tight truncate" title={displayPrimary}>
-                          {displayPrimary.replace(' Grade', '').replace('Kindergarten', 'K')}
-                        </div>
-                        <div className="text-[10px] leading-tight text-muted-foreground truncate" title={displaySecondary}>
-                          {displaySecondary}
-                        </div>
-                      </div>
-                    ) : pickedUp ? (
-                      <div className="text-[10px] text-indigo-400 italic">
-                        moved
-                      </div>
-                    ) : isOpenBlock(displaySecondary) ? (
-                      // OPEN cells just show "OPEN" without grade
-                      <span className="text-xs text-muted-foreground">{BLOCK_TYPE_OPEN}</span>
-                    ) : isMultiple ? (
-                      // Multiple entries (electives) - show just "Elective" or "Multiple"
-                      <div className="max-w-full overflow-hidden">
-                        <div className="font-medium text-xs leading-tight text-purple-700">
-                          {displaySecondary}
-                        </div>
-                      </div>
-                    ) : hasContent ? (
-                      <div className="max-w-full overflow-hidden">
-                        <div className="font-medium text-xs leading-tight truncate" title={type === "teacher" ? displayPrimary : displaySecondary}>
-                          {type === "teacher" ? displayPrimary.replace(' Grade', '').replace('Kindergarten', 'K') : displaySecondary}
-                        </div>
-                        <div className="text-[10px] leading-tight text-muted-foreground truncate" title={type === "teacher" ? displaySecondary : displayPrimary}>
-                          {type === "teacher" ? displaySecondary : displayPrimary}
-                        </div>
-                      </div>
-                    ) : (
-                      <span className="text-xs text-muted-foreground">-</span>
-                    )}
+                    {(() => {
+                      // Check if this class is an elective or co-taught
+                      // Teacher view: name=teacher, displayPrimary=grade, displaySecondary=subject
+                      // Grade view: name=grade, displayPrimary=teacher, displaySecondary=subject
+                      const teacherName = type === "teacher" ? name : displayPrimary
+                      const subjectName = displaySecondary
+                      const isRegularClass = isScheduledClass(subjectName) && !isStudyHall(subjectName)
+                      const isElective = isRegularClass && isClassElective(teacherName, subjectName, classesSnapshot)
+                      const isCotaught = isRegularClass && isClassCotaught(teacherName, subjectName, classesSnapshot)
+
+                      if (placement) {
+                        // Show the placed block's content
+                        return (
+                          <div className="max-w-full overflow-hidden">
+                            <div className="font-medium text-xs leading-tight truncate" title={displayPrimary}>
+                              {formatGradeDisplayCompact(displayPrimary)}
+                            </div>
+                            <div className="text-[10px] leading-tight text-muted-foreground truncate" title={displaySecondary}>
+                              {displaySecondary}
+                            </div>
+                          </div>
+                        )
+                      }
+                      if (pickedUp) {
+                        return (
+                          <div className="text-[10px] text-indigo-400 italic">
+                            moved
+                          </div>
+                        )
+                      }
+                      if (isOpenBlock(displaySecondary)) {
+                        // OPEN cells just show "OPEN" without grade
+                        return <span className="text-xs text-muted-foreground">{BLOCK_TYPE_OPEN}</span>
+                      }
+                      if (isMultiple) {
+                        // Multiple entries (electives) - show just "Elective" or "Multiple"
+                        return (
+                          <div className="max-w-full overflow-hidden">
+                            <div className="font-medium text-xs leading-tight text-purple-700">
+                              {displaySecondary}
+                            </div>
+                          </div>
+                        )
+                      }
+                      if (hasContent) {
+                        return (
+                          <div className="max-w-full overflow-hidden">
+                            <div className="font-medium text-xs leading-tight truncate flex items-center justify-center" title={type === "teacher" ? displayPrimary : displaySecondary}>
+                              <span className="truncate">{type === "teacher" ? formatGradeDisplayCompact(displayPrimary) : displaySecondary}</span>
+                              {isElective && <span className="text-purple-500 ml-1 text-[10px] flex-shrink-0">EL</span>}
+                            </div>
+                            <div className="text-[10px] leading-tight text-muted-foreground truncate flex items-center justify-center" title={type === "teacher" ? displaySecondary : displayPrimary}>
+                              <span className="truncate">{type === "teacher" ? displaySecondary : displayPrimary}</span>
+                              {isCotaught && <span className="text-teal-500 ml-1 flex-shrink-0">CO</span>}
+                            </div>
+                          </div>
+                        )
+                      }
+                      return <span className="text-xs text-muted-foreground">-</span>
+                    })()}
                   </td>
                 )
               })}

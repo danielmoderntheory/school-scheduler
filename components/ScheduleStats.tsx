@@ -18,8 +18,13 @@ import {
 } from "@/components/ui/tooltip"
 import { Info, AlertTriangle, ChevronDown, ChevronRight } from "lucide-react"
 import type { TeacherStat, StudyHallAssignment, GradeSchedule, TeacherSchedule } from "@/lib/types"
+import { isOccupiedBlock, isFullTime } from "@/lib/schedule-utils"
 import { parseGradeDisplayToNames } from "@/lib/grade-utils"
-import { isOccupiedBlock } from "@/lib/schedule-utils"
+
+interface ValidationIssue {
+  type: 'grade_conflict' | 'subject_conflict' | 'other'
+  message: string
+}
 
 interface ScheduleStatsProps {
   stats: TeacherStat[]
@@ -31,6 +36,7 @@ interface ScheduleStatsProps {
   unscheduledClasses?: number
   totalClasses?: number
   defaultExpanded?: boolean
+  validationIssues?: ValidationIssue[]  // Grade conflicts, subject conflicts, etc.
 }
 
 function InfoTooltip({ text }: { text: string }) {
@@ -56,6 +62,7 @@ export function ScheduleStats({
   unscheduledClasses = 0,
   totalClasses = 0,
   defaultExpanded = true,
+  validationIssues = [],
 }: ScheduleStatsProps) {
   const [expanded, setExpanded] = useState(defaultExpanded)
 
@@ -230,17 +237,7 @@ export function ScheduleStats({
     return aNum - bNum
   })
 
-  if (gradesWithGaps.length > 0) {
-    const totalMissingSlots = gradesWithGaps.reduce((sum, g) => sum + g.missingSlots.length, 0)
-    const gradeList = sortedGradesWithGaps.map(g => {
-      const shortName = g.grade.replace(' Grade', '').replace('Kindergarten', 'K')
-      return `${shortName} (${g.missingSlots.length})`
-    }).join(', ')
-    issues.push({
-      type: 'warning',
-      message: `${totalMissingSlots} empty slot${totalMissingSlots !== 1 ? 's' : ''} across ${gradesWithGaps.length} grade${gradesWithGaps.length !== 1 ? 's' : ''}: ${gradeList}. Click "Grades Full" for details.`
-    })
-  }
+  // Note: Grade gaps now shown in separate section, not in suggestions
 
   if (unplacedStudyHalls.length > 0) {
     const groups = unplacedStudyHalls.map(sh => sh.group).join(', ')
@@ -276,12 +273,44 @@ export function ScheduleStats({
     })
   }
 
+  // Add validation issues (grade conflicts, subject conflicts, etc.)
+  // These are hard errors that need to be fixed
+  const gradeConflicts = validationIssues.filter(i => i.type === 'grade_conflict')
+  const subjectConflicts = validationIssues.filter(i => i.type === 'subject_conflict')
+  const otherIssues = validationIssues.filter(i => i.type === 'other')
+
+  if (gradeConflicts.length > 0) {
+    issues.unshift({
+      type: 'warning',
+      message: `⚠️ ${gradeConflicts.length} grade conflict${gradeConflicts.length !== 1 ? 's' : ''} - some grades have multiple classes at the same time. Use Freeform or Regen to fix.`
+    })
+  }
+
+  if (subjectConflicts.length > 0) {
+    issues.unshift({
+      type: 'warning',
+      message: `⚠️ ${subjectConflicts.length} subject conflict${subjectConflicts.length !== 1 ? 's' : ''} - same subject appears twice on same day for some grades.`
+    })
+  }
+
+  for (const issue of otherIssues) {
+    issues.unshift({
+      type: 'warning',
+      message: `⚠️ ${issue.message}`
+    })
+  }
+
   // Compact stat item for collapsed view
   const totalStudyHallsExpected = studyHallAssignments.length
   const blocksStatus = totalBlocksAvailable > 0 && totalBlocksScheduled < totalBlocksAvailable ? 'warning' : 'ok'
   const gradesStatus = totalGrades > 0 && gradesFullCount < totalGrades ? 'warning' : 'ok'
   const studyHallStatus = studyHallsPlaced < totalStudyHallsExpected ? 'warning' : 'ok'
-  const hasIssues = unscheduledClasses > 0 || blocksStatus === 'warning' || gradesStatus === 'warning' || studyHallStatus === 'warning'
+  const hasValidationErrors = validationIssues.length > 0
+  const hasIssues = unscheduledClasses > 0 || blocksStatus === 'warning' || gradesStatus === 'warning' || studyHallStatus === 'warning' || hasValidationErrors
+
+  // Separate counts for display: validation errors (hard) vs notes (soft/info)
+  const validationErrorCount = validationIssues.length
+  const noteCount = issues.length - validationErrorCount  // issues includes validation errors now
 
   return (
     <TooltipProvider>
@@ -302,20 +331,29 @@ export function ScheduleStats({
               {/* Show inline stats when collapsed OR when printing */}
               <span className={`contents ${expanded ? 'hidden print:contents' : ''}`}>
                 <span className="text-slate-300 ml-2">—</span>
-                <span className={`font-normal text-slate-500 ${blocksStatus === 'warning' ? 'text-amber-600 font-medium' : ''}`}>
+                <span className={`font-normal text-slate-500 flex items-center gap-1.5 ${blocksStatus === 'warning' ? 'text-amber-600 font-medium' : ''}`}>
+                  <span className={`w-1.5 h-1.5 rounded-sm ${blocksStatus === 'warning' ? 'bg-amber-400' : 'bg-emerald-500'}`} />
                   {totalBlocksScheduled}/{totalBlocksAvailable} Blocks
                 </span>
                 <span className="text-slate-300">|</span>
-                <span className={`font-normal text-slate-500 ${gradesStatus === 'warning' ? 'text-amber-600 font-medium' : ''}`}>
+                <span className={`font-normal text-slate-500 flex items-center gap-1.5 ${gradesStatus === 'warning' ? 'text-amber-600 font-medium' : ''}`}>
+                  <span className={`w-1.5 h-1.5 rounded-sm ${gradesStatus === 'warning' ? 'bg-amber-400' : 'bg-emerald-500'}`} />
                   {gradesFullCount}/{totalGrades} Grades Full
                 </span>
                 <span className="text-slate-300">|</span>
-                <span className={`font-normal text-slate-500 ${studyHallStatus === 'warning' ? 'text-amber-600 font-medium' : ''}`}>
+                <span className={`font-normal text-slate-500 flex items-center gap-1.5 ${studyHallStatus === 'warning' ? 'text-amber-600 font-medium' : ''}`}>
+                  <span className={`w-1.5 h-1.5 rounded-sm ${studyHallStatus === 'warning' ? 'bg-amber-400' : 'bg-emerald-500'}`} />
                   {studyHallsPlaced}/{totalStudyHallsExpected} Study Halls
                 </span>
-                {issues.length > 0 && (
-                  <span className="text-xs font-normal text-amber-600 ml-1">
-                    ({issues.length} note{issues.length !== 1 ? 's' : ''})
+                {/* Show validation errors (red) separately from notes (grey) */}
+                {validationErrorCount > 0 && (
+                  <span className="text-xs font-medium text-red-600 ml-1">
+                    ({validationErrorCount} conflict{validationErrorCount !== 1 ? 's' : ''})
+                  </span>
+                )}
+                {noteCount > 0 && (
+                  <span className="text-xs font-normal text-slate-400 ml-1">
+                    ({noteCount} suggestion{noteCount !== 1 ? 's' : ''})
                   </span>
                 )}
               </span>
@@ -375,8 +413,8 @@ export function ScheduleStats({
 
           {/* Study Halls */}
           <div
-            className={`border rounded-lg p-3 md:flex-1 md:min-w-0 ${studyHallsPlaced < totalStudyHallsExpected ? 'border-amber-200 bg-amber-50' : 'border-emerald-200 bg-emerald-50'} ${studyHallsPlaced < totalStudyHallsExpected ? 'cursor-pointer hover:border-amber-300' : ''}`}
-            onClick={studyHallsPlaced < totalStudyHallsExpected ? () => scrollToSection('study-hall-section') : undefined}
+            className={`border rounded-lg p-3 md:flex-1 md:min-w-0 cursor-pointer ${studyHallsPlaced < totalStudyHallsExpected ? 'border-amber-200 bg-amber-50 hover:border-amber-300' : 'border-emerald-200 bg-emerald-50 hover:border-emerald-300'}`}
+            onClick={() => scrollToSection('study-hall-section')}
           >
             <div className="text-sm text-slate-600">
               Study Halls
@@ -393,9 +431,9 @@ export function ScheduleStats({
                 </Badge>
               )}
             </div>
-            {studyHallsPlaced < totalStudyHallsExpected && (
-              <div className="text-xs text-amber-600 mt-1 no-print">Click for details</div>
-            )}
+            <div className={`text-xs mt-1 no-print ${studyHallsPlaced < totalStudyHallsExpected ? 'text-amber-600' : 'text-slate-500'}`}>
+              Click to see study halls
+            </div>
           </div>
 
           {/* Back-to-Back Open */}
@@ -440,16 +478,61 @@ export function ScheduleStats({
         </div>
           )}
 
-          {/* Notes - Only show if there are issues and expanded, hidden on print */}
-          {issues.length > 0 && expanded && (
-            <div className="border border-amber-200 rounded-lg bg-amber-50/50 p-3 mx-3 mb-3 no-print">
-              <h4 className="text-sm font-medium text-amber-800 mb-2 flex items-center gap-2">
+          {/* Conflicts Section - Urgent issues that need fixing */}
+          {validationIssues.length > 0 && expanded && (
+            <div className="border border-red-200 rounded-lg bg-red-50/50 p-3 mx-3 mb-3 no-print">
+              <h4 className="text-sm font-medium text-red-800 mb-2 flex items-center gap-2">
                 <AlertTriangle className="h-4 w-4" />
-                Notes
+                Conflicts ({validationIssues.length})
               </h4>
               <ul className="space-y-1">
-                {issues.map((issue, i) => (
-                  <li key={i} className={`text-sm ${issue.type === 'warning' ? 'text-amber-800' : 'text-amber-700'}`}>
+                {gradeConflicts.length > 0 && (
+                  <li className="text-sm text-red-700">
+                    • <span className="font-medium">{gradeConflicts.length} grade conflict{gradeConflicts.length !== 1 ? 's'  : ''}</span> — some grades have multiple classes at the same time
+                  </li>
+                )}
+                {subjectConflicts.length > 0 && (
+                  <li className="text-sm text-red-700">
+                    • <span className="font-medium">{subjectConflicts.length} subject conflict{subjectConflicts.length !== 1 ? 's' : ''}</span> — same subject appears twice on same day
+                  </li>
+                )}
+                {otherIssues.length > 0 && otherIssues.map((issue, i) => (
+                  <li key={i} className="text-sm text-red-700">• {issue.message}</li>
+                ))}
+              </ul>
+              <p className="text-xs text-red-600 mt-2">
+                Use <span className="font-medium">Freeform</span> or <span className="font-medium">Regen</span> mode to fix these issues.
+              </p>
+            </div>
+          )}
+
+          {/* Grade Gaps Section - Shows which grades have empty slots */}
+          {sortedGradesWithGaps.length > 0 && expanded && (
+            <div id="grade-gaps-section" className="border border-amber-200 rounded-lg bg-amber-50/50 p-3 mx-3 mb-3 no-print">
+              <h4 className="text-sm font-medium text-amber-800 mb-2 flex items-center gap-2">
+                <AlertTriangle className="h-4 w-4" />
+                Grade Gaps ({sortedGradesWithGaps.reduce((sum, g) => sum + g.missingSlots.length, 0)} empty slot{sortedGradesWithGaps.reduce((sum, g) => sum + g.missingSlots.length, 0) !== 1 ? 's' : ''})
+              </h4>
+              <ul className="space-y-1">
+                {sortedGradesWithGaps.map((g) => (
+                  <li key={g.grade} className="text-sm text-amber-700">
+                    • <span className="font-medium">{g.grade}</span> — {g.missingSlots.map(s => `${s.day} B${s.block}`).join(', ')}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+
+          {/* Suggestions Section - Informational, not urgent */}
+          {noteCount > 0 && expanded && (
+            <div className="border border-slate-200 rounded-lg bg-slate-50 p-3 mx-3 mb-3 no-print">
+              <h4 className="text-sm font-medium text-slate-600 mb-2 flex items-center gap-2">
+                <Info className="h-4 w-4" />
+                Suggestions ({noteCount})
+              </h4>
+              <ul className="space-y-1">
+                {issues.filter(i => !i.message.startsWith('⚠️')).map((issue, i) => (
+                  <li key={i} className="text-sm text-slate-600">
                     • {issue.message}
                   </li>
                 ))}
@@ -469,35 +552,6 @@ export function ScheduleStats({
           </summary>
 
           <div className="mt-3 space-y-4">
-            {/* Grade Gaps - Show which grades have empty slots */}
-            {sortedGradesWithGaps.length > 0 && (
-              <div id="grade-gaps-section">
-                <h3 className="font-semibold mb-2 text-xs text-slate-500 uppercase tracking-wide">Grade Gaps</h3>
-                <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-2">
-                  {sortedGradesWithGaps.map((g) => (
-                    <div
-                      key={g.grade}
-                      className="border border-amber-200 rounded px-2 py-1.5 bg-amber-50"
-                    >
-                      <div className="font-medium text-xs text-amber-900">
-                        {g.grade.replace(' Grade', '')}
-                        <span className="font-normal text-amber-700 ml-1">
-                          ({g.filledCount}/25)
-                        </span>
-                      </div>
-                      <div className="text-[10px] text-amber-700 mt-0.5">
-                        Missing: {g.missingSlots.slice(0, 5).map(s => `${s.day.slice(0,3)} B${s.block}`).join(', ')}
-                        {g.missingSlots.length > 5 && ` +${g.missingSlots.length - 5} more`}
-                      </div>
-                    </div>
-                  ))}
-                </div>
-                <p className="text-xs text-amber-700 mt-2">
-                  Use Freeform mode to manually place classes in empty slots, or Regen mode to regenerate the schedule.
-                </p>
-              </div>
-            )}
-
             {/* Study Hall Assignments - Compact inline list */}
             <div id="study-hall-section">
               <h3 className="font-semibold mb-2 text-xs text-slate-500 uppercase tracking-wide">Study Hall Assignments</h3>
@@ -543,7 +597,7 @@ export function ScheduleStats({
                         <TableCell className="font-medium py-1.5 px-2">{stat.teacher}</TableCell>
                         <TableCell className="py-1.5 px-2">
                           <span className={`text-[10px] px-1.5 py-0.5 rounded ${
-                            stat.status === "full-time"
+                            isFullTime(stat.status)
                               ? "bg-sky-100 text-sky-700"
                               : "bg-slate-100 text-slate-600"
                           }`}>

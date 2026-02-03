@@ -32,11 +32,12 @@ import {
 } from "@/components/ui/alert-dialog"
 import { Trash2, Loader2 } from "lucide-react"
 import toast from "react-hot-toast"
+import { TEACHER_STATUS_FULL_TIME, TEACHER_STATUS_PART_TIME, type TeacherStatus } from "@/lib/schedule-utils"
 
 interface Teacher {
   id: string
   name: string
-  status: "full-time" | "part-time"
+  status: TeacherStatus
   can_supervise_study_hall: boolean
   notes: string | null
 }
@@ -177,8 +178,8 @@ export default function TeachersPage() {
                       <SelectValue />
                     </SelectTrigger>
                     <SelectContent>
-                      <SelectItem value="full-time">Full-time</SelectItem>
-                      <SelectItem value="part-time">Part-time</SelectItem>
+                      <SelectItem value={TEACHER_STATUS_FULL_TIME}>Full-time</SelectItem>
+                      <SelectItem value={TEACHER_STATUS_PART_TIME}>Part-time</SelectItem>
                     </SelectContent>
                   </Select>
                 </TableCell>

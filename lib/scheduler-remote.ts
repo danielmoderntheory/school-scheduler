@@ -26,7 +26,7 @@ export interface RemoteGeneratorOptions {
   startSeed?: number; // Starting seed for solver randomization (increment for variety on re-runs)
   skipTopSolutions?: number; // Skip the top N solutions and return next best (for variety)
   randomizeScoring?: boolean; // Add noise to scoring for variety (picks suboptimal but valid solutions)
-  allowStudyHallReassignment?: boolean; // If true, reassign all study halls; if false, preserve locked teacher study halls
+  skipStudyHalls?: boolean; // If true, skip study hall assignment during regen (reassign after saving)
   grades?: string[]; // All grade names from database - used for grade schedule initialization
 }
 
@@ -112,7 +112,7 @@ export async function generateSchedulesRemote(
     startSeed = 0,
     skipTopSolutions = 0,
     randomizeScoring = false,
-    allowStudyHallReassignment = false,
+    skipStudyHalls = false,
     grades,
   } = options;
 
@@ -166,7 +166,7 @@ export async function generateSchedulesRemote(
       startSeed,
       skipTopSolutions,
       randomizeScoring,
-      allowStudyHallReassignment,
+      skipStudyHalls,
       grades,
     };
 

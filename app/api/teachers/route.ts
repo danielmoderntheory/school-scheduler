@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server"
 import { supabase } from "@/lib/supabase"
+import { TEACHER_STATUS_FULL_TIME } from "@/lib/schedule-utils"
 
 export async function GET() {
   const { data, error } = await supabase
@@ -21,7 +22,7 @@ export async function POST(request: NextRequest) {
     .from("teachers")
     .insert({
       name: body.name,
-      status: body.status || "full-time",
+      status: body.status || TEACHER_STATUS_FULL_TIME,
       can_supervise_study_hall: body.can_supervise_study_hall || false,
       notes: body.notes || null,
     })

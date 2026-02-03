@@ -94,7 +94,8 @@ export function parseClassesFromSnapshot(snapshot: ClassSnapshot[]): ClassEntry[
       }
     }
 
-    // Build grade display string
+    // Get grade IDs (primary) and build display string for backwards compat
+    const gradeIds = c.grade_ids || c.grades?.map(g => g.id) || []
     const gradeNames = c.grades?.map(g => g.display_name) || []
     const gradeDisplay = gradeNames.length > 1
       ? gradeNames.join(', ')
@@ -102,8 +103,9 @@ export function parseClassesFromSnapshot(snapshot: ClassSnapshot[]): ClassEntry[
 
     return {
       teacher: c.teacher_name || '',
-      grade: gradeDisplay, // Primary grade display (legacy compat)
-      grades: gradeNames,
+      grade: gradeDisplay, // Display name (legacy compat)
+      grades: gradeNames,  // Grade names (legacy compat)
+      gradeIds,            // Grade UUIDs (primary - use for comparisons)
       gradeDisplay,
       subject: c.subject_name || '',
       daysPerWeek: c.days_per_week,
@@ -113,6 +115,23 @@ export function parseClassesFromSnapshot(snapshot: ClassSnapshot[]): ClassEntry[
       fixedSlots: fixedSlots.length > 0 ? fixedSlots : undefined,
     }
   })
+}
+
+/**
+ * Build a grade map from the grades snapshot for ID → display name lookup
+ */
+export function buildGradeMapFromSnapshot(gradesSnapshot: GradeSnapshot[] | undefined): Map<string, { id: string; name: string; displayName: string }> {
+  const gradeMap = new Map<string, { id: string; name: string; displayName: string }>()
+  if (!gradesSnapshot) return gradeMap
+
+  for (const g of gradesSnapshot) {
+    gradeMap.set(g.id, {
+      id: g.id,
+      name: g.name,
+      displayName: g.display_name,
+    })
+  }
+  return gradeMap
 }
 
 /**

@@ -118,6 +118,73 @@ export function isMultiGradeDisplay(display: string): boolean {
 }
 
 /**
+ * Format a grade display for compact display (UI and exports).
+ * Converts comma-separated grades to range format when consecutive.
+ *
+ * Examples:
+ *   "6th Grade" → "6th"
+ *   "6th-11th Grade" → "6th-11th"
+ *   "6th Grade, 7th Grade, 8th Grade" → "6th-8th"
+ *   "6th Grade, 8th Grade" → "6th, 8th" (not consecutive)
+ *   "Kindergarten" → "K"
+ *   "Kindergarten, 1st Grade, 2nd Grade" → "K-2nd"
+ *
+ * @param display - The grade display string
+ * @param includeGradeSuffix - Whether to include "Grade" suffix (default: false for compact)
+ */
+export function formatGradeDisplayCompact(display: string, includeGradeSuffix: boolean = false): string {
+  // Handle empty or invalid input
+  if (!display || display.trim() === '') return display
+
+  // Check if already in range format (e.g., "6th-11th Grade")
+  const rangeMatch = display.match(/(\d+)(?:st|nd|rd|th)?[-–](\d+)(?:st|nd|rd|th)?/)
+  if (rangeMatch) {
+    const start = parseInt(rangeMatch[1])
+    const end = parseInt(rangeMatch[2])
+    const startSuffix = start === 1 ? 'st' : start === 2 ? 'nd' : start === 3 ? 'rd' : 'th'
+    const endSuffix = end === 1 ? 'st' : end === 2 ? 'nd' : end === 3 ? 'rd' : 'th'
+    return `${start}${startSuffix}-${end}${endSuffix}${includeGradeSuffix ? ' Grade' : ''}`
+  }
+
+  // Parse the grades to numbers
+  const grades = parseGradeDisplayToNumbers(display)
+
+  // Single grade
+  if (grades.length === 1) {
+    if (grades[0] === 0) return 'K'
+    const suffix = grades[0] === 1 ? 'st' : grades[0] === 2 ? 'nd' : grades[0] === 3 ? 'rd' : 'th'
+    return `${grades[0]}${suffix}${includeGradeSuffix ? ' Grade' : ''}`
+  }
+
+  // Multiple grades - sort them
+  grades.sort((a, b) => a - b)
+
+  // Check if consecutive
+  const isConsecutive = grades.every((g, i) => i === 0 || g === grades[i - 1] + 1)
+
+  if (isConsecutive && grades.length > 1) {
+    // Format as range
+    const start = grades[0]
+    const end = grades[grades.length - 1]
+
+    const formatGrade = (n: number) => {
+      if (n === 0) return 'K'
+      const suffix = n === 1 ? 'st' : n === 2 ? 'nd' : n === 3 ? 'rd' : 'th'
+      return `${n}${suffix}`
+    }
+
+    return `${formatGrade(start)}-${formatGrade(end)}${includeGradeSuffix ? ' Grade' : ''}`
+  }
+
+  // Not consecutive - format as comma-separated
+  return grades.map(g => {
+    if (g === 0) return 'K'
+    const suffix = g === 1 ? 'st' : g === 2 ? 'nd' : g === 3 ? 'rd' : 'th'
+    return `${g}${suffix}`
+  }).join(', ') + (includeGradeSuffix ? ' Grade' : '')
+}
+
+/**
  * Parse a grade display string into an array of grade names.
  * Requires a list of valid grade names to filter against.
  *
@@ -216,6 +283,7 @@ export interface ClassSnapshotEntry {
   teacher_name: string | null
   subject_name: string | null
   is_elective?: boolean
+  grade_ids?: string[]
 }
 
 /**
@@ -234,6 +302,37 @@ export function isClassElective(
   if (!classesSnapshot) return false
   return classesSnapshot.some(
     c => c.teacher_name === teacher && c.subject_name === subject && c.is_elective
+  )
+}
+
+/**
+ * Check if a class is co-taught (same grade(s) + subject with different teachers).
+ *
+ * @param teacher - Teacher name
+ * @param subject - Subject name
+ * @param classesSnapshot - Array of class entries from snapshot
+ * @returns true if there's another teacher teaching the same grade(s) + subject
+ */
+export function isClassCotaught(
+  teacher: string,
+  subject: string,
+  classesSnapshot: ClassSnapshotEntry[] | undefined
+): boolean {
+  if (!classesSnapshot) return false
+
+  // Find the class for this teacher+subject
+  const thisClass = classesSnapshot.find(
+    c => c.teacher_name === teacher && c.subject_name === subject
+  )
+  if (!thisClass || !thisClass.grade_ids?.length) return false
+
+  // Check if there's another class with the same grades+subject but different teacher
+  return classesSnapshot.some(c =>
+    c.teacher_name !== teacher &&
+    c.subject_name === subject &&
+    c.grade_ids?.length &&
+    // Same grades (compare sorted arrays)
+    JSON.stringify([...c.grade_ids].sort()) === JSON.stringify([...thisClass.grade_ids!].sort())
   )
 }
 

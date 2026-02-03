@@ -91,7 +91,7 @@ class SolveRequest(BaseModel):
     startSeed: int = 0  # Starting seed for solver randomization (increment for variety on re-runs)
     skipTopSolutions: int = 0  # Skip the top N solutions and return the next best ones (for variety)
     randomizeScoring: bool = False  # Add noise to scoring for variety (picks suboptimal but valid solutions)
-    allowStudyHallReassignment: bool = False  # If True, reassign all study halls; if False, preserve locked teacher study halls
+    skipStudyHalls: bool = False  # If True, skip study hall assignment entirely (reassign after saving)
     grades: Optional[list[str]] = None  # All grade names from database - for grade schedule initialization
 
 
@@ -178,7 +178,7 @@ async def solve_schedule(request: SolveRequest):
             start_seed=request.startSeed,
             skip_top_solutions=request.skipTopSolutions,
             randomize_scoring=request.randomizeScoring,
-            allow_study_hall_reassignment=request.allowStudyHallReassignment,
+            skip_study_halls=request.skipStudyHalls,
             grades=request.grades,
         )
 

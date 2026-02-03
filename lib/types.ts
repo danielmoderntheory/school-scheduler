@@ -19,7 +19,8 @@ export interface ClassEntry {
   id?: string;
   teacher: string;
   grade: string;  // Display name (legacy, kept for backward compat)
-  grades?: string[];  // Array of grade names (new)
+  grades?: string[];  // Array of grade names (legacy)
+  gradeIds?: string[];  // Array of grade UUIDs (primary - use this for comparisons)
   gradeDisplay?: string;  // Display name for UI
   subject: string;
   daysPerWeek: number;
@@ -29,6 +30,15 @@ export interface ClassEntry {
   fixedSlots?: [string, number][]; // [day, block][]
   restrictions?: Restriction[];
 }
+
+// Grade map for ID to display name lookup
+export interface GradeInfo {
+  id: string;
+  name: string;
+  displayName: string;
+}
+
+export type GradeMap = Map<string, GradeInfo>;
 
 export interface Quarter {
   id: string;

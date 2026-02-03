@@ -164,13 +164,37 @@ def parse_grades(grade_field: str) -> list:
     """Parse grade display name to individual grades.
     Used internally by the solver for constraint checking.
     For matching against database grades, use parse_grades_from_database instead.
+    Handles: single grades, ranges, comma-separated lists, and Kindergarten.
+
+    Note: Electives ARE parsed - they have real grades. The solver handles
+    elective-to-elective slot sharing separately via the is_elective flag.
     """
     import re
 
-    if 'elective' in grade_field.lower():
-        return []
-
     trimmed = grade_field.strip()
+    grades = []
+
+    # Handle Kindergarten (can appear alone or in comma-separated list)
+    if 'kindergarten' in trimmed.lower():
+        grades.append('Kindergarten')
+        # If ONLY kindergarten, return early
+        if ',' not in trimmed and not re.search(r'\d', trimmed):
+            return grades
+
+    # Handle comma-separated list like "6th Grade, 7th Grade" or "10th, 11th"
+    if ',' in trimmed:
+        parts = [p.strip() for p in trimmed.split(',')]
+        for part in parts:
+            # Skip if already handled kindergarten
+            if 'kindergarten' in part.lower():
+                continue
+            num_match = re.search(r'(\d+)', part)
+            if num_match:
+                n = int(num_match.group(1))
+                grade_name = number_to_grade(n)
+                if grade_name not in grades:
+                    grades.append(grade_name)
+        return grades
 
     # Try to parse grade ranges like "6th-8th Grade" or "6th-11th"
     range_match = re.match(r'(\d+)(?:st|nd|rd|th)?[-–](\d+)(?:st|nd|rd|th)?', trimmed, re.IGNORECASE)
@@ -178,21 +202,26 @@ def parse_grades(grade_field: str) -> list:
         start = int(range_match.group(1))
         end = int(range_match.group(2))
         if start > 0 and end > 0 and start <= end:
-            return [number_to_grade(i) for i in range(start, end + 1)]
-
-    # Try Kindergarten
-    if 'kindergarten' in trimmed.lower():
-        return ['Kindergarten']
+            for i in range(start, end + 1):
+                grade_name = number_to_grade(i)
+                if grade_name not in grades:
+                    grades.append(grade_name)
+            return grades
 
     # Try single grade parsing (e.g., "6th Grade", "6th")
     single_match = re.match(r'^(\d+)(?:st|nd|rd|th)', trimmed, re.IGNORECASE)
     if single_match:
         num = int(single_match.group(1))
         if num >= 1:
-            return [number_to_grade(num)]
+            grade_name = number_to_grade(num)
+            if grade_name not in grades:
+                grades.append(grade_name)
 
-    # If no pattern matched, return the original as-is (it might be a valid grade name)
-    return [trimmed] if trimmed else []
+    # If no pattern matched and no grades found, return the original as-is
+    if not grades and trimmed:
+        return [trimmed]
+
+    return grades
 
 
 def get_valid_slots(avail_days: list, avail_blocks: list) -> list:
@@ -716,6 +745,7 @@ def build_schedules(assignment: dict, sessions: list[Session], teachers: list[Te
 
 def parse_grades_from_database(grade_display: str, database_grades: set) -> list[str]:
     """Parse grade display name to individual grades using DATABASE grades (no hardcoding).
+    Handles: single grades, ranges, comma-separated lists, and Kindergarten.
 
     Args:
         grade_display: The display name from a schedule entry (e.g., "6th Grade" or "6th-7th Grade")
@@ -730,27 +760,58 @@ def parse_grades_from_database(grade_display: str, database_grades: set) -> list
     # (e.g., "6th-11th Elective" should map to grades 6-11)
 
     trimmed = grade_display.strip()
+    matched_grades = []
 
-    # 1. Direct match - most common case
+    # 1. Direct match - most common case (single grade that exactly matches DB)
     if trimmed in database_grades:
         return [trimmed]
 
-    # 2. Try to parse as a grade range (e.g., "6th-7th Grade", "6th-11th")
+    # 2. Handle Kindergarten (can appear alone or in comma-separated list)
+    if 'kindergarten' in trimmed.lower():
+        for db_grade in database_grades:
+            if 'kindergarten' in db_grade.lower():
+                matched_grades.append(db_grade)
+                break
+        # If ONLY kindergarten, return early
+        if ',' not in trimmed and not re.search(r'\d', trimmed):
+            return matched_grades
+
+    # 3. Handle comma-separated list like "6th Grade, 7th Grade" or "10th, 11th"
+    if ',' in trimmed:
+        parts = [p.strip() for p in trimmed.split(',')]
+        for part in parts:
+            # Skip if already handled kindergarten
+            if 'kindergarten' in part.lower():
+                continue
+            # Try direct match first
+            if part in database_grades and part not in matched_grades:
+                matched_grades.append(part)
+                continue
+            # Try to extract grade number and find matching database grade
+            num_match = re.search(r'(\d+)', part)
+            if num_match:
+                num = int(num_match.group(1))
+                for db_grade in database_grades:
+                    if grade_to_number(db_grade) == num and db_grade not in matched_grades:
+                        matched_grades.append(db_grade)
+                        break
+        return matched_grades
+
+    # 4. Try to parse as a grade range (e.g., "6th-7th Grade", "6th-11th")
     range_match = re.match(r'(\d+)(?:st|nd|rd|th)?[-–](\d+)(?:st|nd|rd|th)?', trimmed, re.IGNORECASE)
     if range_match:
         start = int(range_match.group(1))
         end = int(range_match.group(2))
         if start > 0 and end > 0 and start <= end:
-            matched_grades = []
             # Find database grades that match numbers in this range
             for db_grade in database_grades:
                 grade_num = grade_to_number(db_grade)
-                if grade_num >= start and grade_num <= end:
+                if grade_num >= start and grade_num <= end and db_grade not in matched_grades:
                     matched_grades.append(db_grade)
             if matched_grades:
                 return matched_grades
 
-    # 3. Try single grade number parsing and find matching database grade
+    # 5. Try single grade number parsing and find matching database grade
     single_match = re.search(r'(\d+)(?:st|nd|rd|th)', trimmed, re.IGNORECASE)
     if single_match:
         num = int(single_match.group(1))
@@ -759,14 +820,8 @@ def parse_grades_from_database(grade_display: str, database_grades: set) -> list
             if grade_to_number(db_grade) == num:
                 return [db_grade]
 
-    # 4. Handle Kindergarten variations
-    if 'kindergarten' in trimmed.lower():
-        for db_grade in database_grades:
-            if 'kindergarten' in db_grade.lower():
-                return [db_grade]
-
-    # No match found
-    return []
+    # Return any grades found (from kindergarten handling) or empty
+    return matched_grades
 
 
 def grade_to_number(grade: str) -> int:
@@ -1223,7 +1278,7 @@ def generate_schedules(
     start_seed: int = 0,  # Starting seed offset for variety on re-runs
     skip_top_solutions: int = 0,  # Skip the top N solutions and return next best (for variety)
     randomize_scoring: bool = False,  # Add noise to scoring to pick suboptimal but valid solutions
-    allow_study_hall_reassignment: bool = False,  # If True, reassign all study halls; if False, preserve locked teacher study halls
+    skip_study_halls: bool = False,  # If True, skip study hall assignment entirely (reassign after saving)
     grades: list[str] = None  # All grade names from database - used for grade schedule initialization
 ) -> dict:
     """
@@ -1594,11 +1649,10 @@ def generate_schedules(
             ts = copy.deepcopy(teacher_schedules)
             gs = copy.deepcopy(grade_schedules)
 
-            # Add study halls (only if study_hall_distribution rule is enabled)
-            # preserve_existing=True means keep locked teacher study halls
-            # allow_study_hall_reassignment=True means reassign all (preserve_existing=False)
-            if is_rule_enabled(rules, 'study_hall_distribution'):
-                sh_assignments = add_study_halls(ts, gs, eligible, preserve_existing=not allow_study_hall_reassignment, rules=rules, grades=active_grades)
+            # Add study halls (only if study_hall_distribution rule is enabled and not skipped)
+            # skip_study_halls=True means skip entirely (user will reassign after saving)
+            if is_rule_enabled(rules, 'study_hall_distribution') and not skip_study_halls:
+                sh_assignments = add_study_halls(ts, gs, eligible, preserve_existing=True, rules=rules, grades=active_grades)
                 sh_placed = sum(1 for sh in sh_assignments if sh.teacher is not None)
             else:
                 sh_assignments = []

@@ -10,6 +10,7 @@ import type {
   TeacherSchedule, GradeSchedule
 } from './types';
 import { BLOCK_TYPE_OPEN, BLOCK_TYPE_STUDY_HALL, isOpenBlock, isStudyHall, isScheduledClass, isOccupiedBlock } from './schedule-utils';
+import { parseGradeDisplayToNumbers, parseGradeDisplayToNames, gradeNumToDisplay, gradeDisplayIncludesGrade } from './grade-utils';
 
 // Constants
 export const DAYS = ['Mon', 'Tues', 'Wed', 'Thurs', 'Fri'];
@@ -17,20 +18,6 @@ export const BLOCKS = [1, 2, 3, 4, 5];
 export const NUM_SLOTS = 25;
 
 // NOTE: Grades now come from the database - no hardcoded grade list
-
-// Helper to parse grade number from string like "6th" -> 6, "Kindergarten" -> 0
-function gradeToNumber(grade: string): number {
-  if (grade.toLowerCase().includes('kindergarten')) return 0;
-  const match = grade.match(/(\d+)/);
-  return match ? parseInt(match[1]) : -1;
-}
-
-// Helper to convert number to grade name: 0 -> "Kindergarten", 6 -> "6th Grade"
-function numberToGrade(num: number): string {
-  if (num === 0) return 'Kindergarten';
-  const suffix = num === 1 ? 'st' : num === 2 ? 'nd' : num === 3 ? 'rd' : 'th';
-  return `${num}${suffix} Grade`;
-}
 
 // ============================================================================
 // UTILITY FUNCTIONS
@@ -51,44 +38,15 @@ function dayBlockToSlot(dayIdx: number, blockIdx: number): number {
 /**
  * Parse grade display name to individual grades.
  * Used internally by the solver for constraint checking.
- * For matching against database grades, use parseGradesFromDatabase instead.
+ * Uses shared grade utilities from grade-utils.ts.
+ *
+ * Note: Electives ARE parsed - they have real grades. The solver handles
+ * elective-to-elective slot sharing separately.
  */
 function parseGrades(gradeField: string): string[] {
-  // Electives don't block specific grades
-  if (gradeField.toLowerCase().includes('elective')) return [];
-
-  const trimmed = gradeField.trim();
-
-  // Try to parse dynamic grade ranges like "6th-8th Grade" or "6th-11th"
-  const rangeMatch = trimmed.match(/(\d+)(?:st|nd|rd|th)?[-–](\d+)(?:st|nd|rd|th)?/i);
-  if (rangeMatch) {
-    const start = parseInt(rangeMatch[1]);
-    const end = parseInt(rangeMatch[2]);
-    if (start > 0 && end > 0 && start <= end) {
-      const grades: string[] = [];
-      for (let i = start; i <= end; i++) {
-        grades.push(numberToGrade(i));
-      }
-      return grades;
-    }
-  }
-
-  // Try Kindergarten
-  if (trimmed.toLowerCase().includes('kindergarten')) {
-    return ['Kindergarten'];
-  }
-
-  // Try single grade parsing (e.g., "6th Grade", "6th")
-  const singleMatch = trimmed.match(/^(\d+)(?:st|nd|rd|th)/i);
-  if (singleMatch) {
-    const num = parseInt(singleMatch[1]);
-    if (num >= 1) {
-      return [numberToGrade(num)];
-    }
-  }
-
-  // If no pattern matched, return the original as-is (it might be a valid grade name)
-  return trimmed ? [trimmed] : [];
+  // Use the shared utility to parse grade numbers, then convert to grade names
+  const gradeNumbers = parseGradeDisplayToNumbers(gradeField);
+  return gradeNumbers.map(num => gradeNumToDisplay(num));
 }
 
 function getValidSlots(availDays: string[], availBlocks: number[]): number[] {
@@ -144,10 +102,11 @@ function getStudyHallEligible(teachers: Teacher[], rules?: SchedulingRule[]): st
 interface Session {
   id: number;
   teacher: string;
-  grade: string;
+  grade: string;           // Grade display string (used for constraint checking via parseGrades)
   subject: string;
   validSlots: number[];
   isFixed: boolean;
+  isElective?: boolean;
   cotaughtGroupId?: string; // Sessions with same grade+subject but different teachers
 }
 
@@ -168,6 +127,7 @@ function buildSessions(classes: ClassEntry[]): Session[] {
           subject: cls.subject,
           validSlots: [slot],
           isFixed: true,
+          isElective: cls.isElective,
         });
       });
     } else {
@@ -183,6 +143,7 @@ function buildSessions(classes: ClassEntry[]): Session[] {
           subject: cls.subject,
           validSlots: [...validSlots],
           isFixed: false,
+          isElective: cls.isElective,
         });
       }
     }
@@ -195,20 +156,26 @@ function buildSessions(classes: ClassEntry[]): Session[] {
  * Identify co-taught classes and assign group IDs.
  * Co-taught = same grade+subject but different teachers.
  * These sessions must be scheduled at the same time slot.
+ *
+ * Uses parseGradeDisplayToNumbers to normalize grade displays for comparison,
+ * handling different formats like "10th-11th Grade" vs "10th Grade, 11th Grade".
  */
 function assignCotaughtGroups(sessions: Session[]): Map<string, Session[]> {
-  // Group sessions by grade+subject
+  // Group sessions by normalized grades + subject
   const gradeSubjectGroups = new Map<string, Session[]>();
 
   for (const session of sessions) {
     // Skip electives - they don't have co-taught constraints
-    if (session.grade.includes('Elective')) continue;
+    if (session.isElective) continue;
 
-    const key = `${session.grade}|${session.subject}`;
-    if (!gradeSubjectGroups.has(key)) {
-      gradeSubjectGroups.set(key, []);
+    // Create a normalized key using sorted grade numbers (handles format differences)
+    const gradeNums = parseGradeDisplayToNumbers(session.grade).sort((a, b) => a - b);
+    const normalizedKey = `${gradeNums.join(',')}|${session.subject}`;
+
+    if (!gradeSubjectGroups.has(normalizedKey)) {
+      gradeSubjectGroups.set(normalizedKey, []);
     }
-    gradeSubjectGroups.get(key)!.push(session);
+    gradeSubjectGroups.get(normalizedKey)!.push(session);
   }
 
   // Find groups with multiple teachers (co-taught)
@@ -264,7 +231,8 @@ interface SolveResult {
 function solveBacktracking(
   sessions: Session[],
   randomize: boolean = true,
-  prefilledGradeSlots?: Map<string, Set<number>>,
+  prefilledGradeSlots?: Map<string, Set<number>>,  // Grade names -> occupied slots (non-elective)
+  prefilledElectiveGradeSlots?: Map<string, Set<number>>,  // Grade names -> occupied slots (elective)
   maxTimeMs: number = 5000, // 5 second timeout per attempt
   deprioritizeTeachers?: Set<string>, // Teachers to schedule last (for diversity)
   rules?: SchedulingRule[], // Scheduling rules to respect
@@ -275,27 +243,38 @@ function solveBacktracking(
   let iterations = 0;
   const maxIterations = 100000; // Safety limit
 
-  // Track constraints
+  // Track constraints using grade names
+  // Separate tracking for electives vs non-electives to handle elective-to-elective sharing
   const teacherSlots = new Map<string, Set<number>>();
-  const gradeSlots = new Map<string, Set<number>>();
-  const gradeSubjectDay = new Map<string, Set<number>>(); // "grade|subject" -> set of days
+  const gradeSlots = new Map<string, Set<number>>();  // gradeName -> occupied slots (non-elective)
+  const electiveGradeSlots = new Map<string, Set<number>>();  // gradeName -> occupied slots (elective)
+  const gradeSubjectDay = new Map<string, Set<number>>(); // "gradeName|subject" -> set of days
 
   // Track which co-taught sessions have been assigned (to skip them in main loop)
   const assignedCotaughtSessions = new Set<number>();
 
-  // Initialize tracking
+  // Initialize tracking - parse grade display strings to get grade names
   sessions.forEach(s => {
     if (!teacherSlots.has(s.teacher)) teacherSlots.set(s.teacher, new Set());
     parseGrades(s.grade).forEach(g => {
       if (!gradeSlots.has(g)) gradeSlots.set(g, new Set());
+      if (!electiveGradeSlots.has(g)) electiveGradeSlots.set(g, new Set());
     });
   });
 
-  // Pre-fill grade slots from locked teachers
+  // Pre-fill grade slots from locked teachers (non-elective)
   if (prefilledGradeSlots) {
-    for (const [grade, slots] of prefilledGradeSlots) {
-      if (!gradeSlots.has(grade)) gradeSlots.set(grade, new Set());
-      slots.forEach(slot => gradeSlots.get(grade)!.add(slot));
+    for (const [gradeName, slots] of prefilledGradeSlots) {
+      if (!gradeSlots.has(gradeName)) gradeSlots.set(gradeName, new Set());
+      slots.forEach(slot => gradeSlots.get(gradeName)!.add(slot));
+    }
+  }
+
+  // Pre-fill elective grade slots from locked teachers
+  if (prefilledElectiveGradeSlots) {
+    for (const [gradeName, slots] of prefilledElectiveGradeSlots) {
+      if (!electiveGradeSlots.has(gradeName)) electiveGradeSlots.set(gradeName, new Set());
+      slots.forEach(slot => electiveGradeSlots.get(gradeName)!.add(slot));
     }
   }
 
@@ -314,10 +293,19 @@ function solveBacktracking(
     // Check teacher conflict - ALWAYS enforced (teacher can't be in two places)
     if (teacherSlots.get(session.teacher)?.has(slot)) return false;
 
-    // Check grade conflicts - ALWAYS enforced (grade can't have two classes at once)
+    // Check grade conflicts
+    // Rules:
+    // - Non-elective classes conflict with ANY class (elective or non-elective) at same grade/slot
+    // - Elective classes only conflict with non-elective classes (electives can share slots)
     const grades = parseGrades(session.grade);
+    const isElective = session.isElective === true;
+
     for (const g of grades) {
+      // Always check non-elective slots (both electives and non-electives conflict with these)
       if (gradeSlots.get(g)?.has(slot)) return false;
+
+      // Non-electives also conflict with elective slots
+      if (!isElective && electiveGradeSlots.get(g)?.has(slot)) return false;
     }
 
     // Check subject/day conflict - CAN be toggled via rules
@@ -364,9 +352,15 @@ function solveBacktracking(
 
     const grades = parseGrades(session.grade);
     const day = slotToDay(slot);
+    const isElective = session.isElective === true;
 
     grades.forEach(g => {
-      gradeSlots.get(g)!.add(slot);
+      // Add to appropriate slot map based on elective status
+      if (isElective) {
+        electiveGradeSlots.get(g)!.add(slot);
+      } else {
+        gradeSlots.get(g)!.add(slot);
+      }
       const key = `${g}|${session.subject}`;
       if (!gradeSubjectDay.has(key)) gradeSubjectDay.set(key, new Set());
       gradeSubjectDay.get(key)!.add(day);
@@ -390,9 +384,15 @@ function solveBacktracking(
 
     const grades = parseGrades(session.grade);
     const day = slotToDay(slot);
+    const isElective = session.isElective === true;
 
     grades.forEach(g => {
-      gradeSlots.get(g)!.delete(slot);
+      // Remove from appropriate slot map based on elective status
+      if (isElective) {
+        electiveGradeSlots.get(g)!.delete(slot);
+      } else {
+        gradeSlots.get(g)!.delete(slot);
+      }
       const key = `${g}|${session.subject}`;
       gradeSubjectDay.get(key)?.delete(day);
     });
@@ -518,7 +518,9 @@ function buildSchedules(
 
     teacherSchedules[s.teacher][day][block] = [s.grade, s.subject];
     parseGrades(s.grade).forEach(g => {
-      gradeSchedules[g][day][block] = [s.teacher, s.subject];
+      if (gradeSchedules[g]) {
+        gradeSchedules[g][day][block] = [s.teacher, s.subject];
+      }
     });
   });
 
@@ -527,6 +529,7 @@ function buildSchedules(
 
 /**
  * Parse grade display name to individual grades using DATABASE grades (no hardcoding).
+ * Uses shared grade utilities from grade-utils.ts.
  *
  * @param gradeDisplay - The display name from a schedule entry (e.g., "6th Grade" or "6th-7th Grade")
  * @param databaseGrades - Set of grade names from the database
@@ -538,56 +541,12 @@ function parseGradesFromDatabase(gradeDisplay: string, databaseGrades: Set<strin
     return [];
   }
 
-  const trimmed = gradeDisplay.trim();
-
-  // 1. Direct match - most common case
-  if (databaseGrades.has(trimmed)) {
-    return [trimmed];
-  }
-
-  // 2. Try to parse as a grade range (e.g., "6th-7th Grade", "6th-11th")
-  const rangeMatch = trimmed.match(/(\d+)(?:st|nd|rd|th)?[-–](\d+)(?:st|nd|rd|th)?/i);
-  if (rangeMatch) {
-    const start = parseInt(rangeMatch[1]);
-    const end = parseInt(rangeMatch[2]);
-    if (start > 0 && end > 0 && start <= end) {
-      const matchedGrades: string[] = [];
-      // Find database grades that match numbers in this range
-      for (const dbGrade of databaseGrades) {
-        const gradeNum = gradeToNumber(dbGrade);
-        if (gradeNum >= start && gradeNum <= end) {
-          matchedGrades.push(dbGrade);
-        }
-      }
-      if (matchedGrades.length > 0) {
-        return matchedGrades;
-      }
-    }
-  }
-
-  // 3. Try single grade number parsing and find matching database grade
-  const singleMatch = trimmed.match(/(\d+)(?:st|nd|rd|th)/i);
-  if (singleMatch) {
-    const num = parseInt(singleMatch[1]);
-    // Find database grade with this number
-    for (const dbGrade of databaseGrades) {
-      if (gradeToNumber(dbGrade) === num) {
-        return [dbGrade];
-      }
-    }
-  }
-
-  // 4. Handle Kindergarten variations
-  if (trimmed.toLowerCase().includes('kindergarten')) {
-    for (const dbGrade of databaseGrades) {
-      if (dbGrade.toLowerCase().includes('kindergarten')) {
-        return [dbGrade];
-      }
-    }
-  }
-
-  // No match found
-  return [];
+  // Use the shared utility which handles all grade display formats:
+  // - Single grades: "6th Grade"
+  // - Ranges: "6th-11th Grade"
+  // - Comma-separated: "10th Grade, 11th Grade"
+  // - Kindergarten variations
+  return parseGradeDisplayToNames(gradeDisplay, Array.from(databaseGrades));
 }
 
 /**
@@ -735,30 +694,8 @@ function addStudyHalls(
   const placedGrades = new Set<string>(); // Track which grades have study halls
   const failedGroups: { name: string; grades: string[] }[] = []; // Groups that couldn't be placed
 
-  // Helper to check if a grade display string includes a specific grade
-  function gradeDisplayIncludesGrade(gradeDisplay: string, targetGrade: string): boolean {
-    const targetNum = gradeToNumber(targetGrade);
-    if (targetNum < 0) return gradeDisplay === targetGrade; // Exact match fallback
-
-    // Check for comma-separated list like "6th Grade, 7th Grade"
-    if (gradeDisplay.includes(',')) {
-      const parts = gradeDisplay.split(',').map(p => p.trim());
-      return parts.some(part => gradeToNumber(part) === targetNum);
-    }
-
-    // Check for range pattern like "6th-11th" or "6th-11th Grade"
-    const rangeMatch = gradeDisplay.match(/(\d+)(?:st|nd|rd|th)?[-–](\d+)/);
-    if (rangeMatch) {
-      const start = parseInt(rangeMatch[1]);
-      const end = parseInt(rangeMatch[2]);
-      return targetNum >= start && targetNum <= end;
-    }
-
-    // Single grade
-    return gradeToNumber(gradeDisplay) === targetNum;
-  }
-
   // Helper to check if a grade is free at a specific slot using teacherSchedules (source of truth)
+  // Uses gradeDisplayIncludesGrade from grade-utils.ts
   function isGradeFreeAtSlot(grade: string, day: string, block: number): boolean {
     for (const [, schedule] of Object.entries(teacherSchedules)) {
       const entry = schedule?.[day]?.[block];
@@ -1109,8 +1046,8 @@ export interface GeneratorOptions {
   rules?: SchedulingRule[];
   /** Seed for reproducible randomization */
   seed?: number;
-  /** If true, reassign all study halls; if false, preserve locked teacher study halls */
-  allowStudyHallReassignment?: boolean;
+  /** If true, skip study hall assignment entirely (reassign after saving) */
+  skipStudyHalls?: boolean;
   /** All grade names from database - used for grade schedule initialization */
   grades?: string[];
 }
@@ -1194,7 +1131,7 @@ export async function generateSchedules(
     teachersNeedingStudyHalls = [],
     rules = [],
     seed,
-    allowStudyHallReassignment = false,
+    skipStudyHalls = false,
     grades: inputGrades,
   } = options;
 
@@ -1239,22 +1176,69 @@ export async function generateSchedules(
   const cotaughtGroups = assignCotaughtGroups(sessions);
 
   // Pre-compute locked grade slots (slots occupied by locked teachers' classes)
-  const lockedGradeSlots = new Map<string, Set<number>>();
+  // Separate elective vs non-elective for proper conflict handling
+  const lockedGradeSlots = new Map<string, Set<number>>();  // Non-elective
+  const lockedElectiveGradeSlots = new Map<string, Set<number>>();  // Elective
   const databaseGrades = new Set(grades);
-  grades.forEach(g => lockedGradeSlots.set(g, new Set()));
+  grades.forEach(g => {
+    lockedGradeSlots.set(g, new Set());
+    lockedElectiveGradeSlots.set(g, new Set());
+  });
+
+  // Build a lookup for elective status: "teacher|subject" -> isElective
+  const electiveLookup = new Map<string, boolean>();
+  classes.forEach(c => {
+    const key = `${c.teacher}|${c.subject}`;
+    if (c.isElective) {
+      electiveLookup.set(key, true);
+    }
+  });
+
+  console.log('[Solver] isRefinementMode:', isRefinementMode);
+  console.log('[Solver] databaseGrades:', Array.from(databaseGrades));
+  console.log('[Solver] lockedTeachers count:', Object.keys(lockedTeachers).length);
 
   if (isRefinementMode) {
-    for (const [, schedule] of Object.entries(lockedTeachers)) {
+    for (const [teacher, schedule] of Object.entries(lockedTeachers)) {
       DAYS.forEach((day, dayIdx) => {
         BLOCKS.forEach((block, blockIdx) => {
           const entry = schedule[day]?.[block];
           if (entry && entry[0] && isScheduledClass(entry[1])) {
             const slot = dayBlockToSlot(dayIdx, blockIdx);
+            const subject = entry[1];
             const parsedGrades = parseGradesFromDatabase(entry[0], databaseGrades);
-            parsedGrades.forEach(g => lockedGradeSlots.get(g)?.add(slot));
+
+            // Check if this class is an elective
+            const isElective = electiveLookup.get(`${teacher}|${subject}`) === true;
+
+            // DEBUG: Log if parsing fails or succeeds
+            if (parsedGrades.length === 0 && entry[0]) {
+              console.log(`[Solver] WARNING: No grades parsed for ${teacher} ${day} B${block}: gradeDisplay="${entry[0]}", subject="${entry[1]}"`);
+            }
+
+            // Add to appropriate map based on elective status
+            parsedGrades.forEach(g => {
+              if (isElective) {
+                lockedElectiveGradeSlots.get(g)?.add(slot);
+              } else {
+                lockedGradeSlots.get(g)?.add(slot);
+              }
+            });
           }
         });
       });
+    }
+    // Log total locked slots per grade
+    console.log('[Solver] Locked grade slots computed:');
+    for (const [grade, slots] of lockedGradeSlots) {
+      if (slots.size > 0) {
+        console.log(`  ${grade}: ${slots.size} slots blocked (non-elective)`);
+      }
+    }
+    for (const [grade, slots] of lockedElectiveGradeSlots) {
+      if (slots.size > 0) {
+        console.log(`  ${grade}: ${slots.size} slots blocked (elective)`);
+      }
     }
   }
 
@@ -1302,6 +1286,7 @@ export async function generateSchedules(
       sessions,
       attempt > 0,
       isRefinementMode ? lockedGradeSlots : undefined,
+      isRefinementMode ? lockedElectiveGradeSlots : undefined,
       5000, // 5 second timeout
       deprioritize.size > 0 ? deprioritize : undefined,
       rules,
@@ -1325,7 +1310,7 @@ export async function generateSchedules(
     const ts = JSON.parse(JSON.stringify(teacherSchedules));
     const gs = JSON.parse(JSON.stringify(gradeSchedules));
 
-    // Merge locked teacher schedules back in (including study halls unless allowStudyHallReassignment is true)
+    // Merge locked teacher schedules back in (skip study halls when skipStudyHalls is true)
     const lockedStudyHallAssignments: StudyHallAssignment[] = [];
     const alreadyCoveredGroups = new Set<string>();
     const existingGradeStudyHallDays = new Map<string, Set<string>>();
@@ -1334,15 +1319,15 @@ export async function generateSchedules(
     if (isRefinementMode) {
       for (const [teacher, schedule] of Object.entries(lockedTeachers)) {
         ts[teacher] = JSON.parse(JSON.stringify(schedule));
-        // Update grade schedules with ALL locked assignments (including study halls)
+        // Update grade schedules with ALL locked assignments (skip study halls if skipStudyHalls)
         DAYS.forEach(day => {
           BLOCKS.forEach(block => {
             const entry = schedule[day]?.[block];
             if (entry && entry[0] && isOccupiedBlock(entry[1])) {
               if (isStudyHall(entry[1])) {
-                // When allowStudyHallReassignment is true, skip preserving locked study halls
-                // This allows study halls to be reassigned to any eligible teacher
-                if (!allowStudyHallReassignment) {
+                // When skipStudyHalls is true, don't preserve locked study halls
+                // They'll be cleared and reassigned after saving
+                if (!skipStudyHalls) {
                   // Track locked study hall assignments
                   lockedStudyHallAssignments.push({
                     group: entry[0],
@@ -1362,8 +1347,8 @@ export async function generateSchedules(
                     }
                   });
                 }
-                // When allowStudyHallReassignment is true, the study hall slot becomes available
-                // (we don't merge it into grade schedules, allowing it to be reassigned)
+                // When skipStudyHalls is true, the study hall slot becomes available
+                // (we don't merge it into grade schedules, will reassign after saving)
               } else {
                 // Regular class - always update grade schedules (use database grades)
                 const parsedGrades = parseGradesFromDatabase(entry[0], databaseGrades);
@@ -1387,11 +1372,11 @@ export async function generateSchedules(
       }
     }
 
-    // Add study halls only if study_hall_distribution rule is enabled
+    // Add study halls only if study_hall_distribution rule is enabled and not skipped
     let shAssignments: StudyHallAssignment[];
     let shPlaced: number;
 
-    if (isRuleEnabled(rules, 'study_hall_distribution')) {
+    if (isRuleEnabled(rules, 'study_hall_distribution') && !skipStudyHalls) {
       // Teachers who need study halls: those specified by the caller (had them before regen)
       // Filter to only include eligible teachers who are being regenerated (not locked)
       const requiredStudyHallTeachers = teachersNeedingStudyHalls.filter(t =>
@@ -1409,6 +1394,7 @@ export async function generateSchedules(
       shAssignments = [...lockedStudyHallAssignments, ...newShAssignments];
       shPlaced = shAssignments.filter(sh => sh.teacher !== null).length;
     } else {
+      // Skipped or rule disabled - no study halls assigned
       shAssignments = [];
       shPlaced = 0;
     }
@@ -1569,12 +1555,19 @@ export async function generateSchedules(
 /**
  * Reassign all study halls for an existing schedule option.
  * Clears existing study halls and attempts to place them fresh.
+ *
+ * @param option - The schedule option to modify
+ * @param teachers - ALL teachers (used for stats calculation)
+ * @param seed - Random seed for shuffling
+ * @param rules - Scheduling rules
+ * @param excludedTeachers - Optional set of teacher names to exclude from study hall assignment
  */
 export function reassignStudyHalls(
   option: ScheduleOption,
   teachers: Teacher[],
   seed?: number,
-  rules?: SchedulingRule[]
+  rules?: SchedulingRule[],
+  excludedTeachers?: Set<string>
 ): { success: boolean; newOption?: ScheduleOption; message?: string; noChanges?: boolean } {
   // Track old study hall assignments for comparison
   const oldAssignments = new Set<string>();
@@ -1586,8 +1579,11 @@ export function reassignStudyHalls(
     }
   }
 
-  // Get eligible teachers
-  const eligible = getStudyHallEligible(teachers, rules);
+  // Get eligible teachers (respecting both rule-based eligibility and UI exclusions)
+  let eligible = getStudyHallEligible(teachers, rules);
+  if (excludedTeachers && excludedTeachers.size > 0) {
+    eligible = eligible.filter(name => !excludedTeachers.has(name));
+  }
 
   if (eligible.length === 0) {
     return {
