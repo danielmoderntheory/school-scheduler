@@ -548,7 +548,7 @@ export function ScheduleGrid({
                                     ? "text-[11px] text-slate-700 font-semibold leading-[1.2]"
                                     : "text-xs text-muted-foreground"
                                 )}
-                                style={label ? { maxWidth: '100%', display: 'inline-block', wordBreak: 'break-word' } : undefined}
+                                style={label ? { maxWidth: '100%', display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical' as const, overflow: 'hidden', wordBreak: 'break-word' } : undefined}
                                 onClick={(e) => {
                                   e.stopPropagation()
                                   const rect = e.currentTarget.getBoundingClientRect()
@@ -691,7 +691,7 @@ export function ScheduleGrid({
                                 ? "text-[11px] text-slate-700 font-semibold leading-[1.2]"
                                 : "text-xs text-muted-foreground"
                             )}
-                            style={label ? { maxWidth: '100%', display: 'inline-block', wordBreak: 'break-word' } : undefined}
+                            style={label ? { maxWidth: '100%', display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical' as const, overflow: 'hidden', wordBreak: 'break-word' } : undefined}
                           >
                             {displayText}
                           </span>

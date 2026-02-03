@@ -175,6 +175,12 @@
     font-size: 0.45rem !important;
   }
 
+  /* OPEN block labels (uses text-[11px] class) */
+  .schedule-card td .text-\[11px\] {
+    font-size: 0.45rem !important;
+    line-height: 1.2 !important;
+  }
+
   /* Teacher name header */
   .schedule-card > div:first-child {
     padding: 0.35rem 0.5rem !important;

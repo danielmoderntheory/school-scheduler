@@ -753,10 +753,10 @@ export default function HistoryDetailPage() {
     }
   }, [generation, viewingOption, isPublicView])
 
-  // Detect class changes when generation loads
+  // Detect class changes when generation loads (admin only)
   useEffect(() => {
     async function checkForChanges() {
-      if (!generation || !hasValidSnapshots(generation.stats)) {
+      if (!generation || !hasValidSnapshots(generation.stats) || isPublicView) {
         setClassChanges(null)
         return
       }
@@ -779,7 +779,7 @@ export default function HistoryDetailPage() {
     }
 
     checkForChanges()
-  }, [generation?.id, generation?.quarter_id])
+  }, [generation?.id, generation?.quarter_id, isPublicView])
 
   function openStarDialog(editMode: boolean = false) {
     setStarNote(generation?.notes || "")
@@ -6075,7 +6075,8 @@ export default function HistoryDetailPage() {
                       {isSelected && (
                         <Check className="h-3.5 w-3.5 text-emerald-600" />
                       )}
-                      Revision {i + 1}
+                      <span className="hidden lg:inline">Revision {i + 1}</span>
+                      <span className="lg:hidden">Rev {i + 1}</span>
                       <span className={`w-2 h-2 rounded-full ${healthColor}`} title={healthTitle} />
                     </button>
                   )
