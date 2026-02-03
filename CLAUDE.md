@@ -345,3 +345,15 @@ Deployment settings (free tier optimized):
 - ESLint with Next.js config
 - Python: Black + isort (backend)
 - Commit messages: Conventional Commits
+
+## Shared Helper Modules
+
+Prefer centralized helpers over inline duplication. Check existing modules before writing new logic.
+
+| Module | Purpose |
+|--------|---------|
+| `lib/schedule-utils.ts` | Block type predicates (`isOpenBlock`, `isStudyHall`, `isFullTime`, etc.), display label utilities, and `recalculateOptionStats()` for recomputing teacherStats/backToBackIssues/studyHallsPlaced after any schedule modification |
+| `lib/scheduler.ts` | JS backtracking solver (fallback), study hall assignment, back-to-back redistribution |
+| `lib/grade-utils.ts` | Grade ID ↔ display name mapping, multi-grade display helpers |
+
+**Convention**: Any code path that modifies a `ScheduleOption` (swap, freeform, regen, study hall reassignment) must call `recalculateOptionStats()` before saving, rather than computing stats inline.

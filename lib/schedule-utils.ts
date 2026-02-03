@@ -222,7 +222,7 @@ export function getBlockType(entry: ScheduleEntry): typeof BLOCK_TYPE_OPEN | typ
 // but only OPEN blocks can have labels (Study Halls always show their grade).
 // -----------------------------------------------------------------------------
 
-import type { TeacherSchedule, OpenBlockLabels } from "./types"
+import type { TeacherSchedule, OpenBlockLabels, ScheduleOption } from "./types"
 
 const DAYS_ORDER = ["Mon", "Tues", "Wed", "Thurs", "Fri"]
 const BLOCKS_ORDER = [1, 2, 3, 4, 5]
@@ -338,4 +338,44 @@ export function setOpenBlockLabel(
   }
 
   return result
+}
+
+// -----------------------------------------------------------------------------
+// SCHEDULE OPTION STATS RECALCULATION
+// Recomputes teacherStats, backToBackIssues, and studyHallsPlaced from schedule data.
+// Use this after ANY modification to a ScheduleOption (regen, swap, freeform, study hall changes).
+// -----------------------------------------------------------------------------
+
+export function recalculateOptionStats(option: ScheduleOption): ScheduleOption {
+  const teacherStats = option.teacherStats.map(stat => {
+    const schedule = option.teacherSchedules[stat.teacher]
+    let teaching = 0, studyHall = 0, open = 0, backToBackIssues = 0
+
+    for (const day of DAYS_ORDER) {
+      let prevWasOpen = false
+      for (const block of BLOCKS_ORDER) {
+        const entry = schedule?.[day]?.[block]
+        if (!entry || isOpenBlock(entry[1])) {
+          open++
+          if (prevWasOpen && isFullTime(stat.status)) backToBackIssues++
+          prevWasOpen = true
+        } else if (isStudyHall(entry[1])) {
+          studyHall++
+          prevWasOpen = true
+        } else {
+          teaching++
+          prevWasOpen = false
+        }
+      }
+    }
+
+    return { ...stat, teaching, studyHall, open, totalUsed: teaching + studyHall, backToBackIssues }
+  })
+
+  return {
+    ...option,
+    teacherStats,
+    backToBackIssues: teacherStats.reduce((sum, s) => sum + s.backToBackIssues, 0),
+    studyHallsPlaced: option.studyHallAssignments?.filter(sh => sh.teacher !== null).length ?? 0,
+  }
 }

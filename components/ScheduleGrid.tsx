@@ -5,7 +5,7 @@ import { cn } from "@/lib/utils"
 import { Badge } from "@/components/ui/badge"
 import { Checkbox } from "@/components/ui/checkbox"
 import { Input } from "@/components/ui/input"
-import { RefreshCw, AlertTriangle, Check, Ban, X } from "lucide-react"
+import { RefreshCw, AlertTriangle, Check, Ban, X, ArrowLeftRight } from "lucide-react"
 import type { TeacherSchedule, GradeSchedule, FloatingBlock, PendingPlacement, ValidationError, CellLocation, OpenBlockLabels } from "@/lib/types"
 import { BLOCK_TYPE_OPEN, isOpenBlock, isStudyHall, isScheduledClass, isFullTime, getOpenBlockAt, getOpenBlockLabel } from "@/lib/schedule-utils"
 import { formatGradeDisplayCompact, isClassElective, isClassCotaught, type ClassSnapshotEntry } from "@/lib/grade-utils"
@@ -232,8 +232,11 @@ export function ScheduleGrid({
       const placement = hasPendingPlacement(day, block)
       const pickedUp = isPickedUpCell(day, block)
 
-      // Error styling takes priority
+      // Error styling — placed blocks keep the indigo ring (placed) + red background (conflict)
       if (error) {
+        if (placement) {
+          return cn("bg-red-100 ring-2 ring-inset ring-indigo-400 cursor-pointer")
+        }
         return cn(baseClass, "ring-2 ring-inset ring-red-500 bg-red-100")
       }
 
@@ -510,8 +513,11 @@ export function ScheduleGrid({
 
                       if (placement) {
                         // Show the placed block's content
+                        const placedBlock = floatingBlocks.find(b => b.id === placement.blockId)
+                        const isTransferredPlacement = placedBlock?.transferredTo || (placedBlock && placement.teacher !== placedBlock.sourceTeacher)
                         return (
-                          <div className="max-w-full overflow-hidden">
+                          <div className="max-w-full overflow-visible relative">
+                            {isTransferredPlacement && <ArrowLeftRight className="absolute top-0 left-0 h-2.5 w-2.5 text-teal-500 z-10" />}
                             <div className="font-medium text-xs leading-tight truncate" title={displayPrimary}>
                               {formatGradeDisplayCompact(displayPrimary)}
                             </div>

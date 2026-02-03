@@ -18,7 +18,7 @@ import {
 } from "@/components/ui/tooltip"
 import { Info, AlertTriangle, ChevronDown, ChevronRight } from "lucide-react"
 import type { TeacherStat, StudyHallAssignment, GradeSchedule, TeacherSchedule } from "@/lib/types"
-import { isOccupiedBlock, isFullTime } from "@/lib/schedule-utils"
+import { isOccupiedBlock, isScheduledClass, isFullTime } from "@/lib/schedule-utils"
 import { parseGradeDisplayToNames } from "@/lib/grade-utils"
 
 interface ValidationIssue {
@@ -33,8 +33,7 @@ interface ScheduleStatsProps {
   teacherSchedules?: Record<string, TeacherSchedule>
   backToBackIssues: number
   studyHallsPlaced: number
-  unscheduledClasses?: number
-  totalClasses?: number
+  expectedTeachingSessions?: number
   defaultExpanded?: boolean
   validationIssues?: ValidationIssue[]  // Grade conflicts, subject conflicts, etc.
 }
@@ -59,8 +58,7 @@ export function ScheduleStats({
   teacherSchedules,
   backToBackIssues,
   studyHallsPlaced,
-  unscheduledClasses = 0,
-  totalClasses = 0,
+  expectedTeachingSessions,
   defaultExpanded = true,
   validationIssues = [],
 }: ScheduleStatsProps) {
@@ -77,6 +75,8 @@ export function ScheduleStats({
   let gradesFullCount = 0
   let totalBlocksScheduled = 0
   let totalBlocksAvailable = 0
+  let actualTeachingSessions = 0
+  const teachingSlotsCounted = new Set<string>()
 
   // Track grades with gaps for detailed reporting
   type GradeGapInfo = {
@@ -120,6 +120,17 @@ export function ScheduleStats({
               const slotKey = `${day}|${block}`
               filledSlots[grade].add(slotKey)
             }
+
+            // Count teaching sessions (excludes study halls), deduped by grade+slot for co-taught
+            if (isScheduledClass(subject)) {
+              for (const grade of targetGrades) {
+                const teachKey = `${grade}:${day}|${block}`
+                if (!teachingSlotsCounted.has(teachKey)) {
+                  teachingSlotsCounted.add(teachKey)
+                  actualTeachingSessions++
+                }
+              }
+            }
           }
         }
       }
@@ -159,6 +170,14 @@ export function ScheduleStats({
           if (entry && entry[1] && isOccupiedBlock(entry[1])) {
             filledBlocks++
             totalBlocksScheduled++
+            // Count teaching sessions (excludes study halls)
+            if (isScheduledClass(entry[1])) {
+              const teachKey = `${grade}:${day}|${block}`
+              if (!teachingSlotsCounted.has(teachKey)) {
+                teachingSlotsCounted.add(teachKey)
+                actualTeachingSessions++
+              }
+            }
           } else {
             missingSlots.push({ day, block })
           }
@@ -222,13 +241,6 @@ export function ScheduleStats({
 
   // Identify potential issues
   const issues: { type: 'warning' | 'info'; message: string }[] = []
-
-  if (unscheduledClasses > 0) {
-    issues.push({
-      type: 'warning',
-      message: `${unscheduledClasses} block${unscheduledClasses !== 1 ? 's' : ''} could not be scheduled. Check for conflicting restrictions.`
-    })
-  }
 
   // Sort grades with gaps by grade order for display
   const sortedGradesWithGaps = [...gradesWithGaps].sort((a, b) => {
@@ -302,11 +314,11 @@ export function ScheduleStats({
 
   // Compact stat item for collapsed view
   const totalStudyHallsExpected = studyHallAssignments.length
-  const blocksStatus = totalBlocksAvailable > 0 && totalBlocksScheduled < totalBlocksAvailable ? 'warning' : 'ok'
+  const classesStatus = expectedTeachingSessions !== undefined && actualTeachingSessions < expectedTeachingSessions ? 'warning' : 'ok'
   const gradesStatus = totalGrades > 0 && gradesFullCount < totalGrades ? 'warning' : 'ok'
   const studyHallStatus = studyHallsPlaced < totalStudyHallsExpected ? 'warning' : 'ok'
   const hasValidationErrors = validationIssues.length > 0
-  const hasIssues = unscheduledClasses > 0 || blocksStatus === 'warning' || gradesStatus === 'warning' || studyHallStatus === 'warning' || hasValidationErrors
+  const hasIssues = classesStatus === 'warning' || gradesStatus === 'warning' || studyHallStatus === 'warning' || hasValidationErrors
 
   // Separate counts for display: validation errors (hard) vs notes (soft/info)
   const validationErrorCount = validationIssues.length
@@ -331,9 +343,12 @@ export function ScheduleStats({
               {/* Show inline stats when collapsed OR when printing */}
               <span className={`contents ${expanded ? 'hidden print:contents' : ''}`}>
                 <span className="text-slate-300 ml-2">—</span>
-                <span className={`font-normal text-slate-500 flex items-center gap-1.5 ${blocksStatus === 'warning' ? 'text-amber-600 font-medium' : ''}`}>
-                  <span className={`w-1.5 h-1.5 rounded-sm ${blocksStatus === 'warning' ? 'bg-amber-400' : 'bg-emerald-500'}`} />
-                  {totalBlocksScheduled}/{totalBlocksAvailable} Blocks
+                <span className={`font-normal text-slate-500 flex items-center gap-1.5 ${classesStatus === 'warning' ? 'text-amber-600 font-medium' : ''}`}>
+                  <span className={`w-1.5 h-1.5 rounded-sm ${classesStatus === 'warning' ? 'bg-amber-400' : 'bg-emerald-500'}`} />
+                  {expectedTeachingSessions !== undefined
+                    ? <>{actualTeachingSessions}/{expectedTeachingSessions} Classes</>
+                    : <>{actualTeachingSessions} Classes</>
+                  }
                 </span>
                 <span className="text-slate-300">|</span>
                 <span className={`font-normal text-slate-500 flex items-center gap-1.5 ${gradesStatus === 'warning' ? 'text-amber-600 font-medium' : ''}`}>
@@ -363,24 +378,27 @@ export function ScheduleStats({
           {/* Summary Stats - Shown when expanded, inside the container */}
           {expanded && (
           <div className="grid grid-cols-2 gap-3 px-3 pb-3 print-stats md:flex md:flex-wrap">
-          {/* Blocks Scheduled */}
+          {/* Classes (teaching sessions, excludes study halls) */}
           <div className={`border rounded-lg p-3 md:flex-1 md:min-w-0 ${
-            totalBlocksScheduled < totalBlocksAvailable
+            classesStatus === 'warning'
               ? 'border-amber-300 bg-amber-50'
               : 'border-emerald-200 bg-emerald-50'
           }`}>
             <div className="text-sm text-slate-600">
-              Blocks
-              <InfoTooltip text="Total class and study hall blocks placed in the schedule across all grades." />
+              Classes
+              <InfoTooltip text="Teaching sessions placed in the schedule (excludes study halls). Counted per grade — a multi-grade class counts once per grade it serves." />
             </div>
             <div className="text-lg font-bold">
-              {totalBlocksScheduled}/{totalBlocksAvailable}
-              {totalBlocksScheduled >= totalBlocksAvailable && totalBlocksAvailable > 0 && (
-                <Badge className="ml-2 text-xs bg-emerald-500">All Filled</Badge>
+              {expectedTeachingSessions !== undefined
+                ? <>{actualTeachingSessions}/{expectedTeachingSessions}</>
+                : <>{actualTeachingSessions} <span className="text-sm font-normal text-slate-500">sessions</span></>
+              }
+              {expectedTeachingSessions !== undefined && actualTeachingSessions >= expectedTeachingSessions && expectedTeachingSessions > 0 && (
+                <Badge className="ml-2 text-xs bg-emerald-500">All Placed</Badge>
               )}
-              {totalBlocksScheduled < totalBlocksAvailable && (
+              {expectedTeachingSessions !== undefined && actualTeachingSessions < expectedTeachingSessions && (
                 <Badge variant="outline" className="ml-2 text-xs border-amber-400 text-amber-600">
-                  {totalBlocksAvailable - totalBlocksScheduled} Open
+                  {expectedTeachingSessions - actualTeachingSessions} Missing
                 </Badge>
               )}
             </div>

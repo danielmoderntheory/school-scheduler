@@ -168,6 +168,7 @@ export interface FloatingBlock {
   subject: string;
   entry: [string, string];
   isDisplaced?: boolean; // true if picked up via chain (blocking another placement)
+  transferredTo?: string; // target teacher name when block is part of a cross-teacher transfer
 }
 
 export interface PendingPlacement {
@@ -175,6 +176,16 @@ export interface PendingPlacement {
   teacher: string;
   day: string;
   block: number;
+  previousEntry?: [string, string] | null; // What was in the cell before placement (for proper restore)
+}
+
+export interface PendingTransfer {
+  id: string;
+  fromTeacher: string;
+  toTeacher: string;
+  subject: string;
+  grade: string;
+  moveType: 'one' | 'all';
 }
 
 export interface ValidationError {

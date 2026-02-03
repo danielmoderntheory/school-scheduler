@@ -561,6 +561,9 @@ export default function GeneratePage() {
     }
   }
 
+  // Capture teaching-only count before adding study halls
+  const expectedTeachingSessionsOnly = totalGradeSessions
+
   // Add 1 study hall session for grades 6-11 (sort_order 6-11)
   for (const g of grades) {
     if (g.sort_order >= 6 && g.sort_order <= 11 && uniqueGrades.has(g.id)) {
@@ -996,6 +999,7 @@ export default function GeneratePage() {
                 gradeSchedules={selectedResult.gradeSchedules}
                 backToBackIssues={selectedResult.backToBackIssues}
                 studyHallsPlaced={selectedResult.studyHallsPlaced}
+                expectedTeachingSessions={expectedTeachingSessionsOnly}
               />
 
               {/* Schedule Grids */}

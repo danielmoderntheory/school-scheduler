@@ -161,6 +161,43 @@ export function parseRulesFromSnapshot(snapshot: RuleSnapshot[]): Array<{
   }))
 }
 
+/**
+ * Compute the expected number of teaching sessions (excluding study halls).
+ * Mirrors the generate page's totalGradeSessions logic but without the study hall addition.
+ * Deduplicates co-taught classes (same grade+subject) and elective slots (same grade+day+block).
+ */
+export function computeExpectedTeachingSessions(classes: ClassSnapshot[]): number {
+  const seenGradeSubject = new Set<string>()
+  const seenElectiveSlots = new Set<string>()
+  let total = 0
+
+  for (const c of classes) {
+    const classGrades = c.grades || []
+    if (classGrades.length === 0) continue
+
+    for (const grade of classGrades) {
+      if (c.is_elective) {
+        const fixedSlots = (c.restrictions || [])
+          .filter(r => r.restriction_type === 'fixed_slot')
+          .map(r => r.value as { day: string; block: number })
+        for (const slot of fixedSlots) {
+          const slotKey = `${grade.id}:${slot.day}:${slot.block}`
+          if (!seenElectiveSlots.has(slotKey)) {
+            seenElectiveSlots.add(slotKey)
+            total++
+          }
+        }
+      } else {
+        const key = `${grade.id}:${c.subject_id}`
+        if (seenGradeSubject.has(key)) continue
+        seenGradeSubject.add(key)
+        total += c.days_per_week
+      }
+    }
+  }
+  return total
+}
+
 // Types for current classes from the API
 export interface CurrentClass {
   teacher: { id: string; name: string } | null

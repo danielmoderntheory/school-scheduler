@@ -35,10 +35,10 @@ import {
 import { Textarea } from "@/components/ui/textarea"
 import { Label } from "@/components/ui/label"
 import Link from "next/link"
-import type { ScheduleOption, TeacherSchedule, GradeSchedule, Teacher, FloatingBlock, PendingPlacement, ValidationError, CellLocation, ClassEntry, OpenBlockLabels } from "@/lib/types"
-import { parseClassesFromSnapshot, parseTeachersFromSnapshot, parseRulesFromSnapshot, hasValidSnapshots, detectClassChanges, type GenerationStats, type ChangeDetectionResult, type CurrentClass } from "@/lib/snapshot-utils"
+import type { ScheduleOption, TeacherSchedule, GradeSchedule, Teacher, FloatingBlock, PendingPlacement, ValidationError, CellLocation, ClassEntry, OpenBlockLabels, PendingTransfer } from "@/lib/types"
+import { parseClassesFromSnapshot, parseTeachersFromSnapshot, parseRulesFromSnapshot, hasValidSnapshots, detectClassChanges, computeExpectedTeachingSessions, type GenerationStats, type ChangeDetectionResult, type CurrentClass, type ClassSnapshot, type TeacherSnapshot } from "@/lib/snapshot-utils"
 import { parseGradeDisplayToNumbers, parseGradeDisplayToNames, gradesOverlap, gradeNumToDisplay, isClassElective, shouldIgnoreGradeConflict, formatGradeDisplayCompact } from "@/lib/grade-utils"
-import { BLOCK_TYPE_OPEN, BLOCK_TYPE_STUDY_HALL, isOpenBlock, isStudyHall, isScheduledClass, isOccupiedBlock, entryIsOpen, entryIsOccupied, entryIsScheduledClass, isFullTime, setOpenBlockLabel } from "@/lib/schedule-utils"
+import { BLOCK_TYPE_OPEN, BLOCK_TYPE_STUDY_HALL, isOpenBlock, isStudyHall, isScheduledClass, isOccupiedBlock, entryIsOpen, entryIsOccupied, entryIsScheduledClass, isFullTime, setOpenBlockLabel, recalculateOptionStats } from "@/lib/schedule-utils"
 import toast from "react-hot-toast"
 import { generateSchedules, reassignStudyHalls } from "@/lib/scheduler"
 import { generateSchedulesRemote } from "@/lib/scheduler-remote"
@@ -398,6 +398,21 @@ export default function HistoryDetailPage() {
     gradeSchedules: Record<string, GradeSchedule>
   } | null>(null)
   const [freeformClasses, setFreeformClasses] = useState<ClassEntry[] | null>(null)
+  const [pendingTransfers, setPendingTransfers] = useState<PendingTransfer[]>([])
+  const [transferModal, setTransferModal] = useState<{
+    block: FloatingBlock
+    location: CellLocation
+    totalBlocks: number
+  } | null>(null)
+  const [reviewTransfersModal, setReviewTransfersModal] = useState<{
+    isOpen: boolean
+    updateDB: boolean
+    onConfirm: () => void
+  } | null>(null)
+  const [returnTransferModal, setReturnTransferModal] = useState<{
+    block: FloatingBlock
+    totalBlocks: number  // How many blocks of this class are floating/placed on the target teacher
+  } | null>(null)
 
   // Study Hall stripping state - temporarily removes study halls for easier editing
   const [studyHallsStripped, setStudyHallsStripped] = useState(false)
@@ -444,6 +459,59 @@ export default function HistoryDetailPage() {
   const [skipStudyHalls, setSkipStudyHalls] = useState(false) // Skip study hall assignment during regen (can reassign after)
   const [showOpenLabels, setShowOpenLabels] = useState(false) // Show custom labels on OPEN blocks
 
+  // Effective freeform classes — applies pending transfers so all validation/logic sees the transferred state
+  const effectiveFreeformClasses = useMemo(() => {
+    if (!freeformClasses) return null
+    if (pendingTransfers.length === 0) return freeformClasses
+
+    const updated = JSON.parse(JSON.stringify(freeformClasses)) as ClassEntry[]
+
+    for (const r of pendingTransfers) {
+      if (r.moveType === 'all') {
+        // Change teacher on the matching class entry
+        const entry = updated.find(c =>
+          c.teacher === r.fromTeacher && c.subject === r.subject && c.grade === r.grade
+        )
+        if (entry) {
+          entry.teacher = r.toTeacher
+        }
+      } else {
+        // Split: decrement source, create/increment target
+        const entry = updated.find(c =>
+          c.teacher === r.fromTeacher && c.subject === r.subject && c.grade === r.grade
+        )
+        if (entry) {
+          entry.daysPerWeek -= 1
+          if (entry.daysPerWeek <= 0) {
+            const idx = updated.indexOf(entry)
+            updated.splice(idx, 1)
+          }
+          const existing = updated.find(c =>
+            c.teacher === r.toTeacher && c.subject === r.subject && c.grade === r.grade
+          )
+          if (existing) {
+            existing.daysPerWeek += 1
+          } else {
+            updated.push({
+              ...JSON.parse(JSON.stringify(entry)),
+              teacher: r.toTeacher,
+              daysPerWeek: 1,
+            })
+          }
+        }
+      }
+    }
+
+    return updated
+  }, [freeformClasses, pendingTransfers])
+
+  // Compute expected teaching sessions from snapshot (for Classes metric in ScheduleStats)
+  const expectedTeachingSessions = useMemo(() => {
+    const snapshot = generation?.stats?.classes_snapshot
+    if (!snapshot || snapshot.length === 0) return undefined
+    return computeExpectedTeachingSessions(snapshot)
+  }, [generation?.stats?.classes_snapshot])
+
   // Compute which placements have conflicts and detailed info for validation errors
   const placementConflicts = useMemo(() => {
     if (!workingSchedules || pendingPlacements.length === 0 || conflictResolution) return []
@@ -482,7 +550,7 @@ export default function HistoryDetailPage() {
             blockId: block.id,
             placement,
             block,
-            reason: `${block.grade} already has ${entry[1]} with ${teacher} at ${day} B${blockNum}`,
+            reason: `Placed ${block.grade} ${block.subject} → ${placement.teacher} ${day} B${blockNum} conflicts with ${entry[1]} (${teacher} ${day} B${blockNum}) — same grade, same time`,
             conflictingTeacher: teacher,
             conflictingBlock: blockNum,
             conflictingEntry: entry
@@ -504,7 +572,7 @@ export default function HistoryDetailPage() {
                 blockId: block.id,
                 placement,
                 block,
-                reason: `${block.grade} already has ${block.subject} on ${day} (${teacher} B${b})`,
+                reason: `Placed ${block.grade} ${block.subject} → ${placement.teacher} ${day} B${blockNum} conflicts with ${block.subject} (${teacher} ${day} B${b}) — same subject, same day`,
                 conflictingTeacher: teacher,
                 conflictingBlock: b,
                 conflictingEntry: entry
@@ -705,6 +773,7 @@ export default function HistoryDetailPage() {
     setSelectedFloatingBlock(null)
     setValidationErrors([])
     setWorkingSchedules(null)
+    setPendingTransfers([])
   }, [viewingOption])
 
   async function loadGeneration() {
@@ -1485,23 +1554,14 @@ export default function HistoryDetailPage() {
         return sh
       })
 
-      // Merge teacher stats: keep original, update only selected teachers
-      const mergedTeacherStats = originalOption.teacherStats.map(stat => {
-        if (previewTeachers.has(stat.teacher)) {
-          const previewStat = previewOption.teacherStats.find(ps => ps.teacher === stat.teacher)
-          return previewStat || stat
-        }
-        return stat
-      })
-
       // Build merged option starting from ORIGINAL, replacing only what changed
-      optionToSave = {
+      // recalculateOptionStats recomputes teacherStats, backToBackIssues, and studyHallsPlaced
+      optionToSave = recalculateOptionStats({
         ...originalOption,
         teacherSchedules: mergedTeacherSchedules,
         gradeSchedules: mergedGradeSchedules,
         studyHallAssignments: mergedStudyHalls,
-        teacherStats: mergedTeacherStats,
-      }
+      })
 
       const allTeachers = Object.keys(originalOption.teacherSchedules)
       const lockedTeacherNames = allTeachers.filter(t => !previewTeachers.has(t))
@@ -2273,7 +2333,7 @@ export default function HistoryDetailPage() {
     options?: { skipStudyHallCheck?: boolean }
   ): Promise<boolean> {
     const DAYS = ["Mon", "Tues", "Wed", "Thurs", "Fri"]
-    const softWarningTypes = ['back_to_back']
+    const softWarningTypes = ['back_to_back', 'study_hall_coverage']
 
     // Define all checks
     const checkDefinitions = [
@@ -3057,9 +3117,6 @@ export default function HistoryDetailPage() {
     const previousOptions: ScheduleOption[] = JSON.parse(JSON.stringify(generation.options))
     const previousSelectedOption = viewingOption
 
-    // Create updated option with working schedules
-    const DAYS = ["Mon", "Tues", "Wed", "Thurs", "Fri"]
-
     // Rebuild gradeSchedules from teacherSchedules to ensure consistency
     // This also fixes any previously corrupted data with phantom grade keys
     const rebuiltGradeSchedules = rebuildGradeSchedules(
@@ -3068,41 +3125,12 @@ export default function HistoryDetailPage() {
       selectedResult.gradeSchedules
     )
 
-    const updatedOption: ScheduleOption = {
+    const updatedOption: ScheduleOption = recalculateOptionStats({
       ...selectedResult,
       teacherSchedules: swapWorkingSchedules.teacherSchedules,
       gradeSchedules: rebuiltGradeSchedules,
       studyHallAssignments: swapWorkingSchedules.studyHallAssignments,
-    }
-
-    // Regenerate teacher stats
-    updatedOption.teacherStats = selectedResult.teacherStats.map(stat => {
-      const schedule = swapWorkingSchedules.teacherSchedules[stat.teacher]
-      let teaching = 0, studyHall = 0, open = 0, backToBackIssues = 0
-
-      for (const day of DAYS) {
-        let prevWasOpen = false
-        for (let block = 1; block <= 5; block++) {
-          const entry = schedule?.[day]?.[block]
-          if (!entry || isOpenBlock(entry[1])) {
-            open++
-            if (prevWasOpen && isFullTime(stat.status)) backToBackIssues++
-            prevWasOpen = true
-          } else if (isStudyHall(entry[1])) {
-            studyHall++
-            prevWasOpen = true
-          } else {
-            teaching++
-            prevWasOpen = false
-          }
-        }
-      }
-
-      return { ...stat, teaching, studyHall, open, totalUsed: teaching + studyHall, backToBackIssues }
     })
-
-    // Regenerate total back-to-back issues
-    updatedOption.backToBackIssues = updatedOption.teacherStats.reduce((sum, s) => sum + s.backToBackIssues, 0)
 
     // Define the save function to pass to validation modal
     const doSave = async () => {
@@ -3286,6 +3314,7 @@ export default function HistoryDetailPage() {
     setFloatingBlocks([])
     setPendingPlacements([])
     setSelectedFloatingBlock(null)
+    setPendingTransfers([])
 
     // Parse classes from snapshot for validation
     const classes = parseClassesFromSnapshot(generation.stats!.classes_snapshot!)
@@ -3309,6 +3338,7 @@ export default function HistoryDetailPage() {
     setValidationErrors([])
     setWorkingSchedules(null)
     setFreeformClasses(null)
+    setPendingTransfers([])
     setConflictResolution(null)
     // Reset study hall stripping state
     setStudyHallsStripped(false)
@@ -3439,11 +3469,9 @@ export default function HistoryDetailPage() {
     setConflictResolution(null)
   }
 
-  function handlePlaceBlock(location: CellLocation) {
-    if (!selectedFloatingBlock || !workingSchedules) return
-
-    const block = floatingBlocks.find(b => b.id === selectedFloatingBlock)
-    if (!block) return
+  // Core placement logic - places a block at a location, handling displaced content
+  function doPlaceBlock(block: FloatingBlock, location: CellLocation) {
+    if (!workingSchedules) return
 
     // Create a single copy of schedules for all modifications
     const newTeacherSchedules = JSON.parse(JSON.stringify(workingSchedules.teacherSchedules))
@@ -3492,9 +3520,6 @@ export default function HistoryDetailPage() {
     // Place the selected block at new location (teacherSchedules only - gradeSchedules rebuilt on save)
     newTeacherSchedules[location.teacher][location.day][location.block] = block.entry
 
-    // Note: Removed gradeSchedules updates here - they were creating phantom grade keys
-    // like "6th-7th Grade". gradeSchedules will be properly rebuilt from teacherSchedules on save.
-    // For now, just keep the working gradeSchedules as-is for display purposes
     // Note: We intentionally do NOT update gradeSchedules during freeform mode
     // This prevents creating phantom grade keys like "6th-7th Grade"
     // gradeSchedules will be properly rebuilt from teacherSchedules on save
@@ -3502,18 +3527,20 @@ export default function HistoryDetailPage() {
     // Update state (gradeSchedules unchanged during freeform - rebuilt on save)
     setWorkingSchedules({ teacherSchedules: newTeacherSchedules, gradeSchedules: newGradeSchedules })
 
-    // Update placements
+    // Update placements — capture what was in the cell before so we can restore it later
+    const prevEntry = targetEntry && !isOccupiedBlock(targetEntry[1]) ? targetEntry : null
     if (existingPlacement) {
       setPendingPlacements(prev => [
         ...prev.filter(p => p.blockId !== block.id),
-        { blockId: block.id, teacher: location.teacher, day: location.day, block: location.block }
+        { blockId: block.id, teacher: location.teacher, day: location.day, block: location.block, previousEntry: prevEntry }
       ])
     } else {
       setPendingPlacements(prev => [...prev, {
         blockId: block.id,
         teacher: location.teacher,
         day: location.day,
-        block: location.block
+        block: location.block,
+        previousEntry: prevEntry
       }])
     }
 
@@ -3530,6 +3557,34 @@ export default function HistoryDetailPage() {
     setConflictResolution(null)
   }
 
+  function handlePlaceBlock(location: CellLocation) {
+    if (!selectedFloatingBlock || !workingSchedules) return
+
+    const block = floatingBlocks.find(b => b.id === selectedFloatingBlock)
+    if (!block) return
+
+    // Check for cross-teacher class placement
+    if (effectiveFreeformClasses && isScheduledClass(block.subject) && location.teacher !== block.sourceTeacher) {
+      const hasMatchingClass = effectiveFreeformClasses.some(cls =>
+        cls.teacher === location.teacher && cls.subject === block.subject && cls.grade === block.grade
+      )
+
+      if (!hasMatchingClass) {
+        // Count total blocks for this specific class definition (teacher+grade+subject)
+        // Use original freeformClasses for the count since we're counting what the source teacher has
+        const classDef = freeformClasses?.find(cls =>
+          cls.teacher === block.sourceTeacher && cls.subject === block.subject && cls.grade === block.grade
+        )
+        const totalBlocks = classDef?.daysPerWeek ?? 1
+
+        setTransferModal({ block, location, totalBlocks })
+        return  // Don't place yet — wait for modal confirmation
+      }
+    }
+
+    doPlaceBlock(block, location)
+  }
+
   function handleReturnBlock(blockId: string) {
     const block = floatingBlocks.find(b => b.id === blockId)
     if (!block || !workingSchedules) return
@@ -3540,9 +3595,9 @@ export default function HistoryDetailPage() {
     const newTeacherSchedules = JSON.parse(JSON.stringify(workingSchedules.teacherSchedules))
     const newGradeSchedules = JSON.parse(JSON.stringify(workingSchedules.gradeSchedules))
 
-    // If it was placed, clear that location (teacherSchedules only - gradeSchedules rebuilt on save)
+    // If it was placed, restore the cell to what was there before placement
     if (placement) {
-      newTeacherSchedules[placement.teacher][placement.day][placement.block] = [block.grade, BLOCK_TYPE_OPEN]
+      newTeacherSchedules[placement.teacher][placement.day][placement.block] = placement.previousEntry || [block.grade, BLOCK_TYPE_OPEN]
       // Skip gradeSchedules update - rebuilt on save
       setPendingPlacements(prev => prev.filter(p => p.blockId !== blockId))
     }
@@ -3576,7 +3631,120 @@ export default function HistoryDetailPage() {
       setSelectedFloatingBlock(null)
     }
 
+    // Clear transfer if no blocks of this class remain placed on or floating toward the target teacher
+    if (pendingTransfers.length > 0 && block.sourceTeacher) {
+      const transfer = pendingTransfers.find(r =>
+        r.fromTeacher === block.sourceTeacher && r.subject === block.subject && r.grade === block.grade
+      )
+      if (transfer) {
+        // Check if any other blocks of this class are still placed on the target teacher
+        const otherPlacedOnTarget = pendingPlacements.filter(p => {
+          if (p.blockId === blockId) return false // exclude the one we just returned
+          const fb = floatingBlocks.find(b => b.id === p.blockId)
+          return fb && fb.subject === block.subject && fb.grade === block.grade && p.teacher === transfer.toTeacher
+        })
+        // Also check for unplaced floating blocks transferred to the target teacher
+        const otherFloatingToTarget = floatingBlocks.filter(b => {
+          if (b.id === blockId) return false // exclude the one we just returned
+          return b.subject === block.subject && b.grade === block.grade &&
+            b.transferredTo === transfer.toTeacher &&
+            !pendingPlacements.some(p => p.blockId === b.id)
+        })
+        if (otherPlacedOnTarget.length === 0 && otherFloatingToTarget.length === 0) {
+          setPendingTransfers(prev => prev.filter(r => r.id !== transfer.id))
+        }
+      }
+    }
+
     // Clear validation errors
+    setValidationErrors([])
+  }
+
+  function handleReturnTransferClick(block: FloatingBlock) {
+    if (!block.transferredTo) {
+      handleReturnBlock(block.id)
+      return
+    }
+
+    // Count how many blocks of this class are associated with the target teacher
+    // (both placed on target and floating with transferredTo)
+    const targetTeacher = block.transferredTo
+    const matchingBlocks = floatingBlocks.filter(b =>
+      b.subject === block.subject && b.grade === block.grade &&
+      b.sourceTeacher === block.sourceTeacher && (
+        b.transferredTo === targetTeacher ||
+        pendingPlacements.some(p => p.blockId === b.id && p.teacher === targetTeacher)
+      )
+    )
+
+    setReturnTransferModal({
+      block,
+      totalBlocks: matchingBlocks.length,
+    })
+  }
+
+  function handleReturnAllTransferred(block: FloatingBlock) {
+    if (!block.transferredTo || !workingSchedules) return
+
+    const targetTeacher = block.transferredTo
+    // Find all floating blocks of this class that originated from the same source teacher
+    // and are associated with the target teacher (via transferredTo or placement)
+    const matchingBlocks = floatingBlocks.filter(b =>
+      b.subject === block.subject && b.grade === block.grade &&
+      b.sourceTeacher === block.sourceTeacher && (
+        b.transferredTo === targetTeacher ||
+        pendingPlacements.some(p => p.blockId === b.id && p.teacher === targetTeacher)
+      )
+    )
+
+    const newTeacherSchedules = JSON.parse(JSON.stringify(workingSchedules.teacherSchedules))
+    const newGradeSchedules = JSON.parse(JSON.stringify(workingSchedules.gradeSchedules))
+    const placementsToRemove = new Set<string>()
+    const blocksToRemove = new Set<string>()
+
+    for (const b of matchingBlocks) {
+      const placement = pendingPlacements.find(p => p.blockId === b.id)
+
+      // If placed, restore the cell to what was there before placement
+      if (placement) {
+        newTeacherSchedules[placement.teacher][placement.day][placement.block] = placement.previousEntry || [b.grade, BLOCK_TYPE_OPEN]
+        if (newGradeSchedules[b.grade]?.[placement.day]?.[placement.block]) {
+          newGradeSchedules[b.grade][placement.day][placement.block] = null
+        }
+        placementsToRemove.add(b.id)
+      }
+
+      // Check if original location is occupied by another placed block
+      const occupyingPlacement = pendingPlacements.find(
+        p => p.teacher === b.sourceTeacher && p.day === b.sourceDay && p.block === b.sourceBlock && !placementsToRemove.has(p.blockId)
+      )
+      if (occupyingPlacement) {
+        // Remove that placement — it becomes unplaced floating
+        placementsToRemove.add(occupyingPlacement.blockId)
+      }
+
+      // Restore to original location
+      newTeacherSchedules[b.sourceTeacher][b.sourceDay][b.sourceBlock] = b.entry
+      blocksToRemove.add(b.id)
+    }
+
+    setWorkingSchedules({ teacherSchedules: newTeacherSchedules, gradeSchedules: newGradeSchedules })
+    setPendingPlacements(prev => prev.filter(p => !placementsToRemove.has(p.blockId)))
+    setFloatingBlocks(prev => prev.filter(b => !blocksToRemove.has(b.id)))
+
+    // Clear selection if it was one of the returned blocks
+    if (selectedFloatingBlock && blocksToRemove.has(selectedFloatingBlock)) {
+      setSelectedFloatingBlock(null)
+    }
+
+    // Clear the transfer
+    const transfer = pendingTransfers.find(r =>
+      r.fromTeacher === block.sourceTeacher && r.subject === block.subject && r.grade === block.grade
+    )
+    if (transfer) {
+      setPendingTransfers(prev => prev.filter(r => r.id !== transfer.id))
+    }
+
     setValidationErrors([])
   }
 
@@ -3588,14 +3756,23 @@ export default function HistoryDetailPage() {
     const newTeacherSchedules = JSON.parse(JSON.stringify(workingSchedules.teacherSchedules))
     const newGradeSchedules = JSON.parse(JSON.stringify(workingSchedules.gradeSchedules))
 
-    // Clear the placement location - set to OPEN
-    newTeacherSchedules[placement.teacher][placement.day][placement.block] = [block.grade, BLOCK_TYPE_OPEN]
+    // Restore the cell to what was there before placement
+    newTeacherSchedules[placement.teacher][placement.day][placement.block] = placement.previousEntry || [block.grade, BLOCK_TYPE_OPEN]
     if (newGradeSchedules[block.grade]?.[placement.day]?.[placement.block]) {
       newGradeSchedules[block.grade][placement.day][placement.block] = null
     }
 
     setWorkingSchedules({ teacherSchedules: newTeacherSchedules, gradeSchedules: newGradeSchedules })
     setPendingPlacements(prev => prev.filter(p => p.blockId !== blockId))
+
+    // If unplacing from a cross-teacher placement (via transfer), mark the floating block
+    // so it shows under the target teacher instead of the source teacher
+    if (placement.teacher !== block.sourceTeacher) {
+      setFloatingBlocks(prev => prev.map(b =>
+        b.id === blockId ? { ...b, transferredTo: placement.teacher } : b
+      ))
+    }
+
     setSelectedFloatingBlock(blockId)
 
     // Clear validation errors
@@ -3968,7 +4145,7 @@ export default function HistoryDetailPage() {
       workingSchedules,
       blockers,
       attemptIndex * 17 + Date.now() % 1000,
-      freeformClasses || undefined
+      effectiveFreeformClasses || undefined
     )
 
     if (!result) {
@@ -4027,7 +4204,7 @@ export default function HistoryDetailPage() {
       restoredSchedules,
       conflictResolution.blockersList,
       (conflictResolution.attemptIndex + 1) * 17 + Date.now() % 1000,
-      freeformClasses || undefined
+      effectiveFreeformClasses || undefined
     )
 
     if (!result) {
@@ -4355,7 +4532,7 @@ export default function HistoryDetailPage() {
           if (uniqueBlocks.size > 1) {
             errors.push({
               type: 'subject_conflict',
-              message: `[Subject Conflict] ${grade} has ${subject} at ${uniqueBlocks.size} different times on ${day}`,
+              message: `[Subject Conflict] ${grade} has ${subject} at ${uniqueBlocks.size} different times on ${day}: ${occurrences.map(o => `${o.teacher} B${o.block}`).join(', ')}`,
               cells: occurrences.map(o => ({ teacher: o.teacher, day, block: o.block, grade, subject }))
             })
           }
@@ -4630,6 +4807,34 @@ export default function HistoryDetailPage() {
       }
     }
 
+    // 2b. Cross-teacher class placement - class blocks can only be placed on teachers who teach them
+    if (effectiveFreeformClasses) {
+      for (const placement of pendingPlacements) {
+        const placedBlock = floatingBlocks.find(b => b.id === placement.blockId)
+        if (!placedBlock) continue
+
+        // Skip OPEN and Study Hall blocks — they can move freely
+        if (!isScheduledClass(placedBlock.subject)) continue
+
+        // Skip if placed back on the original teacher
+        if (placement.teacher === placedBlock.sourceTeacher) continue
+
+        // Check if the target teacher has a class definition matching this grade+subject
+        // effectiveFreeformClasses already reflects pending transfers, so no separate check needed
+        const hasMatchingClass = effectiveFreeformClasses.some(cls =>
+          cls.teacher === placement.teacher && cls.subject === placedBlock.subject && cls.grade === placedBlock.grade
+        )
+
+        if (!hasMatchingClass) {
+          errors.push({
+            type: 'teacher_conflict',
+            message: `[Wrong Teacher] ${placement.teacher} doesn't teach ${placedBlock.grade} ${placedBlock.subject} — only the assigned teacher's schedule can hold this class`,
+            cells: [{ teacher: placement.teacher, day: placement.day, block: placement.block }]
+          })
+        }
+      }
+    }
+
     // 3. Teacher conflicts - check if multiple floating blocks placed at same teacher/slot
     const placementsByTeacherSlot = new Map<string, PendingPlacement[]>()
     for (const p of pendingPlacements) {
@@ -4666,17 +4871,17 @@ export default function HistoryDetailPage() {
     errors.push(...subjectConflictErrors)
 
     // 6. Fixed slot & availability - use shared core functions if class definitions available
-    if (freeformClasses) {
-      const fixedSlotErrors = checkFixedSlotViolationsCore(workingSchedules.teacherSchedules, freeformClasses)
+    if (effectiveFreeformClasses) {
+      const fixedSlotErrors = checkFixedSlotViolationsCore(workingSchedules.teacherSchedules, effectiveFreeformClasses)
       errors.push(...fixedSlotErrors)
 
-      const availabilityErrors = checkAvailabilityViolationsCore(workingSchedules.teacherSchedules, freeformClasses)
+      const availabilityErrors = checkAvailabilityViolationsCore(workingSchedules.teacherSchedules, effectiveFreeformClasses)
       errors.push(...availabilityErrors)
 
       // 7. Co-taught classes - same grade+subject with different teachers must be at same time
       // (Freeform-specific: checks pending placements for co-taught consistency)
-      const coTaughtGroups = new Map<string, typeof freeformClasses>()
-      for (const cls of freeformClasses) {
+      const coTaughtGroups = new Map<string, typeof effectiveFreeformClasses>()
+      for (const cls of effectiveFreeformClasses) {
         const key = `${cls.grade}|${cls.subject}`
         if (!coTaughtGroups.has(key)) {
           coTaughtGroups.set(key, [])
@@ -5564,6 +5769,145 @@ export default function HistoryDetailPage() {
     })
   }
 
+  // Match a snapshot entry's grade display to the transfer's grade string
+  // Snapshot grades are stored as an array — join display_names to compare
+  function snapshotGradeDisplay(entry: ClassSnapshot): string {
+    const names = entry.grades?.map(g => g.display_name) || []
+    return names.length > 1 ? names.join(', ') : names[0] || ''
+  }
+
+  // Apply pending transfers to the classes snapshot
+  // Each transfer is essentially copying/moving a class definition (grade+subject+restrictions) to a new teacher
+  function applyTransfersToSnapshot(
+    snapshot: ClassSnapshot[],
+    transfers: PendingTransfer[],
+    teachersSnapshot: TeacherSnapshot[]
+  ): ClassSnapshot[] {
+    const updated = JSON.parse(JSON.stringify(snapshot)) as ClassSnapshot[]
+
+    for (const r of transfers) {
+      const targetTeacher = teachersSnapshot.find(t => t.name === r.toTeacher)
+
+      if (r.moveType === 'all') {
+        // Move the entire class definition (grade+subject+days+restrictions) to the new teacher
+        const entry = updated.find(c =>
+          c.teacher_name === r.fromTeacher && c.subject_name === r.subject && snapshotGradeDisplay(c) === r.grade
+        )
+        if (entry && targetTeacher) {
+          entry.teacher_id = targetTeacher.id
+          entry.teacher_name = r.toTeacher
+        }
+      } else {
+        // moveType === 'one': split one day off the class definition
+        const entry = updated.find(c =>
+          c.teacher_name === r.fromTeacher && c.subject_name === r.subject && snapshotGradeDisplay(c) === r.grade
+        )
+        if (entry && targetTeacher) {
+          // Decrement source teacher's days_per_week
+          entry.days_per_week -= 1
+          if (entry.days_per_week <= 0) {
+            const idx = updated.indexOf(entry)
+            updated.splice(idx, 1)
+          }
+          // Check if target teacher already has an entry for this grade+subject (from a previous transfer)
+          const existing = updated.find(c =>
+            c.teacher_name === r.toTeacher && c.subject_name === r.subject && snapshotGradeDisplay(c) === r.grade
+          )
+          if (existing) {
+            existing.days_per_week += 1
+          } else {
+            // Copy the full class definition (grades, restrictions, elective flag, etc.) to the new teacher
+            updated.push({
+              ...JSON.parse(JSON.stringify(entry)),
+              teacher_id: targetTeacher.id,
+              teacher_name: r.toTeacher,
+              days_per_week: 1,
+            })
+          }
+        }
+      }
+    }
+
+    return updated
+  }
+
+  // Apply transfers to DB class definitions
+  async function applyTransfersToDB(
+    transfers: PendingTransfer[],
+    snapshot: ClassSnapshot[],
+    teachersSnapshot: TeacherSnapshot[],
+    quarterId: string
+  ) {
+    // Fetch classes once for all transfers
+    const classesRes = await fetch(`/api/classes?quarter_id=${quarterId}`)
+    const allClasses = await classesRes.json()
+
+    for (const r of transfers) {
+      const targetTeacher = teachersSnapshot.find(t => t.name === r.toTeacher)
+      if (!targetTeacher) continue
+
+      const sourceClass = snapshot.find(c =>
+        c.teacher_name === r.fromTeacher && c.subject_name === r.subject && snapshotGradeDisplay(c) === r.grade
+      )
+      if (!sourceClass) continue
+
+      // Match DB classes by teacher+subject+grade_ids
+      const sourceGradeIds = new Set(sourceClass.grade_ids)
+      const matchesGrades = (dbClass: Record<string, unknown>) => {
+        const dbGradeIds: string[] = (dbClass.grade_ids as string[]) || []
+        if (dbGradeIds.length !== sourceGradeIds.size) return false
+        return dbGradeIds.every(id => sourceGradeIds.has(id))
+      }
+
+      if (r.moveType === 'all') {
+        // Find the DB class for this teacher+subject+grades and reassign teacher
+        const dbClass = allClasses.find((c: Record<string, unknown>) =>
+          (c.teacher as Record<string, unknown>)?.name === r.fromTeacher &&
+          (c.subject as Record<string, unknown>)?.name === r.subject &&
+          matchesGrades(c)
+        )
+        if (dbClass) {
+          await fetch(`/api/classes/${dbClass.id}`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ teacher_id: targetTeacher.id })
+          })
+        }
+      } else {
+        // moveType === 'one': decrement source, create/increment for target
+        const dbClass = allClasses.find((c: Record<string, unknown>) =>
+          (c.teacher as Record<string, unknown>)?.name === r.fromTeacher &&
+          (c.subject as Record<string, unknown>)?.name === r.subject &&
+          matchesGrades(c)
+        )
+        if (dbClass) {
+          if (dbClass.days_per_week <= 1) {
+            await fetch(`/api/classes/${dbClass.id}`, { method: 'DELETE' })
+          } else {
+            await fetch(`/api/classes/${dbClass.id}`, {
+              method: 'PUT',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ days_per_week: dbClass.days_per_week - 1 })
+            })
+          }
+          // Create new class for target teacher (copies grade_ids, subject, elective flag)
+          await fetch('/api/classes', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              quarter_id: quarterId,
+              teacher_id: targetTeacher.id,
+              subject_id: sourceClass.subject_id,
+              grade_ids: sourceClass.grade_ids,
+              days_per_week: 1,
+              is_elective: sourceClass.is_elective,
+            })
+          })
+        }
+      }
+    }
+  }
+
   function handleValidate() {
     const errors = validatePlacements()
     setValidationErrors(errors)
@@ -5585,14 +5929,57 @@ export default function HistoryDetailPage() {
       return
     }
 
+    // If there are pending transfers, show review modal before proceeding
+    if (pendingTransfers.length > 0) {
+      setReviewTransfersModal({
+        isOpen: true,
+        updateDB: true,
+        onConfirm: () => proceedWithFreeformSave(createNew)
+      })
+      return
+    }
+
+    proceedWithFreeformSave(createNew)
+  }
+
+  async function proceedWithFreeformSave(createNew: boolean) {
+    if (!generation || !selectedResult || !workingSchedules) return
+
     const optionIndex = parseInt(viewingOption) - 1
 
-    // Save current state for undo
+    // Save current state for undo (including stats for snapshot restoration)
     const previousOptions: ScheduleOption[] = JSON.parse(JSON.stringify(generation.options))
+    const previousStats = generation.stats
     const previousSelectedOption = viewingOption
 
-    // Build updated option with working schedules
-    const DAYS = ["Mon", "Tues", "Wed", "Thurs", "Fri"]
+    // Apply transfers to snapshot if any
+    let updatedStats = generation.stats
+    if (pendingTransfers.length > 0 && generation.stats?.classes_snapshot && generation.stats?.teachers_snapshot) {
+      const updatedSnapshot = applyTransfersToSnapshot(
+        generation.stats.classes_snapshot,
+        pendingTransfers,
+        generation.stats.teachers_snapshot
+      )
+      updatedStats = {
+        ...generation.stats,
+        classes_snapshot: updatedSnapshot
+      }
+
+      // Optionally update DB class definitions
+      if (reviewTransfersModal?.updateDB && generation.stats.classes_snapshot && generation.stats.teachers_snapshot) {
+        try {
+          await applyTransfersToDB(
+            pendingTransfers,
+            generation.stats.classes_snapshot,
+            generation.stats.teachers_snapshot,
+            generation.quarter_id || ''
+          )
+        } catch (error) {
+          console.error('Failed to update DB class definitions:', error)
+          toast.error("Class transfers saved to schedule but failed to update database class definitions")
+        }
+      }
+    }
 
     // Update studyHallAssignments if any study halls were moved
     let updatedStudyHallAssignments = [...selectedResult.studyHallAssignments]
@@ -5625,41 +6012,14 @@ export default function HistoryDetailPage() {
       selectedResult.gradeSchedules // Fallback for grade keys
     )
 
-    const updatedOption: ScheduleOption = {
+    const updatedOption: ScheduleOption = recalculateOptionStats({
       ...selectedResult,
       teacherSchedules: workingSchedules.teacherSchedules,
       gradeSchedules: rebuiltGradeSchedules,
       studyHallAssignments: updatedStudyHallAssignments,
-    }
-
-    // Regenerate teacher stats
-    updatedOption.teacherStats = selectedResult.teacherStats.map(stat => {
-      const schedule = workingSchedules.teacherSchedules[stat.teacher]
-      let teaching = 0, studyHall = 0, open = 0, backToBackIssues = 0
-
-      for (const day of DAYS) {
-        let prevWasOpen = false
-        for (let block = 1; block <= 5; block++) {
-          const entry = schedule?.[day]?.[block]
-          if (!entry || isOpenBlock(entry[1])) {
-            open++
-            if (prevWasOpen && isFullTime(stat.status)) backToBackIssues++
-            prevWasOpen = true
-          } else if (isStudyHall(entry[1])) {
-            studyHall++
-            prevWasOpen = true
-          } else {
-            teaching++
-            prevWasOpen = false
-          }
-        }
-      }
-
-      return { ...stat, teaching, studyHall, open, totalUsed: teaching + studyHall, backToBackIssues }
     })
 
-    // Regenerate total back-to-back issues
-    updatedOption.backToBackIssues = updatedOption.teacherStats.reduce((sum, s) => sum + s.backToBackIssues, 0)
+    const hasTransferSnapshots = pendingTransfers.length > 0
 
     // Define the save function to pass to validation modal
     const doSave = async () => {
@@ -5685,6 +6045,7 @@ export default function HistoryDetailPage() {
           body: JSON.stringify({
             options: updatedOptions,
             ...(createNew && { selected_option: newOptionIndex }),
+            ...(hasTransferSnapshots && { stats: updatedStats }),
           }),
         })
 
@@ -5692,6 +6053,7 @@ export default function HistoryDetailPage() {
           setGeneration({
             ...generation,
             options: updatedOptions,
+            ...(hasTransferSnapshots && { stats: updatedStats }),
             ...(createNew && { selected_option: newOptionIndex }),
           })
           exitFreeformMode()
@@ -5703,9 +6065,11 @@ export default function HistoryDetailPage() {
 
           // Show success toast with undo
           const moveCount = floatingBlocks.length
+          const transferCount = pendingTransfers.length
+          const transferSuffix = transferCount > 0 ? ` (${transferCount} transfer${transferCount !== 1 ? 's' : ''})` : ''
           const message = createNew
-            ? `Created Rev ${newOptionIndex} with ${moveCount} change${moveCount !== 1 ? 's' : ''}`
-            : `Applied ${moveCount} change${moveCount !== 1 ? 's' : ''} to Rev ${viewingOption}`
+            ? `Created Rev ${newOptionIndex} with ${moveCount} change${moveCount !== 1 ? 's' : ''}${transferSuffix}`
+            : `Applied ${moveCount} change${moveCount !== 1 ? 's' : ''} to Rev ${viewingOption}${transferSuffix}`
 
           // Dismiss any existing undo toast
           if (undoToastId.current) toast.dismiss(undoToastId.current)
@@ -5722,10 +6086,17 @@ export default function HistoryDetailPage() {
                       const undoRes = await fetch(`/api/history/${id}`, {
                         method: "PUT",
                         headers: { "Content-Type": "application/json" },
-                        body: JSON.stringify({ options: previousOptions }),
+                        body: JSON.stringify({
+                          options: previousOptions,
+                          ...(hasTransferSnapshots && { stats: previousStats }),
+                        }),
                       })
                       if (undoRes.ok) {
-                        setGeneration((prev) => prev ? { ...prev, options: previousOptions } : prev)
+                        setGeneration((prev) => prev ? {
+                          ...prev,
+                          options: previousOptions,
+                          ...(hasTransferSnapshots && { stats: previousStats }),
+                        } : prev)
                         if (createNew) {
                           setViewingOption(previousSelectedOption)
                         }
@@ -5761,7 +6132,7 @@ export default function HistoryDetailPage() {
 
     // Run validation with visual modal, then save if passed
     // Skip study hall check if study halls were stripped (will be reassigned after save)
-    runValidationWithModal(updatedOption, generation.stats, doSave, 'save', {
+    runValidationWithModal(updatedOption, updatedStats, doSave, 'save', {
       skipStudyHallCheck: studyHallsStripped
     })
   }
@@ -6211,6 +6582,7 @@ export default function HistoryDetailPage() {
                     teacherSchedules={selectedResult.teacherSchedules}
                     backToBackIssues={selectedResult.backToBackIssues}
                     studyHallsPlaced={selectedResult.studyHallsPlaced}
+                    expectedTeachingSessions={expectedTeachingSessions}
                     defaultExpanded={isNewGeneration}
                     validationIssues={savedScheduleValidationIssues}
                   />
@@ -6417,6 +6789,11 @@ export default function HistoryDetailPage() {
                       <span className="text-indigo-600">
                         {pendingPlacements.length} placed
                       </span>
+                      {pendingTransfers.length > 0 && (
+                        <span className="text-blue-600">
+                          {pendingTransfers.length} transfer{pendingTransfers.length !== 1 ? 's' : ''}
+                        </span>
+                      )}
                       {/* Status indicators */}
                       {conflictingBlockIds.length > 0 && !conflictResolution && (
                         <span className="text-amber-600 font-medium">
@@ -7174,9 +7551,10 @@ export default function HistoryDetailPage() {
                           return teacherA.localeCompare(teacherB)
                         })
                         .map(([teacher, schedule]) => {
-                          // Get unplaced floating blocks from this teacher
+                          // Get unplaced floating blocks belonging to this teacher
+                          // Transferred blocks show under the target teacher (transferredTo)
                           const teacherFloatingBlocks = floatingBlocks.filter(b =>
-                            b.sourceTeacher === teacher &&
+                            (b.transferredTo || b.sourceTeacher) === teacher &&
                             !pendingPlacements.some(p => p.blockId === b.id)
                           )
 
@@ -7242,11 +7620,13 @@ export default function HistoryDetailPage() {
                                     const error = validationErrors.find(e => e.blockId === block.id)
                                     const blockIsStudyHall = isStudyHall(block.subject)
 
+                                    const isTransferred = !!block.transferredTo
+
                                     return (
                                       <div
                                         key={block.id}
                                         onClick={() => handleSelectFloatingBlock(block.id)}
-                                        title="Click to select, then click a cell to place"
+                                        title={isTransferred ? `Transferred from ${block.sourceTeacher}` : "Click to select, then click a cell to place"}
                                         className={`
                                           p-1 rounded border text-center w-[60px] cursor-pointer transition-all relative group
                                           ${error
@@ -7255,12 +7635,13 @@ export default function HistoryDetailPage() {
                                               ? 'ring-2 ring-indigo-500'
                                               : 'hover:ring-2 hover:ring-indigo-300'
                                           }
-                                          ${blockIsStudyHall
+                                          ${!error && (blockIsStudyHall
                                             ? 'bg-blue-100 border-blue-200'
                                             : 'bg-green-50 border-green-200'
-                                          }
+                                          )}
                                         `}
                                       >
+                                        {isTransferred && <ArrowLeftRight className="absolute top-0 left-0 h-2.5 w-2.5 text-teal-500 z-10" />}
                                         <div className="font-medium text-xs leading-tight truncate">
                                           {block.grade.replace(' Grade', '').replace('Kindergarten', 'K')}
                                         </div>
@@ -7270,10 +7651,14 @@ export default function HistoryDetailPage() {
                                         <button
                                           onClick={(e) => {
                                             e.stopPropagation()
-                                            handleReturnBlock(block.id)
+                                            if (isTransferred) {
+                                              handleReturnTransferClick(block)
+                                            } else {
+                                              handleReturnBlock(block.id)
+                                            }
                                           }}
                                           className="absolute -top-1 -right-1 w-4 h-4 bg-slate-200 hover:bg-slate-300 rounded-full text-[10px] leading-none opacity-0 group-hover:opacity-100 transition-opacity"
-                                          title="Return to original position"
+                                          title={isTransferred ? `Return to ${block.sourceTeacher}` : "Return to original position"}
                                         >
                                           ↩
                                         </button>
@@ -7414,7 +7799,7 @@ export default function HistoryDetailPage() {
             <DialogTitle className="flex items-center gap-2">
               {validationModal?.checks.some(c => c.status === 'pending' || c.status === 'checking')
                 ? <Loader2 className="h-5 w-5 animate-spin text-blue-600" />
-                : validationModal?.checks.some(c => c.status === 'failed' && c.errorCount && c.errorCount > 0 && c.name !== 'Back-to-back blocks')
+                : validationModal?.checks.some(c => c.status === 'failed' && c.errorCount && c.errorCount > 0 && c.name !== 'Back-to-back blocks' && c.name !== 'Study hall coverage')
                   ? <AlertTriangle className="h-5 w-5 text-red-500" />
                   : validationModal?.checks.some(c => c.status === 'failed' && c.errorCount && c.errorCount > 0)
                     ? <AlertTriangle className="h-5 w-5 text-amber-500" />
@@ -7465,7 +7850,10 @@ export default function HistoryDetailPage() {
                       {check.status === 'passed' && (
                         <Check className="h-4 w-4 text-green-600" />
                       )}
-                      {check.status === 'failed' && (
+                      {check.status === 'failed' && (check.name === 'Back-to-back blocks' || check.name === 'Study hall coverage') && (
+                        <AlertTriangle className="h-4 w-4 text-amber-500" />
+                      )}
+                      {check.status === 'failed' && check.name !== 'Back-to-back blocks' && check.name !== 'Study hall coverage' && (
                         <X className="h-4 w-4 text-red-500" />
                       )}
                       {check.status === 'skipped' && (
@@ -7475,6 +7863,7 @@ export default function HistoryDetailPage() {
                     <span className={`flex-1 text-sm ${
                       check.status === 'checking' ? 'text-blue-600 font-medium' :
                       check.status === 'passed' ? 'text-slate-600' :
+                      check.status === 'failed' && (check.name === 'Back-to-back blocks' || check.name === 'Study hall coverage') ? 'text-amber-600 font-medium' :
                       check.status === 'failed' ? 'text-red-600 font-medium' :
                       check.status === 'skipped' ? 'text-slate-400' :
                       'text-slate-400'
@@ -7488,7 +7877,7 @@ export default function HistoryDetailPage() {
                     )}
                     {check.status === 'failed' && check.errorCount && check.errorCount > 0 && (
                       <span className={`text-xs px-1.5 py-0.5 rounded flex-shrink-0 ${
-                        check.name === 'Back-to-back blocks'
+                        check.name === 'Back-to-back blocks' || check.name === 'Study hall coverage'
                           ? 'bg-amber-100 text-amber-700'
                           : 'bg-red-100 text-red-700'
                       }`}>
@@ -7520,7 +7909,7 @@ export default function HistoryDetailPage() {
               {(() => {
                 const totalIssues = validationModal?.checks.reduce((sum, c) => sum + (c.errorCount || 0), 0) || 0
                 const hardErrors = validationModal?.checks
-                  .filter(c => c.status === 'failed' && c.name !== 'Back-to-back blocks')
+                  .filter(c => c.status === 'failed' && c.name !== 'Back-to-back blocks' && c.name !== 'Study hall coverage')
                   .reduce((sum, c) => sum + (c.errorCount || 0), 0) || 0
                 const warnings = totalIssues - hardErrors
 
@@ -7567,6 +7956,265 @@ export default function HistoryDetailPage() {
               </Button>
             </DialogFooter>
           )}
+        </DialogContent>
+      </Dialog>
+
+      {/* Transfer Confirmation Modal - shown when dropping a class on a different teacher */}
+      <Dialog open={transferModal !== null} onOpenChange={(open) => {
+        if (!open) setTransferModal(null)
+      }}>
+        <DialogContent className="sm:max-w-[400px]">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <ArrowLeftRight className="h-5 w-5 text-blue-600" />
+              Transfer Class
+            </DialogTitle>
+            <DialogDescription>
+              <span className="font-semibold">{transferModal?.block.grade} {transferModal?.block.subject}</span> is currently assigned to{' '}
+              <span className="font-semibold">{transferModal?.block.sourceTeacher}</span>.
+              Transfer to <span className="font-semibold">{transferModal?.location.teacher}</span>?
+            </DialogDescription>
+          </DialogHeader>
+          <div className="text-sm text-slate-500 pb-1">
+            <p>This will transfer <span className="font-medium text-slate-700">{transferModal?.block.grade} {transferModal?.block.subject}</span> from <span className="font-medium text-slate-700">{transferModal?.block.sourceTeacher}</span>&apos;s classes to <span className="font-medium text-slate-700">{transferModal?.location.teacher}</span>&apos;s classes.</p>
+          </div>
+          <div className="space-y-3 pt-1">
+            {(transferModal?.totalBlocks ?? 0) > 1 && (
+              <div>
+                <Button
+                  onClick={() => {
+                    if (!transferModal) return
+                    const { block, location } = transferModal
+                    doPlaceBlock(block, location)
+                    setPendingTransfers(prev => [...prev, {
+                      id: `transfer-${Date.now()}`,
+                      fromTeacher: block.sourceTeacher,
+                      toTeacher: location.teacher,
+                      subject: block.subject,
+                      grade: block.grade,
+                      moveType: 'one'
+                    }])
+                    setTransferModal(null)
+                  }}
+                  variant="outline"
+                  className="w-full"
+                >
+                  Transfer this class only
+                </Button>
+                <p className="text-xs text-slate-400 mt-1 px-1">{transferModal?.block.sourceTeacher} keeps the remaining {(transferModal?.totalBlocks ?? 1) - 1} class block{((transferModal?.totalBlocks ?? 1) - 1) !== 1 ? 's' : ''}.</p>
+              </div>
+            )}
+            <div>
+              <Button
+                onClick={() => {
+                  if (!transferModal || !workingSchedules) return
+                  const { block, location } = transferModal
+                  // Place the dropped block first
+                  doPlaceBlock(block, location)
+
+                  if ((transferModal.totalBlocks) > 1) {
+                    // Find remaining blocks of this class on the source teacher's schedule
+                    const sourceSchedule = workingSchedules.teacherSchedules[block.sourceTeacher]
+                    if (sourceSchedule) {
+                      const newFloaters: FloatingBlock[] = []
+
+                      // Read from the ORIGINAL working schedules (before doPlaceBlock modified state)
+                      // Since setState is async, the original reference is still valid here.
+                      for (const day of Object.keys(sourceSchedule)) {
+                        for (const blockNum of Object.keys(sourceSchedule[day])) {
+                          const entry = sourceSchedule[day][parseInt(blockNum)]
+                          if (!entry) continue
+                          // Skip if this is the block we just placed
+                          if (day === block.sourceDay && parseInt(blockNum) === block.sourceBlock) continue
+                          // Match: same grade+subject on same source teacher
+                          if (entry[0] === block.grade && entry[1] === block.subject) {
+                            const floatId = `${block.sourceTeacher}-${day}-${blockNum}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`
+                            newFloaters.push({
+                              id: floatId,
+                              sourceTeacher: block.sourceTeacher,
+                              sourceDay: day,
+                              sourceBlock: parseInt(blockNum),
+                              grade: entry[0],
+                              subject: entry[1],
+                              entry: entry,
+                              isDisplaced: true,
+                              transferredTo: location.teacher
+                            })
+                          }
+                        }
+                      }
+
+                      if (newFloaters.length > 0) {
+                        // Set source cells to OPEN in working schedules
+                        setWorkingSchedules(prev => {
+                          if (!prev) return prev
+                          const updated = JSON.parse(JSON.stringify(prev.teacherSchedules))
+                          for (const f of newFloaters) {
+                            if (updated[f.sourceTeacher]?.[f.sourceDay]?.[f.sourceBlock]) {
+                              const oldGrade = updated[f.sourceTeacher][f.sourceDay][f.sourceBlock][0]
+                              updated[f.sourceTeacher][f.sourceDay][f.sourceBlock] = [oldGrade, BLOCK_TYPE_OPEN]
+                            }
+                          }
+                          return { ...prev, teacherSchedules: updated }
+                        })
+                        // Add to floating blocks and select the first one
+                        setFloatingBlocks(prev => [...prev, ...newFloaters])
+                        setSelectedFloatingBlock(newFloaters[0].id)
+                      }
+                    }
+                  }
+
+                  // Record the transfer
+                  setPendingTransfers(prev => [...prev, {
+                    id: `transfer-${Date.now()}`,
+                    fromTeacher: block.sourceTeacher,
+                    toTeacher: location.teacher,
+                    subject: block.subject,
+                    grade: block.grade,
+                    moveType: 'all'
+                  }])
+                  setTransferModal(null)
+                }}
+                className="w-full"
+              >
+                {(transferModal?.totalBlocks ?? 0) > 1
+                  ? `Transfer all ${transferModal?.totalBlocks} classes to ${transferModal?.location.teacher}`
+                  : 'Transfer class'}
+              </Button>
+              {(transferModal?.totalBlocks ?? 0) > 1 && (
+                <p className="text-xs text-slate-400 mt-1 px-1">Transfers all {transferModal?.totalBlocks} classes to {transferModal?.location.teacher}. You&apos;ll need to place the remaining {(transferModal?.totalBlocks ?? 1) - 1} class block{((transferModal?.totalBlocks ?? 1) - 1) !== 1 ? 's' : ''} on their schedule.</p>
+              )}
+            </div>
+            <Button
+              variant="ghost"
+              onClick={() => setTransferModal(null)}
+              className="w-full"
+            >
+              Cancel
+            </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      {/* Review Transfers Modal - shown before save when there are pending transfers */}
+      <Dialog open={reviewTransfersModal?.isOpen ?? false} onOpenChange={(open) => {
+        if (!open) setReviewTransfersModal(null)
+      }}>
+        <DialogContent className="sm:max-w-[450px]">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <ArrowLeftRight className="h-5 w-5 text-blue-600" />
+              Review Class Transfers
+            </DialogTitle>
+            <DialogDescription>
+              The following class transfers will be applied to the schedule snapshot.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="py-4 space-y-2 max-h-[40vh] overflow-y-auto">
+            {pendingTransfers.map(r => (
+              <div key={r.id} className="flex items-center gap-2 text-sm py-1.5 px-3 rounded bg-slate-50">
+                <span className="font-medium text-slate-900">{r.subject}</span>
+                <span className="text-slate-400">:</span>
+                <span className="text-slate-600">{r.fromTeacher}</span>
+                <span className="text-slate-400">&rarr;</span>
+                <span className="text-slate-600">{r.toTeacher}</span>
+                <span className="text-xs text-slate-400 ml-auto">
+                  {r.moveType === 'all' ? 'all days' : '1 day'}
+                </span>
+              </div>
+            ))}
+          </div>
+          <div className="flex items-center gap-2 pb-2">
+            <Checkbox
+              id="update-db-classes"
+              checked={reviewTransfersModal?.updateDB ?? true}
+              onCheckedChange={(checked) => {
+                setReviewTransfersModal(prev => prev ? { ...prev, updateDB: !!checked } : null)
+              }}
+            />
+            <label htmlFor="update-db-classes" className="text-sm text-slate-600 cursor-pointer">
+              Also update class definitions in the database
+            </label>
+          </div>
+          <DialogFooter className="gap-2">
+            <Button
+              variant="ghost"
+              onClick={() => setReviewTransfersModal(null)}
+            >
+              Cancel
+            </Button>
+            <Button
+              onClick={() => {
+                if (reviewTransfersModal?.onConfirm) {
+                  reviewTransfersModal.onConfirm()
+                }
+                setReviewTransfersModal(prev => prev ? { ...prev, isOpen: false } : null)
+              }}
+            >
+              Confirm & Save
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Return Transfer Modal - confirmation when returning a transferred block */}
+      <Dialog open={returnTransferModal !== null} onOpenChange={(open) => {
+        if (!open) setReturnTransferModal(null)
+      }}>
+        <DialogContent className="sm:max-w-[400px]">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <ArrowLeftRight className="h-5 w-5 text-orange-600" />
+              Return Transferred Class
+            </DialogTitle>
+            <DialogDescription>
+              <span className="font-semibold">{returnTransferModal?.block.grade} {returnTransferModal?.block.subject}</span> was transferred from{' '}
+              <span className="font-semibold">{returnTransferModal?.block.sourceTeacher}</span>.
+              Return to <span className="font-semibold">{returnTransferModal?.block.sourceTeacher}</span>?
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-3 pt-1">
+            {(returnTransferModal?.totalBlocks ?? 0) > 1 && (
+              <div>
+                <Button
+                  onClick={() => {
+                    if (!returnTransferModal) return
+                    handleReturnBlock(returnTransferModal.block.id)
+                    setReturnTransferModal(null)
+                  }}
+                  variant="outline"
+                  className="w-full"
+                >
+                  Return this class only
+                </Button>
+                <p className="text-xs text-slate-400 mt-1 px-1">{returnTransferModal?.block.transferredTo} keeps the remaining {(returnTransferModal?.totalBlocks ?? 1) - 1} class block{((returnTransferModal?.totalBlocks ?? 1) - 1) !== 1 ? 's' : ''}.</p>
+              </div>
+            )}
+            <div>
+              <Button
+                onClick={() => {
+                  if (!returnTransferModal) return
+                  handleReturnAllTransferred(returnTransferModal.block)
+                  setReturnTransferModal(null)
+                }}
+                className="w-full"
+              >
+                {(returnTransferModal?.totalBlocks ?? 0) > 1
+                  ? `Return all ${returnTransferModal?.totalBlocks} classes to ${returnTransferModal?.block.sourceTeacher}`
+                  : `Return class to ${returnTransferModal?.block.sourceTeacher}`}
+              </Button>
+              {(returnTransferModal?.totalBlocks ?? 0) > 1 && (
+                <p className="text-xs text-slate-400 mt-1 px-1">Returns all {returnTransferModal?.totalBlocks} classes back to {returnTransferModal?.block.sourceTeacher} and cancels the transfer.</p>
+              )}
+            </div>
+            <Button
+              variant="ghost"
+              onClick={() => setReturnTransferModal(null)}
+              className="w-full"
+            >
+              Cancel
+            </Button>
+          </div>
         </DialogContent>
       </Dialog>
 
