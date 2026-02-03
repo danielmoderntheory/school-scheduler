@@ -265,7 +265,8 @@ This heavily penalizes missing study halls (each missing = +100) over back-to-ba
 ```
 NEXT_PUBLIC_SUPABASE_URL=https://xxx.supabase.co
 NEXT_PUBLIC_SUPABASE_ANON_KEY=xxx
-APP_PASSWORD=your-secure-password
+APP_VIEW_PASSWORD=your-viewer-password
+APP_ADMIN_PASSWORD=your-admin-password
 SCHEDULER_API_URL=https://school-scheduler-api-xxx.us-central1.run.app
 ```
 

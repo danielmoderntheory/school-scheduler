@@ -1,22 +1,32 @@
 import { NextRequest, NextResponse } from "next/server"
 
-// Check if user is authenticated
+// Auth roles: "admin" (full access) or "readonly" (view only)
+export type AuthRole = "admin" | "readonly" | null
+
+// Check if user is authenticated and get their role
 export async function GET(request: NextRequest) {
   const authCookie = request.cookies.get("auth")
-  const isAuthenticated = authCookie?.value === "authenticated"
-  return NextResponse.json({ isAuthenticated })
+  const value = authCookie?.value
+
+  // Check for valid auth values (admin or readonly only)
+  const isAuthenticated = value === "admin" || value === "readonly"
+  const role: AuthRole = value === "admin" ? "admin"
+    : (value === "readonly" ? "readonly" : null)
+
+  return NextResponse.json({ isAuthenticated, role })
 }
 
 export async function POST(request: NextRequest) {
   const body = await request.json()
   const { password } = body
 
-  const appPassword = process.env.APP_PASSWORD
+  const readonlyPassword = process.env.APP_VIEW_PASSWORD
+  const adminPassword = process.env.APP_ADMIN_PASSWORD
 
-  if (!appPassword) {
-    // No password configured, allow access
-    const response = NextResponse.json({ success: true })
-    response.cookies.set("auth", "authenticated", {
+  // If no passwords configured, allow admin access
+  if (!readonlyPassword && !adminPassword) {
+    const response = NextResponse.json({ success: true, role: "admin" })
+    response.cookies.set("auth", "admin", {
       httpOnly: true,
       secure: process.env.NODE_ENV === "production",
       sameSite: "lax",
@@ -25,19 +35,31 @@ export async function POST(request: NextRequest) {
     return response
   }
 
-  if (password !== appPassword) {
-    return NextResponse.json({ error: "Invalid password" }, { status: 401 })
+  // Check admin password first (if configured)
+  if (adminPassword && password === adminPassword) {
+    const response = NextResponse.json({ success: true, role: "admin" })
+    response.cookies.set("auth", "admin", {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === "production",
+      sameSite: "lax",
+      maxAge: 60 * 60 * 24 * 7, // 7 days
+    })
+    return response
   }
 
-  const response = NextResponse.json({ success: true })
-  response.cookies.set("auth", "authenticated", {
-    httpOnly: true,
-    secure: process.env.NODE_ENV === "production",
-    sameSite: "lax",
-    maxAge: 60 * 60 * 24 * 7, // 7 days
-  })
+  // Check readonly password (if configured)
+  if (readonlyPassword && password === readonlyPassword) {
+    const response = NextResponse.json({ success: true, role: "readonly" })
+    response.cookies.set("auth", "readonly", {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === "production",
+      sameSite: "lax",
+      maxAge: 60 * 60 * 24 * 7, // 7 days
+    })
+    return response
+  }
 
-  return response
+  return NextResponse.json({ error: "Invalid password" }, { status: 401 })
 }
 
 export async function DELETE() {

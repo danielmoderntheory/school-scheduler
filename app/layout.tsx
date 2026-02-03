@@ -6,7 +6,7 @@ import { Toaster } from '@/components/ui/toaster'
 const inter = Inter({ subsets: ['latin'] })
 
 export const metadata: Metadata = {
-  title: 'School Scheduler',
+  title: 'Journey Schedule',
   description: 'Generate optimized K-11th grade school schedules',
   icons: {
     icon: '/icon.svg',

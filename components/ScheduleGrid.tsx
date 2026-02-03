@@ -543,9 +543,12 @@ export function ScheduleGrid({
                             <div className="relative">
                               <span
                                 className={cn(
-                                  "text-xs cursor-pointer hover:underline",
-                                  label ? "text-gray-700 font-medium" : "text-muted-foreground"
+                                  "cursor-pointer hover:underline text-center",
+                                  label
+                                    ? "text-[11px] text-slate-700 font-semibold leading-[1.2]"
+                                    : "text-xs text-muted-foreground"
                                 )}
+                                style={label ? { maxWidth: '100%', display: 'inline-block', wordBreak: 'break-word' } : undefined}
                                 onClick={(e) => {
                                   e.stopPropagation()
                                   const rect = e.currentTarget.getBoundingClientRect()
@@ -681,10 +684,15 @@ export function ScheduleGrid({
 
                         // Read-only display (or grade view)
                         return (
-                          <span className={cn(
-                            "text-xs",
-                            label ? "text-gray-700 font-medium" : "text-muted-foreground"
-                          )}>
+                          <span
+                            className={cn(
+                              "text-center",
+                              label
+                                ? "text-[11px] text-slate-700 font-semibold leading-[1.2]"
+                                : "text-xs text-muted-foreground"
+                            )}
+                            style={label ? { maxWidth: '100%', display: 'inline-block', wordBreak: 'break-word' } : undefined}
+                          >
                             {displayText}
                           </span>
                         )

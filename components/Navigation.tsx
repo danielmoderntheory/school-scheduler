@@ -12,7 +12,8 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
-import { Settings, Users, History, Cog, Heart, GraduationCap, BookOpen, LogIn } from "lucide-react"
+import { Settings, Users, History, Cog, Heart, GraduationCap, BookOpen, LogIn, LogOut } from "lucide-react"
+import { DropdownMenuSeparator } from "@/components/ui/dropdown-menu"
 import { useGeneration } from "@/lib/generation-context"
 
 const mainNavItems = [
@@ -32,17 +33,17 @@ export function Navigation() {
   const pathname = usePathname()
   const router = useRouter()
   const { confirmNavigation } = useGeneration()
-  const [isAuthenticated, setIsAuthenticated] = useState<boolean | null>(null)
+  const [authState, setAuthState] = useState<{ checked: boolean; isAdmin: boolean }>({ checked: false, isAdmin: false })
 
-  // Check auth status for public view mode
+  // Check auth status for view mode
   useEffect(() => {
     async function checkAuth() {
       try {
         const res = await fetch('/api/auth')
         const data = await res.json()
-        setIsAuthenticated(data.isAuthenticated)
+        setAuthState({ checked: true, isAdmin: data.role === 'admin' })
       } catch {
-        setIsAuthenticated(false)
+        setAuthState({ checked: true, isAdmin: false })
       }
     }
     checkAuth()
@@ -55,8 +56,14 @@ export function Navigation() {
     }
   }
 
+  const handleLogout = async () => {
+    await fetch('/api/auth', { method: 'DELETE' })
+    router.push('/login')
+    router.refresh()
+  }
+
   // Show minimal header while checking auth status
-  if (isAuthenticated === null) {
+  if (!authState.checked) {
     return (
       <header className="border-b no-print">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
@@ -66,8 +73,8 @@ export function Navigation() {
     )
   }
 
-  // Public view navigation - simplified header
-  if (isAuthenticated === false) {
+  // Public/readonly view navigation - simplified header (non-admin users)
+  if (!authState.isAdmin) {
     return (
       <header className="border-b no-print">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
@@ -160,6 +167,11 @@ export function Navigation() {
                     </Link>
                   </DropdownMenuItem>
                 ))}
+                <DropdownMenuSeparator />
+                <DropdownMenuItem onClick={handleLogout} className="flex items-center gap-2">
+                  <LogOut className="h-4 w-4" />
+                  Logout
+                </DropdownMenuItem>
               </DropdownMenuContent>
             </DropdownMenu>
           </div>

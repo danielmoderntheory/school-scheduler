@@ -309,6 +309,7 @@ export default function HistoryDetailPage() {
   const [viewMode, setViewMode] = useState<"teacher" | "grade">("teacher")
   const [saving, setSaving] = useState(false)
   const [isPublicView, setIsPublicView] = useState<boolean | null>(null) // null = checking, true = public, false = authenticated
+  const [userRole, setUserRole] = useState<"admin" | "readonly" | null>(null) // User's auth role
 
   // Regeneration state - teachers selected for regeneration
   const [regenMode, setRegenMode] = useState(false)
@@ -665,16 +666,19 @@ export default function HistoryDetailPage() {
     }
   }, [isNewGeneration, generation, id, router])
 
-  // Check if user is authenticated (for public view mode)
+  // Check if user is admin (only admins see full view, everyone else sees public view)
   useEffect(() => {
     async function checkAuth() {
       try {
         const res = await fetch('/api/auth')
         const data = await res.json()
-        setIsPublicView(!data.isAuthenticated)
+        // Only admin users see full view, readonly and unauthenticated see public view
+        setIsPublicView(data.role !== 'admin')
+        setUserRole(data.role || null)
       } catch {
         // On error, assume public view for safety
         setIsPublicView(true)
+        setUserRole(null)
       }
     }
     checkAuth()
@@ -6538,63 +6542,66 @@ export default function HistoryDetailPage() {
                 </Button>
               )}
 
-              <DropdownMenu>
-                <DropdownMenuTrigger asChild>
-                  <Button variant="outline" size="sm" disabled={isGenerating || !!previewOption || regenMode || freeformMode || studyHallMode}>
-                    <MoreVertical className="h-4 w-4" />
-                  </Button>
-                </DropdownMenuTrigger>
-                <DropdownMenuContent align="end">
-                  <DropdownMenuItem onClick={() => enterRegenMode()} disabled={regenMode || swapMode || freeformMode || studyHallMode}>
-                    <RefreshCw className="h-4 w-4 mr-2" />
-                    Regenerate Schedules
-                  </DropdownMenuItem>
-                  <DropdownMenuItem onClick={() => swapMode ? exitSwapMode() : enterSwapMode()} disabled={regenMode || freeformMode || studyHallMode}>
-                    <ArrowLeftRight className="h-4 w-4 mr-2" />
-                    {swapMode ? "Exit Swap Mode" : "Swap Mode"}
-                  </DropdownMenuItem>
-                  <DropdownMenuItem onClick={() => enterFreeformMode()} disabled={regenMode || swapMode || freeformMode || studyHallMode}>
-                    <Hand className="h-4 w-4 mr-2" />
-                    Freeform Mode
-                  </DropdownMenuItem>
-                  <DropdownMenuSeparator />
-                  <DropdownMenuItem onClick={() => enterStudyHallMode()} disabled={regenMode || swapMode || freeformMode || studyHallMode}>
-                    <Shuffle className="h-4 w-4 mr-2" />
-                    Reassign Study Halls
-                  </DropdownMenuItem>
-                  <DropdownMenuSeparator />
-                  <DropdownMenuItem onClick={handleValidateSchedule} disabled={regenMode || swapMode || freeformMode || studyHallMode || repairMode || !!previewOption}>
-                    <AlertTriangle className="h-4 w-4 mr-2" />
-                    Validate Schedule
-                  </DropdownMenuItem>
-                  <DropdownMenuItem onClick={handleStartRepairMode} disabled={regenMode || swapMode || freeformMode || studyHallMode || repairMode || !!previewOption}>
-                    <RefreshCw className="h-4 w-4 mr-2" />
-                    Repair Schedule
-                  </DropdownMenuItem>
-                  <DropdownMenuItem onClick={handleDuplicateRevision} disabled={regenMode || swapMode || freeformMode || studyHallMode || repairMode}>
-                    <Copy className="h-4 w-4 mr-2" />
-                    Duplicate Revision
-                  </DropdownMenuItem>
-                  {generation.selected_option !== parseInt(viewingOption) && !previewOption && (
-                    <DropdownMenuItem onClick={handleMarkAsSelected}>
-                      <Star className="h-4 w-4 mr-2" />
-                      Mark as Selected
+              {/* Edit menu - only visible to admin users */}
+              {userRole === "admin" && (
+                <DropdownMenu>
+                  <DropdownMenuTrigger asChild>
+                    <Button variant="outline" size="sm" disabled={isGenerating || !!previewOption || regenMode || freeformMode || studyHallMode}>
+                      <MoreVertical className="h-4 w-4" />
+                    </Button>
+                  </DropdownMenuTrigger>
+                  <DropdownMenuContent align="end">
+                    <DropdownMenuItem onClick={() => enterRegenMode()} disabled={regenMode || swapMode || freeformMode || studyHallMode}>
+                      <RefreshCw className="h-4 w-4 mr-2" />
+                      Regenerate Schedules
                     </DropdownMenuItem>
-                  )}
-                  {generation.options.length > 1 && !previewOption && (
-                    <>
-                      <DropdownMenuSeparator />
-                      <DropdownMenuItem
-                        onClick={() => handleDeleteOption(parseInt(viewingOption) - 1)}
-                        className="text-red-600 focus:text-red-600"
-                      >
-                        <Trash2 className="h-4 w-4 mr-2" />
-                        Delete Revision {viewingOption}
+                    <DropdownMenuItem onClick={() => swapMode ? exitSwapMode() : enterSwapMode()} disabled={regenMode || freeformMode || studyHallMode}>
+                      <ArrowLeftRight className="h-4 w-4 mr-2" />
+                      {swapMode ? "Exit Swap Mode" : "Swap Mode"}
+                    </DropdownMenuItem>
+                    <DropdownMenuItem onClick={() => enterFreeformMode()} disabled={regenMode || swapMode || freeformMode || studyHallMode}>
+                      <Hand className="h-4 w-4 mr-2" />
+                      Freeform Mode
+                    </DropdownMenuItem>
+                    <DropdownMenuSeparator />
+                    <DropdownMenuItem onClick={() => enterStudyHallMode()} disabled={regenMode || swapMode || freeformMode || studyHallMode}>
+                      <Shuffle className="h-4 w-4 mr-2" />
+                      Reassign Study Halls
+                    </DropdownMenuItem>
+                    <DropdownMenuSeparator />
+                    <DropdownMenuItem onClick={handleValidateSchedule} disabled={regenMode || swapMode || freeformMode || studyHallMode || repairMode || !!previewOption}>
+                      <AlertTriangle className="h-4 w-4 mr-2" />
+                      Validate Schedule
+                    </DropdownMenuItem>
+                    <DropdownMenuItem onClick={handleStartRepairMode} disabled={regenMode || swapMode || freeformMode || studyHallMode || repairMode || !!previewOption}>
+                      <RefreshCw className="h-4 w-4 mr-2" />
+                      Repair Schedule
+                    </DropdownMenuItem>
+                    <DropdownMenuItem onClick={handleDuplicateRevision} disabled={regenMode || swapMode || freeformMode || studyHallMode || repairMode}>
+                      <Copy className="h-4 w-4 mr-2" />
+                      Duplicate Revision
+                    </DropdownMenuItem>
+                    {generation.selected_option !== parseInt(viewingOption) && !previewOption && (
+                      <DropdownMenuItem onClick={handleMarkAsSelected}>
+                        <Star className="h-4 w-4 mr-2" />
+                        Mark as Selected
                       </DropdownMenuItem>
-                    </>
-                  )}
-                </DropdownMenuContent>
-              </DropdownMenu>
+                    )}
+                    {generation.options.length > 1 && !previewOption && (
+                      <>
+                        <DropdownMenuSeparator />
+                        <DropdownMenuItem
+                          onClick={() => handleDeleteOption(parseInt(viewingOption) - 1)}
+                          className="text-red-600 focus:text-red-600"
+                        >
+                          <Trash2 className="h-4 w-4 mr-2" />
+                          Delete Revision {viewingOption}
+                        </DropdownMenuItem>
+                      </>
+                    )}
+                  </DropdownMenuContent>
+                </DropdownMenu>
+              )}
             </div>
           </div>
 
@@ -7476,8 +7483,8 @@ export default function HistoryDetailPage() {
                     {viewMode === "teacher" ? "Teacher Schedules" : "Grade Schedules"}
                   </h3>
                   <div className="flex items-center gap-3 no-print">
-                    {/* Edit OPEN Labels toggle - only in teacher view, hidden during edit modes */}
-                    {viewMode === "teacher" && !regenMode && !swapMode && !freeformMode && !studyHallMode && (
+                    {/* Edit OPEN Labels toggle - only for admin users in teacher view, hidden during edit modes */}
+                    {userRole === "admin" && viewMode === "teacher" && !regenMode && !swapMode && !freeformMode && !studyHallMode && (
                       <label className="flex items-center gap-1.5 cursor-pointer">
                         <Checkbox
                           checked={showOpenLabels}
@@ -7631,7 +7638,7 @@ export default function HistoryDetailPage() {
                                 onDeselect={() => setSelectedFloatingBlock(null)}
                                 openBlockLabels={selectedResult.openBlockLabels}
                                 showOpenLabels={showOpenLabels}
-                                onOpenLabelChange={showOpenLabels && !regenMode && !swapMode && !freeformMode && !studyHallMode ? handleOpenLabelChange : undefined}
+                                onOpenLabelChange={userRole === "admin" && showOpenLabels && !regenMode && !swapMode && !freeformMode && !studyHallMode ? handleOpenLabelChange : undefined}
                               />
                               {/* Unplaced floating blocks from this teacher */}
                               {freeformMode && teacherFloatingBlocks.length > 0 && (
