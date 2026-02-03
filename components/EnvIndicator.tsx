@@ -1,7 +1,8 @@
 "use client"
 
 import { useState } from "react"
-import { ChevronRight, ChevronLeft } from "lucide-react"
+
+
 
 export function EnvIndicator() {
   const [expanded, setExpanded] = useState(false)
@@ -36,26 +37,23 @@ export function EnvIndicator() {
       : "border-blue-200"
 
   return (
-    <div className="fixed bottom-4 left-4 z-50 no-print">
+    <div className="fixed bottom-0 left-0 z-50 no-print">
       <div
-        className={`bg-white border ${borderColor} rounded-lg shadow-sm overflow-hidden transition-all duration-200 ${expanded ? 'w-48' : 'w-auto'}`}
+        className={`bg-white/80 border-t border-r ${borderColor} rounded-tr-md overflow-hidden transition-all duration-200 ${expanded ? 'w-36' : 'w-auto'}`}
       >
         <button
           onClick={() => setExpanded(!expanded)}
-          className="flex items-center gap-2 px-3 py-2 w-full text-left hover:bg-muted/50 transition-colors"
+          className={`flex items-center hover:bg-muted/50 transition-colors ${expanded ? 'gap-1.5 px-2 py-1 w-full text-left' : 'flex-col gap-0.5 px-1 py-1.5'}`}
         >
-          <span className={`w-2 h-2 rounded-full ${dotColor}`} />
-          <span className="text-xs font-medium text-muted-foreground">{envLabel}</span>
-          {expanded ? (
-            <ChevronLeft className="h-3 w-3 text-muted-foreground ml-auto" />
-          ) : (
-            <ChevronRight className="h-3 w-3 text-muted-foreground" />
-          )}
+          <span className={`w-1.5 h-1.5 rounded-full ${dotColor}`} />
+          <span className={`text-[10px] font-medium text-muted-foreground ${expanded ? '' : 'writing-mode-vertical'}`}
+            style={expanded ? undefined : { writingMode: 'vertical-lr', textOrientation: 'mixed', letterSpacing: '0.05em' }}
+          >{envLabel}</span>
         </button>
 
         {expanded && (
-          <div className="px-3 pb-2 space-y-1 border-t border-muted">
-            <div className="pt-2 text-[11px] text-muted-foreground space-y-0.5">
+          <div className="px-2 pb-1.5 space-y-0.5 border-t border-muted">
+            <div className="pt-1.5 text-[10px] text-muted-foreground space-y-0.5">
               {gitBranch && (
                 <div className="flex justify-between">
                   <span>branch</span>
@@ -69,7 +67,7 @@ export function EnvIndicator() {
                 </div>
               )}
               <div className="flex justify-between">
-                <span>database</span>
+                <span>db</span>
                 <span className="font-mono text-foreground">{dbEnv}</span>
               </div>
               <div className="flex justify-between">

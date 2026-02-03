@@ -339,9 +339,9 @@ export function generateXLSX(option: ScheduleOption, metadata?: ExportMetadata):
   const summarySheet = XLSX.utils.aoa_to_sheet(summaryData)
 
   // Calculate row offsets based on metadata presence
-  // Row structure: Title(0), empty(1), [metadata rows], empty, Option, BTB, StudyHalls, empty, StudyHallHeader...
+  // Row structure: Title(0), empty(1), [metadata rows], empty, BTB, StudyHalls, empty, StudyHallHeader...
   const metadataRows = (metadata?.scheduleId ? 1 : 0) + (formattedDate ? 1 : 0)
-  const studyHallHeaderRow = 7 + metadataRows
+  const studyHallHeaderRow = 6 + metadataRows
   const studyHallTableHeaderRow = studyHallHeaderRow + 1
   const studyHallDataStart = studyHallTableHeaderRow + 1
 
