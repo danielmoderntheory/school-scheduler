@@ -6,7 +6,7 @@ import { Button } from "@/components/ui/button"
 import { Checkbox } from "@/components/ui/checkbox"
 import { ScheduleGrid } from "@/components/ScheduleGrid"
 import { ScheduleStats } from "@/components/ScheduleStats"
-import { Loader2, Download, ArrowLeft, Check, CheckCircle, RefreshCw, Shuffle, Trash2, Star, MoreVertical, Users, GraduationCap, Printer, ArrowLeftRight, X, Hand, Pencil, Copy, ChevronDown, ChevronUp, AlertTriangle, Minus, Info, Crosshair } from "lucide-react"
+import { Loader2, Download, ArrowLeft, Check, CheckCircle, AlertCircle, RefreshCw, Shuffle, Trash2, Star, MoreVertical, Users, GraduationCap, Printer, ArrowLeftRight, X, Hand, Pencil, Copy, ChevronDown, ChevronUp, AlertTriangle, Minus, Info, Crosshair } from "lucide-react"
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -37,7 +37,7 @@ import { Label } from "@/components/ui/label"
 import Link from "next/link"
 import type { ScheduleOption, TeacherSchedule, GradeSchedule, Teacher, FloatingBlock, PendingPlacement, ValidationError, CellLocation, ClassEntry, OpenBlockLabels, PendingTransfer } from "@/lib/types"
 import { parseClassesFromSnapshot, parseTeachersFromSnapshot, parseRulesFromSnapshot, hasValidSnapshots, detectClassChanges, computeExpectedTeachingSessions, type GenerationStats, type ChangeDetectionResult, type CurrentClass, type ClassSnapshot, type TeacherSnapshot } from "@/lib/snapshot-utils"
-import { parseGradeDisplayToNumbers, parseGradeDisplayToNames, gradesOverlap, gradeNumToDisplay, isClassElective, shouldIgnoreGradeConflict } from "@/lib/grade-utils"
+import { parseGradeDisplayToNumbers, parseGradeDisplayToNames, gradesOverlap, gradesEqual, gradeNumToDisplay, isClassElective, shouldIgnoreGradeConflict } from "@/lib/grade-utils"
 import { BLOCK_TYPE_OPEN, BLOCK_TYPE_STUDY_HALL, isOpenBlock, isStudyHall, isScheduledClass, isOccupiedBlock, entryIsOpen, entryIsOccupied, entryIsScheduledClass, isFullTime, setOpenBlockLabel, recalculateOptionStats } from "@/lib/schedule-utils"
 import toast from "react-hot-toast"
 import { generateSchedules, reassignStudyHalls } from "@/lib/scheduler"
@@ -296,7 +296,9 @@ interface Generation {
   quarter: { id: string; name: string }
 }
 
-const successIcon = <CheckCircle className="h-4 w-4 text-emerald-600" />
+const successIcon = <CheckCircle style={{ width: 20, height: 20, minWidth: 20 }} className="text-emerald-600" />
+const errorIcon = <AlertCircle style={{ width: 20, height: 20, minWidth: 20 }} className="text-red-500" />
+const warningIcon = <AlertTriangle style={{ width: 20, height: 20, minWidth: 20 }} className="text-amber-500" />
 
 export default function HistoryDetailPage() {
   const params = useParams()
@@ -411,7 +413,7 @@ export default function HistoryDetailPage() {
   const [reviewTransfersModal, setReviewTransfersModal] = useState<{
     isOpen: boolean
     updateDB: boolean
-    onConfirm: () => void
+    onConfirm: (updateDB: boolean) => void
   } | null>(null)
   const [returnTransferModal, setReturnTransferModal] = useState<{
     block: FloatingBlock
@@ -472,17 +474,28 @@ export default function HistoryDetailPage() {
 
     for (const r of pendingTransfers) {
       if (r.moveType === 'all') {
-        // Change teacher on the matching class entry
+        // Move all sessions to target teacher — merge if target already has this class
         const entry = updated.find(c =>
-          c.teacher === r.fromTeacher && c.subject === r.subject && c.grade === r.grade
+          c.teacher === r.fromTeacher && c.subject === r.subject && gradesEqual(c.gradeDisplay || c.grade, r.grade)
         )
         if (entry) {
-          entry.teacher = r.toTeacher
+          const existing = updated.find(c =>
+            c.teacher === r.toTeacher && c.subject === r.subject && gradesEqual(c.gradeDisplay || c.grade, r.grade)
+          )
+          if (existing) {
+            // Merge: add sessions to existing target entry, remove source
+            existing.daysPerWeek += entry.daysPerWeek
+            const idx = updated.indexOf(entry)
+            updated.splice(idx, 1)
+          } else {
+            // No existing target — just reassign teacher
+            entry.teacher = r.toTeacher
+          }
         }
       } else {
         // Split: decrement source, create/increment target
         const entry = updated.find(c =>
-          c.teacher === r.fromTeacher && c.subject === r.subject && c.grade === r.grade
+          c.teacher === r.fromTeacher && c.subject === r.subject && gradesEqual(c.gradeDisplay || c.grade, r.grade)
         )
         if (entry) {
           entry.daysPerWeek -= 1
@@ -491,7 +504,7 @@ export default function HistoryDetailPage() {
             updated.splice(idx, 1)
           }
           const existing = updated.find(c =>
-            c.teacher === r.toTeacher && c.subject === r.subject && c.grade === r.grade
+            c.teacher === r.toTeacher && c.subject === r.subject && gradesEqual(c.gradeDisplay || c.grade, r.grade)
           )
           if (existing) {
             existing.daysPerWeek += 1
@@ -852,7 +865,7 @@ export default function HistoryDetailPage() {
     }
 
     checkForChanges()
-  }, [generation?.id, generation?.quarter_id, isPublicView])
+  }, [generation?.id, generation?.quarter_id, generation?.stats?.snapshotVersion, isPublicView])
 
   function openStarDialog(editMode: boolean = false) {
     setStarNote(generation?.notes || "")
@@ -1070,6 +1083,7 @@ export default function HistoryDetailPage() {
             subject: c.subject?.name || '',
             daysPerWeek: c.days_per_week,
             isElective: c.is_elective || false,
+            isCotaught: c.is_cotaught || false,
             availableDays,
             availableBlocks,
             fixedSlots: fixedSlots.length > 0 ? fixedSlots : undefined,
@@ -1091,6 +1105,7 @@ export default function HistoryDetailPage() {
             grade_ids: gradeIds,
             grades: gradesArray,
             is_elective: c.is_elective || false,
+            is_cotaught: c.is_cotaught || false,
             subject_id: c.subject?.id || null,
             subject_name: c.subject?.name || null,
             days_per_week: c.days_per_week,
@@ -1355,7 +1370,7 @@ export default function HistoryDetailPage() {
       }
 
       if (!result || result.status !== 'success' || result.options.length === 0) {
-        toast.error(result?.message || "Could not generate a valid schedule with these constraints")
+        toast.error(result?.message || "Could not generate a valid schedule with these constraints", { icon: errorIcon })
         setIsGenerating(false)
         return
       }
@@ -1452,8 +1467,13 @@ export default function HistoryDetailPage() {
 
       if (allErrors.length > 0) {
         setValidationErrors(allErrors)
-        console.warn('[Regen] Validation errors found (filtered to selected teachers):', allErrors)
-        toast.error(`${allErrors.length} validation issue${allErrors.length !== 1 ? 's' : ''} detected - review before applying`)
+        const { hard, soft } = splitValidationErrors(allErrors)
+
+        if (hard.length > 0) {
+          toast.error(`${hard.length} validation issue${hard.length !== 1 ? 's' : ''} detected - review before applying`, { icon: errorIcon })
+        } else if (soft.length > 0) {
+          toast(`${soft.length} warning${soft.length !== 1 ? 's' : ''}`, { icon: warningIcon })
+        }
       } else {
         setValidationErrors([])
       }
@@ -1466,7 +1486,7 @@ export default function HistoryDetailPage() {
       toast(usedJsFallback ? "Schedules regenerated (JS solver)" : "Schedules regenerated (OR-Tools)", { icon: successIcon })
     } catch (error) {
       console.error('Regeneration error:', error)
-      toast.error("Failed to generate variation")
+      toast.error("Failed to generate variation", { icon: errorIcon })
     } finally {
       setIsGenerating(false)
     }
@@ -1641,6 +1661,7 @@ export default function HistoryDetailPage() {
             grade_ids: gradeIds,
             grades: gradesArray,
             is_elective: c.is_elective || false,
+            is_cotaught: c.is_cotaught || false,
             subject_id: c.subject?.id || null,
             subject_name: c.subject?.name || null,
             days_per_week: c.days_per_week,
@@ -1665,15 +1686,21 @@ export default function HistoryDetailPage() {
         }))
 
         // Update class/teacher/grade snapshots but keep rules_snapshot unchanged
-        // Only set NEW snapshotVersion if one doesn't exist (first time applying changes)
-        // If snapshotVersion exists, this is alignment - reuse existing version
-        const existingVersion = generation.stats?.snapshotVersion
+        // Only bump snapshotVersion when snapshot content actually changes (DB differs from snapshot).
+        // Pure alignment regens (DB already matches snapshot) keep existing version to avoid
+        // cascading re-alignment of already-aligned revisions.
+        const snapshotContentChanging = classChanges?.hasChanges || false
         statsForValidation = {
           ...generation.stats,
           classes_snapshot: classesSnapshot,
           teachers_snapshot: teachersSnapshot,
           grades_snapshot: gradesSnapshot,
-          snapshotVersion: existingVersion || Date.now(), // Keep existing or set new
+          snapshotVersion: snapshotContentChanging
+            ? Date.now()
+            : (generation.stats?.snapshotVersion || Date.now()),
+          snapshotAffectedTeachers: snapshotContentChanging
+            ? (classChanges?.affectedTeachers || [])
+            : (generation.stats?.snapshotAffectedTeachers || []),
           // rules_snapshot intentionally NOT updated - stays from original generation
         }
       } catch (error) {
@@ -1704,8 +1731,11 @@ export default function HistoryDetailPage() {
       let updatedOptions: ScheduleOption[]
       let successMessage: string
 
-      // If using current classes, mark this option as built with the new snapshot version
-      const snapshotVersion = useCurrentClasses ? statsForValidation?.snapshotVersion : undefined
+      // Stamp option with the current snapshot version so alignment detection works:
+      // - useCurrentClasses: version comes from the freshly rebuilt snapshot (statsForValidation)
+      // - alignment regen: version comes from existing generation stats
+      // - no version exists: undefined, nothing stamped
+      const snapshotVersion = statsForValidation?.snapshotVersion || generation.stats?.snapshotVersion
 
       if (!saveAsNew) {
         // Update current option in place
@@ -2164,7 +2194,7 @@ export default function HistoryDetailPage() {
     if (scheduleErrors.length > 0) {
       setValidationErrors(scheduleErrors)
       console.warn('[Study Hall] Validation errors found:', scheduleErrors)
-      toast.error(`${scheduleErrors.length} validation issue${scheduleErrors.length !== 1 ? 's' : ''} detected`)
+      toast.error(`${scheduleErrors.length} validation issue${scheduleErrors.length !== 1 ? 's' : ''} detected`, { icon: errorIcon })
     } else {
       setValidationErrors([])
     }
@@ -2628,7 +2658,7 @@ export default function HistoryDetailPage() {
     setValidationErrors(allErrors) // May have soft warnings
 
     if (allErrors.length > 0) {
-      toast(`⚠️ ${allErrors.length} warning${allErrors.length !== 1 ? 's' : ''} (suboptimal but valid)`)
+      toast(`${allErrors.length} warning${allErrors.length !== 1 ? 's' : ''} (suboptimal but valid)`, { icon: warningIcon })
     }
 
     onComplete()
@@ -3777,23 +3807,17 @@ export default function HistoryDetailPage() {
     const block = floatingBlocks.find(b => b.id === selectedFloatingBlock)
     if (!block) return
 
-    // Check for cross-teacher class placement
+    // Check for cross-teacher class placement — always prompt for transfer
+    // even if target teacher already has that class (their session count still needs updating)
     if (effectiveFreeformClasses && isScheduledClass(block.subject) && location.teacher !== block.sourceTeacher) {
-      const hasMatchingClass = effectiveFreeformClasses.some(cls =>
-        cls.teacher === location.teacher && cls.subject === block.subject && cls.grade === block.grade
+      // Count total blocks the source teacher currently has for this class
+      const classDef = effectiveFreeformClasses.find(cls =>
+        cls.teacher === block.sourceTeacher && cls.subject === block.subject && gradesEqual(cls.gradeDisplay || cls.grade, block.grade)
       )
+      const totalBlocks = classDef?.daysPerWeek ?? 1
 
-      if (!hasMatchingClass) {
-        // Count total blocks for this specific class definition (teacher+grade+subject)
-        // Use original freeformClasses for the count since we're counting what the source teacher has
-        const classDef = freeformClasses?.find(cls =>
-          cls.teacher === block.sourceTeacher && cls.subject === block.subject && cls.grade === block.grade
-        )
-        const totalBlocks = classDef?.daysPerWeek ?? 1
-
-        setTransferModal({ block, location, totalBlocks })
-        return  // Don't place yet — wait for modal confirmation
-      }
+      setTransferModal({ block, location, totalBlocks })
+      return  // Don't place yet — wait for modal confirmation
     }
 
     doPlaceBlock(block, location)
@@ -4574,7 +4598,7 @@ export default function HistoryDetailPage() {
     conflictType: 'multiple_non_electives' | 'non_elective_with_electives'
   }
 
-  type ClassesSnapshotItem = { teacher_name: string | null; subject_name: string | null; is_elective?: boolean }
+  type ClassesSnapshotItem = { teacher_name: string | null; subject_name: string | null; is_elective?: boolean; is_cotaught?: boolean }
 
   // ---------------------------------------------------------------------------
   // CORE VALIDATION FUNCTIONS
@@ -5192,8 +5216,12 @@ export default function HistoryDetailPage() {
     // -------------------------------------------------------------------------
     if (stats) {
       // 4. Class Session Count + Unknown Class Detection (informational)
+      // In freeform mode with pending transfers, use effectiveFreeformClasses which
+      // reflects the updated class ownership. Otherwise parse from the raw snapshot.
       if (stats.classes_snapshot) {
-        const classes = parseClassesFromSnapshot(stats.classes_snapshot)
+        const classes = (freeformMode && effectiveFreeformClasses && pendingTransfers.length > 0)
+          ? effectiveFreeformClasses
+          : parseClassesFromSnapshot(stats.classes_snapshot)
 
         // Helper: check if a schedule entry matches a class definition
         // A match requires: same teacher, same subject, and grades overlap
@@ -5385,6 +5413,15 @@ export default function HistoryDetailPage() {
     }
 
     return errors
+  }
+
+  /** Soft warning types — shown separately from hard validation errors */
+  const SOFT_WARNING_TYPES = new Set(['back_to_back'])
+
+  function splitValidationErrors(errors: ValidationError[]) {
+    const hard = errors.filter(e => !SOFT_WARNING_TYPES.has(e.type))
+    const soft = errors.filter(e => SOFT_WARNING_TYPES.has(e.type))
+    return { hard, soft }
   }
 
   /**
@@ -6003,18 +6040,29 @@ export default function HistoryDetailPage() {
       const targetTeacher = teachersSnapshot.find(t => t.name === r.toTeacher)
 
       if (r.moveType === 'all') {
-        // Move the entire class definition (grade+subject+days+restrictions) to the new teacher
+        // Move all sessions to target teacher — merge if target already has this class
         const entry = updated.find(c =>
-          c.teacher_name === r.fromTeacher && c.subject_name === r.subject && snapshotGradeDisplay(c) === r.grade
+          c.teacher_name === r.fromTeacher && c.subject_name === r.subject && gradesEqual(snapshotGradeDisplay(c), r.grade)
         )
         if (entry && targetTeacher) {
-          entry.teacher_id = targetTeacher.id
-          entry.teacher_name = r.toTeacher
+          const existing = updated.find(c =>
+            c.teacher_name === r.toTeacher && c.subject_name === r.subject && gradesEqual(snapshotGradeDisplay(c), r.grade)
+          )
+          if (existing) {
+            // Merge: add sessions to existing target entry, remove source
+            existing.days_per_week += entry.days_per_week
+            const idx = updated.indexOf(entry)
+            updated.splice(idx, 1)
+          } else {
+            // No existing target — just reassign teacher
+            entry.teacher_id = targetTeacher.id
+            entry.teacher_name = r.toTeacher
+          }
         }
       } else {
         // moveType === 'one': split one day off the class definition
         const entry = updated.find(c =>
-          c.teacher_name === r.fromTeacher && c.subject_name === r.subject && snapshotGradeDisplay(c) === r.grade
+          c.teacher_name === r.fromTeacher && c.subject_name === r.subject && gradesEqual(snapshotGradeDisplay(c), r.grade)
         )
         if (entry && targetTeacher) {
           // Decrement source teacher's days_per_week
@@ -6025,7 +6073,7 @@ export default function HistoryDetailPage() {
           }
           // Check if target teacher already has an entry for this grade+subject (from a previous transfer)
           const existing = updated.find(c =>
-            c.teacher_name === r.toTeacher && c.subject_name === r.subject && snapshotGradeDisplay(c) === r.grade
+            c.teacher_name === r.toTeacher && c.subject_name === r.subject && gradesEqual(snapshotGradeDisplay(c), r.grade)
           )
           if (existing) {
             existing.days_per_week += 1
@@ -6061,7 +6109,7 @@ export default function HistoryDetailPage() {
       if (!targetTeacher) continue
 
       const sourceClass = snapshot.find(c =>
-        c.teacher_name === r.fromTeacher && c.subject_name === r.subject && snapshotGradeDisplay(c) === r.grade
+        c.teacher_name === r.fromTeacher && c.subject_name === r.subject && gradesEqual(snapshotGradeDisplay(c), r.grade)
       )
       if (!sourceClass) continue
 
@@ -6074,18 +6122,35 @@ export default function HistoryDetailPage() {
       }
 
       if (r.moveType === 'all') {
-        // Find the DB class for this teacher+subject+grades and reassign teacher
+        // Find the DB class for this teacher+subject+grades
         const dbClass = allClasses.find((c: Record<string, unknown>) =>
           (c.teacher as Record<string, unknown>)?.name === r.fromTeacher &&
           (c.subject as Record<string, unknown>)?.name === r.subject &&
           matchesGrades(c)
         )
         if (dbClass) {
-          await fetch(`/api/classes/${dbClass.id}`, {
-            method: 'PUT',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ teacher_id: targetTeacher.id })
-          })
+          // Check if target teacher already has a DB class for this subject+grades
+          const existingTargetClass = allClasses.find((c: Record<string, unknown>) =>
+            (c.teacher as Record<string, unknown>)?.id === targetTeacher.id &&
+            (c.subject as Record<string, unknown>)?.name === r.subject &&
+            matchesGrades(c)
+          )
+          if (existingTargetClass) {
+            // Merge: add source days to existing target, delete source
+            await fetch(`/api/classes/${existingTargetClass.id}`, {
+              method: 'PUT',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ days_per_week: existingTargetClass.days_per_week + dbClass.days_per_week })
+            })
+            await fetch(`/api/classes/${dbClass.id}`, { method: 'DELETE' })
+          } else {
+            // Simple reassign — just change the teacher
+            await fetch(`/api/classes/${dbClass.id}`, {
+              method: 'PUT',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ teacher_id: targetTeacher.id })
+            })
+          }
         }
       } else {
         // moveType === 'one': decrement source, create/increment for target
@@ -6104,19 +6169,35 @@ export default function HistoryDetailPage() {
               body: JSON.stringify({ days_per_week: dbClass.days_per_week - 1 })
             })
           }
-          // Create new class for target teacher (copies grade_ids, subject, elective flag)
-          await fetch('/api/classes', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              quarter_id: quarterId,
-              teacher_id: targetTeacher.id,
-              subject_id: sourceClass.subject_id,
-              grade_ids: sourceClass.grade_ids,
-              days_per_week: 1,
-              is_elective: sourceClass.is_elective,
+          // Check if target teacher already has a DB class for this subject+grades
+          const existingTargetClass = allClasses.find((c: Record<string, unknown>) =>
+            (c.teacher as Record<string, unknown>)?.id === targetTeacher.id &&
+            (c.subject as Record<string, unknown>)?.name === r.subject &&
+            matchesGrades(c)
+          )
+          if (existingTargetClass) {
+            // Increment existing class
+            await fetch(`/api/classes/${existingTargetClass.id}`, {
+              method: 'PUT',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ days_per_week: existingTargetClass.days_per_week + 1 })
             })
-          })
+          } else {
+            // Create new class for target teacher (copies grade_ids, subject, elective flag)
+            await fetch('/api/classes', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                quarter_id: quarterId,
+                teacher_id: targetTeacher.id,
+                subject_id: sourceClass.subject_id,
+                grade_ids: sourceClass.grade_ids,
+                days_per_week: 1,
+                is_elective: sourceClass.is_elective,
+                is_cotaught: sourceClass.is_cotaught,
+              })
+            })
+          }
         }
       }
     }
@@ -6129,7 +6210,7 @@ export default function HistoryDetailPage() {
     if (errors.length === 0) {
       toast("No validation errors found", { icon: successIcon })
     } else {
-      toast.error(`${errors.length} validation error${errors.length !== 1 ? 's' : ''} found`)
+      toast.error(`${errors.length} validation error${errors.length !== 1 ? 's' : ''} found`, { icon: errorIcon })
     }
   }
 
@@ -6139,7 +6220,7 @@ export default function HistoryDetailPage() {
     const errors = validatePlacements()
     if (errors.length > 0) {
       setValidationErrors(errors)
-      toast.error(`${errors.length} error${errors.length !== 1 ? 's' : ''} - fix before applying`)
+      toast.error(`${errors.length} error${errors.length !== 1 ? 's' : ''} - fix before applying`, { icon: errorIcon })
       return
     }
 
@@ -6148,7 +6229,7 @@ export default function HistoryDetailPage() {
       setReviewTransfersModal({
         isOpen: true,
         updateDB: true,
-        onConfirm: () => proceedWithFreeformSave(createNew)
+        onConfirm: (updateDB: boolean) => proceedWithFreeformSave(createNew, updateDB)
       })
       return
     }
@@ -6156,7 +6237,7 @@ export default function HistoryDetailPage() {
     proceedWithFreeformSave(createNew)
   }
 
-  async function proceedWithFreeformSave(createNew: boolean) {
+  async function proceedWithFreeformSave(createNew: boolean, updateDB: boolean = false) {
     if (!generation || !selectedResult || !workingSchedules) return
 
     const optionIndex = parseInt(viewingOption) - 1
@@ -6174,13 +6255,17 @@ export default function HistoryDetailPage() {
         pendingTransfers,
         generation.stats.teachers_snapshot
       )
+      const transferSnapshotVersion = Date.now()
+      const transferAffectedTeachers = [...new Set(pendingTransfers.flatMap(t => [t.fromTeacher, t.toTeacher]))]
       updatedStats = {
         ...generation.stats,
-        classes_snapshot: updatedSnapshot
+        classes_snapshot: updatedSnapshot,
+        snapshotVersion: transferSnapshotVersion,
+        snapshotAffectedTeachers: transferAffectedTeachers,
       }
 
       // Optionally update DB class definitions
-      if (reviewTransfersModal?.updateDB && generation.stats.classes_snapshot && generation.stats.teachers_snapshot) {
+      if (updateDB && generation.stats.classes_snapshot && generation.stats.teachers_snapshot) {
         try {
           await applyTransfersToDB(
             pendingTransfers,
@@ -6232,6 +6317,10 @@ export default function HistoryDetailPage() {
       teacherSchedules: workingSchedules.teacherSchedules,
       gradeSchedules: rebuiltGradeSchedules,
       studyHallAssignments: updatedStudyHallAssignments,
+      // Stamp this revision as aligned with the updated snapshot (if transfers modified it)
+      ...(pendingTransfers.length > 0 && updatedStats?.snapshotVersion && {
+        builtWithSnapshotVersion: updatedStats.snapshotVersion,
+      }),
     })
 
     const hasTransferSnapshots = pendingTransfers.length > 0
@@ -6363,10 +6452,11 @@ export default function HistoryDetailPage() {
   const currentOption = savedOption
 
   // Check if current option needs class changes applied
-  // Two scenarios:
-  // 1. snapshotNeedsUpdate: DB has changed, snapshot needs to be updated (first revision to apply)
-  // 2. optionNeedsAlignment: Snapshot already updated, this revision needs to align to it
-  const snapshotNeedsUpdate = !generation?.stats?.snapshotVersion && (classChanges?.hasChanges || false)
+  // Two independent scenarios (either triggers the changes banner):
+  // 1. snapshotNeedsUpdate: DB classes differ from snapshot (needs snapshot update + regen)
+  // 2. optionNeedsAlignment: Snapshot was updated (from DB changes or transfers on another rev),
+  //    but this revision hasn't been rebuilt yet
+  const snapshotNeedsUpdate = classChanges?.hasChanges || false
   const optionNeedsAlignment = (() => {
     if (!generation?.stats?.snapshotVersion) return false
     const optionVersion = savedOption?.builtWithSnapshotVersion
@@ -6717,7 +6807,7 @@ export default function HistoryDetailPage() {
                   <span className="text-xs">
                     {snapshotNeedsUpdate
                       ? `${classChanges?.affectedTeachers.length || 0} changed`
-                      : 'Needs alignment'}
+                      : `${generation?.stats?.snapshotAffectedTeachers?.length || 0} need alignment`}
                   </span>
                 </Button>
               )}
@@ -7797,30 +7887,47 @@ export default function HistoryDetailPage() {
                           {shouldCreateNew ? 'Save as new revision' : `Update Revision ${viewingOption}`}
                         </button>
                       </div>
-                      {/* Validation errors list */}
+                      {/* Validation errors and soft warnings */}
                       {(() => {
                         // Filter out study_hall_coverage errors when showing preview (already shown in amber warning)
                         const displayErrors = previewOption
                           ? validationErrors.filter(e => e.type !== 'study_hall_coverage')
                           : validationErrors
                         if (displayErrors.length === 0) return null
+                        const { hard, soft } = splitValidationErrors(displayErrors)
                         return (
-                          <div className="mt-3 pt-3 border-t border-sky-200">
-                            <div className="text-xs font-medium text-red-600 mb-1">
-                              {previewOption ? 'Schedule conflicts:' : 'Existing conflicts in schedule:'}
-                            </div>
-                            <ul className="text-xs space-y-1 text-red-600">
-                              {displayErrors.slice(0, 5).map((error, idx) => (
-                                <li key={idx} className="flex items-center gap-2">
-                                  <span className="text-red-400">•</span>
-                                  <span>{error.message}</span>
-                                </li>
-                              ))}
-                              {displayErrors.length > 5 && (
-                                <li className="text-red-500 ml-4">...and {displayErrors.length - 5} more</li>
-                              )}
-                            </ul>
-                          </div>
+                          <>
+                            {hard.length > 0 && (
+                              <div className="mt-3 pt-3 border-t border-sky-200">
+                                <div className="text-xs font-medium text-red-600 mb-1">
+                                  {previewOption ? 'Schedule conflicts:' : 'Existing conflicts in schedule:'}
+                                </div>
+                                <ul className="text-xs space-y-1 text-red-600">
+                                  {hard.slice(0, 5).map((error, idx) => (
+                                    <li key={idx} className="flex items-center gap-2">
+                                      <span className="text-red-400">•</span>
+                                      <span>{error.message}</span>
+                                    </li>
+                                  ))}
+                                  {hard.length > 5 && (
+                                    <li className="text-red-500 ml-4">...and {hard.length - 5} more</li>
+                                  )}
+                                </ul>
+                              </div>
+                            )}
+                            {soft.length > 0 && (
+                              <div className={`${hard.length > 0 ? 'mt-2' : 'mt-3 pt-3 border-t border-sky-200'}`}>
+                                <ul className="text-xs space-y-0.5 text-slate-500">
+                                  {soft.map((warn, idx) => (
+                                    <li key={idx} className="flex items-center gap-1.5">
+                                      <span className="text-amber-400 text-[10px]">⚠</span>
+                                      <span>{warn.message}</span>
+                                    </li>
+                                  ))}
+                                </ul>
+                              </div>
+                            )}
+                          </>
                         )
                       })()}
                     </>
@@ -7857,7 +7964,7 @@ export default function HistoryDetailPage() {
                         setSelectedCell(null)
                         setValidTargets([])
                       }}
-                      disabled={isGenerating || freeformMode}
+                      disabled={isGenerating}
                       className="gap-1.5"
                     >
                       {viewMode === "teacher" ? (
@@ -7871,29 +7978,43 @@ export default function HistoryDetailPage() {
                 </div>
                 {/* Show message when in regen preview mode */}
                 {previewOption && previewType === "regen" && previewTeachers.size > 0 && viewMode === "teacher" && (() => {
+                  const expectedSH = previewOption.studyHallAssignments?.length || 0
+                  const placedSH = previewOption.studyHallsPlaced || 0
+                  const missingSH = expectedSH - placedSH
                   const btbIssues = previewOption.backToBackIssues || 0
+                  const isSuboptimal = missingSH > 0 || btbIssues > 0 || previewStrategy === "suboptimal" || previewStrategy === "randomized" || previewStrategy === "js"
+
                   const strategyNote = previewStrategy === "js"
                     ? "JS fallback"
                     : previewStrategy === "suboptimal"
-                      ? "suboptimal"
+                      ? "suboptimal mode"
                       : previewStrategy === "randomized"
-                        ? "randomized"
+                        ? "randomized mode"
                         : null
 
+                  const issues: string[] = []
+                  if (missingSH > 0) issues.push(`only ${placedSH}/${expectedSH} study halls placed`)
+                  if (btbIssues > 0) issues.push(`${btbIssues} back-to-back issue${btbIssues !== 1 ? 's' : ''}`)
+
                   return (
-                    <div className="col-span-full mb-4 text-sm bg-sky-50 border border-sky-200 rounded-lg px-3 py-2 flex items-center justify-between">
-                      <span className="text-sky-600">
-                        Comparing {previewTeachers.size} regenerated teacher{previewTeachers.size !== 1 ? 's' : ''}. Toggle between Original and Preview to compare.
-                      </span>
-                      {(btbIssues > 0 || strategyNote) && (
-                        <span className="text-amber-600 flex items-center gap-1.5">
-                          <AlertTriangle className="h-3.5 w-3.5" />
-                          {btbIssues > 0 && `${btbIssues} back-to-back`}
-                          {btbIssues > 0 && strategyNote && ' · '}
-                          {strategyNote}
+                    <>
+                      <div className={`col-span-full ${isSuboptimal ? 'mb-2' : 'mb-4'} text-sm bg-sky-50 border border-sky-200 rounded-lg px-3 py-2`}>
+                        <span className="text-sky-600">
+                          Comparing {previewTeachers.size} regenerated teacher{previewTeachers.size !== 1 ? 's' : ''}. Toggle between Original and Preview to compare.
                         </span>
+                      </div>
+                      {isSuboptimal && (
+                        <div className="col-span-full mb-4 flex items-center gap-2 text-amber-600 text-sm bg-amber-50 border border-amber-200 rounded-lg px-3 py-1.5">
+                          <AlertTriangle className="h-4 w-4 flex-shrink-0" />
+                          <span>
+                            {issues.length > 0
+                              ? `Results: ${issues.join(', ')}${strategyNote ? ` (${strategyNote})` : ''}.`
+                              : `Used ${strategyNote} — results may not be optimal.`}
+                            {' '}Press Regenerate to try again.
+                          </span>
+                        </div>
                       )}
-                    </div>
+                    </>
                   )
                 })()}
                 <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 print-grid">
@@ -8125,9 +8246,16 @@ export default function HistoryDetailPage() {
                     )}
                   </>
                 ) : (
-                  <p>
-                    Another revision has been updated with the latest class configuration. This revision still uses the older configuration.
-                  </p>
+                  <>
+                    <p>
+                      Another revision has been updated with the latest class configuration. This revision still uses the older configuration.
+                    </p>
+                    {generation?.stats?.snapshotAffectedTeachers && generation.stats.snapshotAffectedTeachers.length > 0 && (
+                      <p className="text-sm">
+                        Affected teacher{generation.stats.snapshotAffectedTeachers.length !== 1 ? 's' : ''}: {generation.stats.snapshotAffectedTeachers.join(', ')}
+                      </p>
+                    )}
+                  </>
                 )}
                 <p className="text-sm text-slate-500">
                   {snapshotNeedsUpdate
@@ -8154,13 +8282,15 @@ export default function HistoryDetailPage() {
             <AlertDialogAction
               onClick={() => {
                 setShowChangesDialog(false)
-                // Mark as dismissed for this specific option/revision
-                setDismissedForOptions(prev => new Set(prev).add(viewingOption))
                 setPendingModeEntry(null)
-                // Pre-select affected teachers (if known) and enter regen mode with current classes
-                const teachersToSelect = classChanges?.affectedTeachers || []
+                // Pre-select affected teachers (if known) and enter regen mode
+                // For DB changes: use classChanges (snapshot vs DB) and rebuild snapshot from DB
+                // For alignment: use stored affected teachers and keep existing snapshot
+                const teachersToSelect = snapshotNeedsUpdate
+                  ? (classChanges?.affectedTeachers || [])
+                  : (generation?.stats?.snapshotAffectedTeachers || [])
                 setSelectedForRegen(new Set(teachersToSelect))
-                setUseCurrentClasses(true) // Use current DB classes for this regeneration
+                setUseCurrentClasses(snapshotNeedsUpdate) // Only rebuild from DB when DB has actually changed
                 setRegenMode(true)
               }}
               className="bg-amber-600 hover:bg-amber-700"
@@ -8545,7 +8675,7 @@ export default function HistoryDetailPage() {
             <Button
               onClick={() => {
                 if (reviewTransfersModal?.onConfirm) {
-                  reviewTransfersModal.onConfirm()
+                  reviewTransfersModal.onConfirm(reviewTransfersModal.updateDB)
                 }
                 setReviewTransfersModal(prev => prev ? { ...prev, isOpen: false } : null)
               }}

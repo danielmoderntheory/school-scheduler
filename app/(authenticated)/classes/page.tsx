@@ -16,7 +16,7 @@ import {
 import { ChevronDown, ChevronUp, Loader2, Plus, X, Clock, Users, Upload, Download, Check, History, Star } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { GradeSelector, formatGradeDisplay } from "@/components/GradeSelector"
-import { TEACHER_STATUS_FULL_TIME, isPartTime, type TeacherStatus } from "@/lib/schedule-utils"
+import { TEACHER_STATUS_FULL_TIME, isPartTime, calculateGradeBlocks, buildCotaughtGroups, type TeacherStatus } from "@/lib/schedule-utils"
 import toast from "react-hot-toast"
 
 interface LastRun {
@@ -60,6 +60,7 @@ interface ClassEntry {
   grade_id: string
   grade_ids?: string[]
   is_elective?: boolean
+  is_cotaught?: boolean
   subject_id: string
   days_per_week: number
   teacher: Teacher
@@ -241,13 +242,48 @@ export default function ClassesPage() {
         const updated = await res.json()
         setClasses((prev) => prev.map((c) => (c.id === id ? updated : c)))
 
+        // Sync co-taught siblings: when toggling is_cotaught, apply the same
+        // value to all other classes with the same grade_ids + subject_id
+        const cotaughtSiblings: Array<{ id: string; rowNumber: number }> = []
+        if (field === "is_cotaught") {
+          const gradeIds = cls.grade_ids?.length ? [...cls.grade_ids].sort() : (cls.grade_id ? [cls.grade_id] : [])
+          const gradeKey = JSON.stringify(gradeIds)
+          const siblings = classes.filter(c =>
+            c.id !== id &&
+            c.subject_id === cls.subject_id &&
+            JSON.stringify((c.grade_ids?.length ? [...c.grade_ids] : (c.grade_id ? [c.grade_id] : [])).sort()) === gradeKey
+          )
+          for (const sibling of siblings) {
+            if ((sibling.is_cotaught || false) !== value) {
+              const sibIndex = classes.findIndex(c => c.id === sibling.id)
+              cotaughtSiblings.push({ id: sibling.id, rowNumber: sibIndex + 1 })
+              // Optimistic update for sibling
+              setClasses((prev) => prev.map((c) => (c.id === sibling.id ? { ...c, is_cotaught: value as boolean } : c)))
+              fetch(`/api/classes/${sibling.id}`, {
+                method: "PUT",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ is_cotaught: value }),
+              }).then(async (sibRes) => {
+                if (sibRes.ok) {
+                  const sibUpdated = await sibRes.json()
+                  setClasses((prev) => prev.map((c) => (c.id === sibling.id ? sibUpdated : c)))
+                }
+              })
+            }
+          }
+        }
+
         // Dismiss previous undo toast
         if (undoToastId.current) toast.dismiss(undoToastId.current)
 
         // Show undo toast
+        const allRows = [rowNumber, ...cotaughtSiblings.map(s => s.rowNumber)]
+        const rowLabel = allRows.length > 1
+          ? `Rows ${allRows.join(', ')} updated`
+          : `Row ${rowNumber} updated`
         const toastId = toast((t) => (
           <div className="flex items-center gap-3">
-            <span className="text-sm">Row {rowNumber} updated</span>
+            <span className="text-sm">{rowLabel}</span>
             <button
               onClick={async () => {
                 toast.dismiss(t.id)
@@ -261,6 +297,18 @@ export default function ClassesPage() {
                 if (revertRes.ok) {
                   const reverted = await revertRes.json()
                   setClasses((prev) => prev.map((c) => (c.id === id ? reverted : c)))
+                }
+                // Revert siblings too
+                for (const sibling of cotaughtSiblings) {
+                  const sibRevertRes = await fetch(`/api/classes/${sibling.id}`, {
+                    method: "PUT",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ is_cotaught: previousValue }),
+                  })
+                  if (sibRevertRes.ok) {
+                    const sibReverted = await sibRevertRes.json()
+                    setClasses((prev) => prev.map((c) => (c.id === sibling.id ? sibReverted : c)))
+                  }
                 }
               }}
               className="px-2 py-1 text-sm font-medium text-violet-600 hover:text-violet-800 hover:bg-violet-50 rounded transition-colors"
@@ -1330,11 +1378,7 @@ export default function ClassesPage() {
   // Count incomplete classes (missing teacher, grade, or subject)
   const incompleteCount = classes.filter(c => !c.teacher_id || !c.grade_id || !c.subject_id).length
 
-  // Detect co-taught classes (same grade-set + subject, different teachers)
-  // These must be scheduled at the same time slot
-  const cotaughtClassIds = new Set<string>()
-
-  // Group by full grade set + subject (not per individual grade)
+  // Group classes by grade-set + subject for co-taught detection
   const gradeSetSubjectTeachers = new Map<string, {
     classIds: string[],
     teachers: Set<string>,
@@ -1343,11 +1387,9 @@ export default function ClassesPage() {
   }>()
 
   for (const cls of classes) {
-    // Skip incomplete classes (missing grade or subject)
     if (!cls.grade_id && !cls.grade_ids?.length) continue
     if (!cls.subject_id) continue
 
-    // Get grade IDs - use grades array if available, otherwise single grade_id
     const gradeIds = cls.grade_ids?.length ? [...cls.grade_ids].sort() : [cls.grade_id]
     const key = `${gradeIds.join(',')}:${cls.subject_id}`
 
@@ -1364,38 +1406,48 @@ export default function ClassesPage() {
     if (cls.teacher_id) entry.teachers.add(cls.teacher_id)
   }
 
-  // Mark classes as co-taught if multiple teachers for same grade-set + subject
-  // Also build summary for alert
-  const cotaughtGroups: Array<{ gradeDisplay: string, subjectName: string, teacherNames: string[] }> = []
-  for (const { classIds, teachers: teacherIds, gradeIds, subjectId } of gradeSetSubjectTeachers.values()) {
+  // Build co-taught display groups using shared helper
+  const cotaughtGroups = buildCotaughtGroups(classes.filter(c => c.teacher_id && c.subject_id).map(cls => {
+    const gradeIds = cls.grade_ids?.length ? [...cls.grade_ids].sort() : (cls.grade_id ? [cls.grade_id] : [])
+    const gradeObjects = gradeIds
+      .map(gid => grades.find(g => g.id === gid))
+      .filter((g): g is Grade => Boolean(g))
+      .sort((a, b) => a.sort_order - b.sort_order)
+
+    let gradeDisplay = ''
+    if (gradeObjects.length === 1) {
+      gradeDisplay = gradeObjects[0].display_name
+    } else if (gradeObjects.length > 1) {
+      const first = gradeObjects[0].display_name.replace(' Grade', '')
+      const last = gradeObjects[gradeObjects.length - 1].display_name.replace(' Grade', '')
+      gradeDisplay = `${first}-${last} Grades`
+    }
+
+    const teacher = teachers.find((t: Teacher) => t.id === cls.teacher_id)
+    const subject = subjects.find(s => s.id === cls.subject_id)
+
+    return {
+      teacherName: teacher?.name || 'Unknown',
+      gradeKey: gradeIds.join(','),
+      gradeDisplay,
+      subjectKey: cls.subject_id || '',
+      subjectName: subject?.name || '',
+      isCotaught: cls.is_cotaught || false,
+    }
+  }))
+
+  // Build per-class map of potential co-taught teacher names (for GradeSelector)
+  // Shows other teachers with same grade+subject, regardless of is_cotaught flag
+  const cotaughtTeacherNames = new Map<string, string[]>()
+  for (const { classIds, teachers: teacherIds } of gradeSetSubjectTeachers.values()) {
     if (teacherIds.size > 1) {
-      classIds.forEach(id => cotaughtClassIds.add(id))
-      // Build display info - format as range (e.g., "6th-11th") if multiple grades
-      const gradeObjects = gradeIds
-        .map(gid => grades.find(g => g.id === gid))
-        .filter((g): g is Grade => Boolean(g))
-        .sort((a, b) => a.sort_order - b.sort_order)
-
-      let gradeDisplay = ''
-      if (gradeObjects.length === 1) {
-        gradeDisplay = gradeObjects[0].display_name
-      } else if (gradeObjects.length > 1) {
-        const first = gradeObjects[0].display_name.replace(' Grade', '')
-        const last = gradeObjects[gradeObjects.length - 1].display_name.replace(' Grade', '')
-        gradeDisplay = `${first}-${last} Grades`
-      }
-
-      const subject = subjects.find(s => s.id === subjectId)
-      const teacherNamesList = Array.from(teacherIds).map(tid => {
-        const teacher = teachers.find((t: Teacher) => t.id === tid)
-        return teacher?.name || 'Unknown'
-      })
-      if (gradeDisplay && subject) {
-        cotaughtGroups.push({
-          gradeDisplay,
-          subjectName: subject.name,
-          teacherNames: teacherNamesList
-        })
+      for (const classId of classIds) {
+        const cls = classes.find(c => c.id === classId)
+        if (!cls) continue
+        const otherNames = Array.from(teacherIds)
+          .filter(tid => tid !== cls.teacher_id)
+          .map(tid => teachers.find((t: Teacher) => t.id === tid)?.name || 'Unknown')
+        cotaughtTeacherNames.set(classId, otherNames)
       }
     }
   }
@@ -1406,56 +1458,34 @@ export default function ClassesPage() {
     gradeNameToDisplay.set(g.name, g.display_name)
   }
 
-  // Calculate grade capacity (sessions per grade)
-  // Co-taught classes only count once, study hall adds 1 for grades 6-11
-  // Multi-grade classes (via grade_ids array) are counted for each individual grade
-  // Electives: count each unique time slot once per grade (students pick one elective per slot)
-  const gradeCapacity = new Map<string, number>()
-  const seenGradeSubject = new Set<string>() // For co-taught dedup
-  const seenElectiveSlots = new Set<string>() // For elective slot dedup: "gradeName:day:block"
-
+  // Calculate grade capacity using shared helper
+  const blockCountClasses: import('@/lib/schedule-utils').BlockCountClass[] = []
   for (const cls of classes) {
-    // Use cls.grades if available (already contains individual Grade objects), otherwise look up single grade
     const classGrades = cls.grades?.length
       ? cls.grades
       : [cls.grade].filter(Boolean)
 
+    const fixedSlots = cls.restrictions
+      ?.filter(r => r.restriction_type === 'fixed_slot')
+      .map(r => r.value as { day: string; block: number }) || []
+
     for (const grade of classGrades) {
       if (!grade) continue
-
-      const displayName = grade.display_name
-
-      if (cls.is_elective) {
-        // For electives, count each unique time slot once per grade
-        // Get fixed slots from restrictions
-        const fixedSlots = cls.restrictions
-          ?.filter(r => r.restriction_type === 'fixed_slot')
-          .map(r => r.value as { day: string; block: number }) || []
-
-        for (const slot of fixedSlots) {
-          const slotKey = `${displayName}:${slot.day}:${slot.block}`
-          if (seenElectiveSlots.has(slotKey)) continue
-          seenElectiveSlots.add(slotKey)
-
-          const current = gradeCapacity.get(displayName) || 0
-          gradeCapacity.set(displayName, current + 1)
-        }
-      } else {
-        // Regular class - skip if we've already counted this grade+subject (co-taught)
-        const key = `${displayName}:${cls.subject_id}`
-        if (seenGradeSubject.has(key)) continue
-        seenGradeSubject.add(key)
-
-        const current = gradeCapacity.get(displayName) || 0
-        gradeCapacity.set(displayName, current + cls.days_per_week)
-      }
+      blockCountClasses.push({
+        gradeKey: grade.display_name,
+        subjectKey: cls.subject_id,
+        daysPerWeek: cls.days_per_week,
+        isElective: cls.is_elective || false,
+        isCotaught: cls.is_cotaught || false,
+        fixedSlots,
+      })
     }
   }
+  const gradeCapacity = calculateGradeBlocks(blockCountClasses)
 
   // Add 1 for study hall for grades 6-11
   for (const gradeName of studyHallGrades) {
-    const current = gradeCapacity.get(gradeName) || 0
-    gradeCapacity.set(gradeName, current + 1)
+    gradeCapacity.set(gradeName, (gradeCapacity.get(gradeName) || 0) + 1)
   }
 
   // Sort grades for display (exclude electives from capacity display)
@@ -1747,18 +1777,15 @@ Maria\t6th-11th Elective\tSpanish 101\t1\tMon Block 5`}
           <div className="px-3 py-2 border-t border-slate-200 bg-purple-50 text-sm text-purple-700">
             <p className="text-xs font-medium mb-1">Co-taught classes (scheduled at same time):</p>
             <ul className="space-y-0.5 text-xs">
-              {cotaughtGroups.slice(0, 3).map((group, i) => (
+              {cotaughtGroups.map((group, i) => (
                 <li key={i}>
                   <span className="font-medium">{group.gradeDisplay} - {group.subjectName}:</span>{" "}
                   {group.teacherNames.join(", ")}
                 </li>
               ))}
-              {cotaughtGroups.length > 3 && (
-                <li className="text-purple-500">...and {cotaughtGroups.length - 3} more</li>
-              )}
             </ul>
             <p className="mt-2 text-purple-500 text-xs">
-              If these should be separate classes, add a subject variant (e.g., &ldquo;Math A&rdquo; / &ldquo;Math B&rdquo;).
+              To remove co-taught scheduling, uncheck &ldquo;Co-taught&rdquo; in the grade selector.
             </p>
           </div>
         )}
@@ -1825,7 +1852,7 @@ Maria\t6th-11th Elective\tSpanish 101\t1\tMon Block 5`}
                 teachers={teachers}
                 grades={grades}
                 subjects={subjects}
-                isCotaught={cotaughtClassIds.has(cls.id)}
+                cotaughtTeachers={cotaughtTeacherNames.get(cls.id)}
                 onUpdate={updateClass}
                 onUpdateRestrictions={updateRestrictions}
                 onDelete={deleteClass}
@@ -1856,7 +1883,7 @@ interface ClassRowProps {
   teachers: Teacher[]
   grades: Grade[]
   subjects: Subject[]
-  isCotaught?: boolean
+  cotaughtTeachers?: string[]
   onUpdate: (id: string, field: string, value: unknown) => void
   onUpdateRestrictions: (id: string, restrictions: Restriction[]) => void
   onDelete: (id: string) => void
@@ -1870,7 +1897,7 @@ function ClassRow({
   teachers,
   grades,
   subjects,
-  isCotaught,
+  cotaughtTeachers,
   onUpdate,
   onUpdateRestrictions,
   onDelete,
@@ -1910,11 +1937,18 @@ function ClassRow({
           grades={grades}
           selectedIds={cls.grade_ids || (cls.grade_id ? [cls.grade_id] : [])}
           isElective={cls.is_elective || false}
-          onChange={(ids, isElective) => {
-            // Update both grade_ids and is_elective
-            onUpdate(cls.id, "grade_ids", ids)
+          isCotaught={cls.is_cotaught || false}
+          cotaughtTeachers={cotaughtTeachers}
+          onChange={(ids, isElective, isCotaughtVal) => {
+            const currentIds = cls.grade_ids || (cls.grade_id ? [cls.grade_id] : [])
+            if (JSON.stringify([...ids].sort()) !== JSON.stringify([...currentIds].sort())) {
+              onUpdate(cls.id, "grade_ids", ids)
+            }
             if (isElective !== cls.is_elective) {
               onUpdate(cls.id, "is_elective", isElective)
+            }
+            if (isCotaughtVal !== undefined && isCotaughtVal !== (cls.is_cotaught || false)) {
+              onUpdate(cls.id, "is_cotaught", isCotaughtVal)
             }
           }}
           hasRestrictions={cls.restrictions && cls.restrictions.length > 0}
@@ -1923,24 +1957,17 @@ function ClassRow({
         />
       </td>
       <td className="px-1 py-1">
-        <div className="flex items-center gap-1">
-          <SelectCell
-            value={cls.subject_id}
-            displayValue={cls.subject?.name}
-            options={subjects.map((s) => ({ id: s.id, label: s.name }))}
-            onChange={(id) => onUpdate(cls.id, "subject_id", id)}
-            onCreateNew={async (name) => {
-              const subject = await onCreateSubject(name)
-              if (subject) onUpdate(cls.id, "subject_id", subject.id)
-            }}
-            placeholder="Select subject"
-          />
-          {isCotaught && (
-            <span title="Co-taught: Multiple teachers share this Grade + Subject. They will be scheduled at the same time.">
-              <Users className="h-3.5 w-3.5 text-purple-500 flex-shrink-0" />
-            </span>
-          )}
-        </div>
+        <SelectCell
+          value={cls.subject_id}
+          displayValue={cls.subject?.name}
+          options={subjects.map((s) => ({ id: s.id, label: s.name }))}
+          onChange={(id) => onUpdate(cls.id, "subject_id", id)}
+          onCreateNew={async (name) => {
+            const subject = await onCreateSubject(name)
+            if (subject) onUpdate(cls.id, "subject_id", subject.id)
+          }}
+          placeholder="Select subject"
+        />
       </td>
       <td className="px-1 py-1">
         <NumberCell
@@ -1991,6 +2018,7 @@ function NewClassRow({
     teacher_id: "",
     grade_ids: [] as string[],
     is_elective: false,
+    is_cotaught: false,
     subject_id: "",
     days_per_week: 1,
   })
@@ -2000,7 +2028,7 @@ function NewClassRow({
     if (data.teacher_id && data.grade_ids.length > 0 && data.subject_id) {
       const result = await onCreate(data)
       if (result) {
-        setData({ teacher_id: "", grade_ids: [], is_elective: false, subject_id: "", days_per_week: 1 })
+        setData({ teacher_id: "", grade_ids: [], is_elective: false, is_cotaught: false, subject_id: "", days_per_week: 1 })
         setIsActive(false)
       }
     }
@@ -2040,7 +2068,8 @@ function NewClassRow({
             grades={grades}
             selectedIds={data.grade_ids}
             isElective={data.is_elective}
-            onChange={(ids, isElective) => setData((d) => ({ ...d, grade_ids: ids, is_elective: isElective }))}
+            isCotaught={data.is_cotaught}
+            onChange={(ids, isElective, isCotaughtVal) => setData((d) => ({ ...d, grade_ids: ids, is_elective: isElective, ...(isCotaughtVal !== undefined ? { is_cotaught: isCotaughtVal } : {}) }))}
             hasRestrictions={false}
             placeholder="Grade"
             compact

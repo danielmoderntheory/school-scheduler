@@ -30,6 +30,7 @@ interface SolveRequest {
     subject: string
     daysPerWeek: number
     isElective?: boolean  // Electives skip grade conflicts
+    isCotaught?: boolean  // Co-taught classes scheduled together
     availableDays?: string[]
     availableBlocks?: number[]
     fixedSlots?: [string, number][]

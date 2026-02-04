@@ -107,6 +107,7 @@ interface Session {
   validSlots: number[];
   isFixed: boolean;
   isElective?: boolean;
+  isCotaught?: boolean;
   cotaughtGroupId?: string; // Sessions with same grade+subject but different teachers
 }
 
@@ -128,6 +129,7 @@ function buildSessions(classes: ClassEntry[]): Session[] {
           validSlots: [slot],
           isFixed: true,
           isElective: cls.isElective,
+          isCotaught: cls.isCotaught,
         });
       });
     } else {
@@ -144,6 +146,7 @@ function buildSessions(classes: ClassEntry[]): Session[] {
           validSlots: [...validSlots],
           isFixed: false,
           isElective: cls.isElective,
+          isCotaught: cls.isCotaught,
         });
       }
     }
@@ -165,8 +168,8 @@ function assignCotaughtGroups(sessions: Session[]): Map<string, Session[]> {
   const gradeSubjectGroups = new Map<string, Session[]>();
 
   for (const session of sessions) {
-    // Skip electives - they don't have co-taught constraints
-    if (session.isElective) continue;
+    // Skip sessions not explicitly marked as co-taught
+    if (!session.isCotaught) continue;
 
     // Create a normalized key using sorted grade numbers (handles format differences)
     const gradeNums = parseGradeDisplayToNumbers(session.grade).sort((a, b) => a - b);
@@ -236,7 +239,8 @@ function solveBacktracking(
   maxTimeMs: number = 5000, // 5 second timeout per attempt
   deprioritizeTeachers?: Set<string>, // Teachers to schedule last (for diversity)
   rules?: SchedulingRule[], // Scheduling rules to respect
-  cotaughtGroups?: Map<string, Session[]> // Co-taught class groups
+  cotaughtGroups?: Map<string, Session[]>, // Co-taught class groups
+  prefilledGradeSubjectDays?: Map<string, Set<number>> // "gradeName|subject" -> days already used by locked teachers
 ): SolveResult {
   const assignment = new Map<number, number>();
   const startTime = Date.now();
@@ -275,6 +279,14 @@ function solveBacktracking(
     for (const [gradeName, slots] of prefilledElectiveGradeSlots) {
       if (!electiveGradeSlots.has(gradeName)) electiveGradeSlots.set(gradeName, new Set());
       slots.forEach(slot => electiveGradeSlots.get(gradeName)!.add(slot));
+    }
+  }
+
+  // Pre-fill grade+subject+day from locked teachers (prevents duplicate subjects per day per grade)
+  if (prefilledGradeSubjectDays) {
+    for (const [key, days] of prefilledGradeSubjectDays) {
+      if (!gradeSubjectDay.has(key)) gradeSubjectDay.set(key, new Set());
+      days.forEach(day => gradeSubjectDay.get(key)!.add(day));
     }
   }
 
@@ -1179,6 +1191,7 @@ export async function generateSchedules(
   // Separate elective vs non-elective for proper conflict handling
   const lockedGradeSlots = new Map<string, Set<number>>();  // Non-elective
   const lockedElectiveGradeSlots = new Map<string, Set<number>>();  // Elective
+  const lockedGradeSubjectDays = new Map<string, Set<number>>();  // "gradeName|subject" -> days
   const databaseGrades = new Set(grades);
   grades.forEach(g => {
     lockedGradeSlots.set(g, new Set());
@@ -1217,6 +1230,12 @@ export async function generateSchedules(
               } else {
                 lockedGradeSlots.get(g)?.add(slot);
               }
+              // Track subject+day to prevent duplicate subjects per day per grade
+              const subjectDayKey = `${g}|${subject}`;
+              if (!lockedGradeSubjectDays.has(subjectDayKey)) {
+                lockedGradeSubjectDays.set(subjectDayKey, new Set());
+              }
+              lockedGradeSubjectDays.get(subjectDayKey)!.add(dayIdx);
             });
           }
         });
@@ -1281,7 +1300,8 @@ export async function generateSchedules(
       5000, // 5 second timeout
       deprioritize.size > 0 ? deprioritize : undefined,
       rules,
-      cotaughtGroups.size > 0 ? cotaughtGroups : undefined
+      cotaughtGroups.size > 0 ? cotaughtGroups : undefined,
+      isRefinementMode ? lockedGradeSubjectDays : undefined
     );
 
     if (!result.assignment) {

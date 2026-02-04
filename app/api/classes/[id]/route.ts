@@ -13,6 +13,7 @@ export async function PUT(
   if (body.subject_id !== undefined) updates.subject_id = body.subject_id
   if (body.days_per_week !== undefined) updates.days_per_week = body.days_per_week
   if (body.is_elective !== undefined) updates.is_elective = body.is_elective
+  if (body.is_cotaught !== undefined) updates.is_cotaught = body.is_cotaught
 
   // Handle grade_ids (new) or grade_id (legacy)
   if (body.grade_ids !== undefined && Array.isArray(body.grade_ids)) {

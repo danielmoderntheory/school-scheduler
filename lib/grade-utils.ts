@@ -85,6 +85,26 @@ export function gradesOverlap(gradeA: string, gradeB: string): boolean {
 }
 
 /**
+ * Check if two grade display strings represent the exact same set of grades.
+ * Use this for identity matching (e.g., merging class entries), NOT for conflict detection.
+ *
+ * Examples:
+ *   gradesEqual("6th Grade", "6th Grade") → true
+ *   gradesEqual("6th-7th Grade", "6th Grade, 7th Grade") → true (same set, different format)
+ *   gradesEqual("6th Grade", "6th-8th Grade") → false (different sets)
+ *   gradesEqual("6th-11th Grade", "6th Grade") → false
+ */
+export function gradesEqual(gradeA: string, gradeB: string): boolean {
+  if (gradeA === gradeB) return true
+
+  const numsA = parseGradeDisplayToNumbers(gradeA).sort((a, b) => a - b)
+  const numsB = parseGradeDisplayToNumbers(gradeB).sort((a, b) => a - b)
+
+  if (numsA.length !== numsB.length) return false
+  return numsA.every((n, i) => n === numsB[i])
+}
+
+/**
  * Check if a grade display includes a specific single grade.
  *
  * Examples:
@@ -283,6 +303,7 @@ export interface ClassSnapshotEntry {
   teacher_name: string | null
   subject_name: string | null
   is_elective?: boolean
+  is_cotaught?: boolean
   grade_ids?: string[]
 }
 
@@ -306,12 +327,12 @@ export function isClassElective(
 }
 
 /**
- * Check if a class is co-taught (same grade(s) + subject with different teachers).
+ * Check if a class is co-taught (explicitly flagged with is_cotaught).
  *
  * @param teacher - Teacher name
  * @param subject - Subject name
  * @param classesSnapshot - Array of class entries from snapshot
- * @returns true if there's another teacher teaching the same grade(s) + subject
+ * @returns true if the class is explicitly marked as co-taught
  */
 export function isClassCotaught(
   teacher: string,
@@ -319,20 +340,8 @@ export function isClassCotaught(
   classesSnapshot: ClassSnapshotEntry[] | undefined
 ): boolean {
   if (!classesSnapshot) return false
-
-  // Find the class for this teacher+subject
-  const thisClass = classesSnapshot.find(
-    c => c.teacher_name === teacher && c.subject_name === subject
-  )
-  if (!thisClass || !thisClass.grade_ids?.length) return false
-
-  // Check if there's another class with the same grades+subject but different teacher
-  return classesSnapshot.some(c =>
-    c.teacher_name !== teacher &&
-    c.subject_name === subject &&
-    c.grade_ids?.length &&
-    // Same grades (compare sorted arrays)
-    JSON.stringify([...c.grade_ids].sort()) === JSON.stringify([...thisClass.grade_ids!].sort())
+  return classesSnapshot.some(
+    c => c.teacher_name === teacher && c.subject_name === subject && c.is_cotaught
   )
 }
 

@@ -25,6 +25,7 @@ export interface ClassEntry {
   subject: string;
   daysPerWeek: number;
   isElective?: boolean;  // Electives skip grade conflicts
+  isCotaught?: boolean;  // Co-taught classes must be scheduled at the same time
   availableDays?: string[];
   availableBlocks?: number[];
   fixedSlots?: [string, number][]; // [day, block][]

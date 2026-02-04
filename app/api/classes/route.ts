@@ -73,12 +73,14 @@ export async function POST(request: NextRequest) {
     grade_id?: string | null
     grade_ids?: string[] | null
     is_elective?: boolean
+    is_cotaught?: boolean
   } = {
     quarter_id: body.quarter_id,
     teacher_id: body.teacher_id || null,
     subject_id: body.subject_id || null,
     days_per_week: body.days_per_week || 1,
     is_elective: body.is_elective || false,
+    is_cotaught: body.is_cotaught || false,
   }
 
   if (body.grade_ids && Array.isArray(body.grade_ids) && body.grade_ids.length > 0) {

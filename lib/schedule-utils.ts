@@ -342,6 +342,113 @@ export function setOpenBlockLabel(
 
 // -----------------------------------------------------------------------------
 // SCHEDULE OPTION STATS RECALCULATION
+// Counts grade-sessions (blocks used per grade), correctly handling co-taught dedup
+// and elective slot dedup. Shared between classes page and generate page.
+// -----------------------------------------------------------------------------
+
+export interface BlockCountClass {
+  gradeKey: string        // Unique key per grade (id or display_name)
+  subjectKey: string      // Unique key per subject (id or name)
+  daysPerWeek: number
+  isElective: boolean
+  isCotaught: boolean
+  fixedSlots?: Array<{ day: string; block: number }>
+}
+
+/**
+ * Calculate per-grade block counts from a list of classes.
+ *
+ * Co-taught classes (is_cotaught=true) sharing the same grade+subject only count once.
+ * Electives count per unique fixed slot per grade (multiple electives at the same
+ * time slot only count once for a given grade).
+ *
+ * Returns a Map of gradeKey → block count.
+ */
+export function calculateGradeBlocks(classes: BlockCountClass[]): Map<string, number> {
+  const gradeCapacity = new Map<string, number>()
+  const seenCotaughtGradeSubject = new Set<string>()
+  const seenElectiveSlots = new Set<string>()
+
+  for (const cls of classes) {
+    if (cls.isElective) {
+      // Electives: count each unique time slot once per grade
+      for (const slot of (cls.fixedSlots || [])) {
+        const slotKey = `${cls.gradeKey}:${slot.day}:${slot.block}`
+        if (seenElectiveSlots.has(slotKey)) continue
+        seenElectiveSlots.add(slotKey)
+        gradeCapacity.set(cls.gradeKey, (gradeCapacity.get(cls.gradeKey) || 0) + 1)
+      }
+    } else if (cls.isCotaught) {
+      // Co-taught: only count the first occurrence of this grade+subject
+      const key = `${cls.gradeKey}:${cls.subjectKey}`
+      if (seenCotaughtGradeSubject.has(key)) continue
+      seenCotaughtGradeSubject.add(key)
+      gradeCapacity.set(cls.gradeKey, (gradeCapacity.get(cls.gradeKey) || 0) + cls.daysPerWeek)
+    } else {
+      // Regular class: always counts
+      gradeCapacity.set(cls.gradeKey, (gradeCapacity.get(cls.gradeKey) || 0) + cls.daysPerWeek)
+    }
+  }
+
+  return gradeCapacity
+}
+
+// -----------------------------------------------------------------------------
+// Co-taught display groups — shared between classes page and generate page.
+// Only includes classes explicitly flagged is_cotaught.
+// -----------------------------------------------------------------------------
+
+export interface CotaughtDisplayClass {
+  teacherName: string
+  gradeKey: string       // For grouping (e.g., sorted grade IDs or names)
+  gradeDisplay: string   // For display (e.g., "5th Grade" or "6th-11th")
+  subjectKey: string     // For grouping (e.g., subject ID or name)
+  subjectName: string    // For display
+  isCotaught: boolean
+}
+
+export interface CotaughtGroup {
+  gradeDisplay: string
+  subjectName: string
+  teacherNames: string[]
+}
+
+/**
+ * Build co-taught display groups from a list of classes.
+ * Only includes classes explicitly flagged is_cotaught, grouped by grade+subject.
+ */
+export function buildCotaughtGroups(classes: CotaughtDisplayClass[]): CotaughtGroup[] {
+  const groupMap = new Map<string, { teachers: Set<string>; gradeDisplay: string; subjectName: string }>()
+
+  for (const c of classes) {
+    if (!c.isCotaught) continue
+
+    const key = `${c.gradeKey}|${c.subjectKey}`
+    if (!groupMap.has(key)) {
+      groupMap.set(key, {
+        teachers: new Set([c.teacherName]),
+        gradeDisplay: c.gradeDisplay,
+        subjectName: c.subjectName,
+      })
+    } else {
+      groupMap.get(key)!.teachers.add(c.teacherName)
+    }
+  }
+
+  const groups: CotaughtGroup[] = []
+  for (const { teachers, gradeDisplay, subjectName } of groupMap.values()) {
+    if (teachers.size > 1) {
+      groups.push({
+        gradeDisplay,
+        subjectName,
+        teacherNames: Array.from(teachers),
+      })
+    }
+  }
+  return groups
+}
+
+// -----------------------------------------------------------------------------
 // Recomputes teacherStats, backToBackIssues, and studyHallsPlaced from schedule data.
 // Use this after ANY modification to a ScheduleOption (regen, swap, freeform, study hall changes).
 // -----------------------------------------------------------------------------

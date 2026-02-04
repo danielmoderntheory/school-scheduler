@@ -6,6 +6,7 @@
  */
 
 import type { ClassEntry, Teacher } from './types'
+import { calculateGradeBlocks } from './schedule-utils'
 
 // Snapshot types (as stored in stats column)
 export interface ClassSnapshot {
@@ -19,6 +20,7 @@ export interface ClassSnapshot {
     display_name: string
   }>
   is_elective: boolean
+  is_cotaught: boolean
   subject_id: string | null
   subject_name: string | null
   days_per_week: number
@@ -57,6 +59,7 @@ export interface GenerationStats {
   grades_snapshot?: GradeSnapshot[]
   allSolutions?: unknown[]
   snapshotVersion?: number // Timestamp when snapshot was last updated
+  snapshotAffectedTeachers?: string[] // Teachers affected by the last snapshot update (for cross-revision alignment)
 }
 
 /**
@@ -110,6 +113,7 @@ export function parseClassesFromSnapshot(snapshot: ClassSnapshot[]): ClassEntry[
       subject: c.subject_name || '',
       daysPerWeek: c.days_per_week,
       isElective: c.is_elective || false,
+      isCotaught: c.is_cotaught || false,
       availableDays,
       availableBlocks,
       fixedSlots: fixedSlots.length > 0 ? fixedSlots : undefined,
@@ -163,37 +167,30 @@ export function parseRulesFromSnapshot(snapshot: RuleSnapshot[]): Array<{
 
 /**
  * Compute the expected number of teaching sessions (excluding study halls).
- * Mirrors the generate page's totalGradeSessions logic but without the study hall addition.
- * Deduplicates co-taught classes (same grade+subject) and elective slots (same grade+day+block).
+ * Delegates to calculateGradeBlocks for consistent co-taught/elective dedup logic.
  */
 export function computeExpectedTeachingSessions(classes: ClassSnapshot[]): number {
-  const seenGradeSubject = new Set<string>()
-  const seenElectiveSlots = new Set<string>()
-  let total = 0
-
-  for (const c of classes) {
+  // Convert snapshots to BlockCountClass format, one entry per grade per class
+  const blockClasses = classes.flatMap(c => {
     const classGrades = c.grades || []
-    if (classGrades.length === 0) continue
+    if (classGrades.length === 0) return []
 
-    for (const grade of classGrades) {
-      if (c.is_elective) {
-        const fixedSlots = (c.restrictions || [])
-          .filter(r => r.restriction_type === 'fixed_slot')
-          .map(r => r.value as { day: string; block: number })
-        for (const slot of fixedSlots) {
-          const slotKey = `${grade.id}:${slot.day}:${slot.block}`
-          if (!seenElectiveSlots.has(slotKey)) {
-            seenElectiveSlots.add(slotKey)
-            total++
-          }
-        }
-      } else {
-        const key = `${grade.id}:${c.subject_id}`
-        if (seenGradeSubject.has(key)) continue
-        seenGradeSubject.add(key)
-        total += c.days_per_week
-      }
-    }
+    return classGrades.map(grade => ({
+      gradeKey: grade.id,
+      subjectKey: c.subject_id || '',
+      daysPerWeek: c.days_per_week,
+      isElective: c.is_elective || false,
+      isCotaught: c.is_cotaught || false,
+      fixedSlots: (c.restrictions || [])
+        .filter(r => r.restriction_type === 'fixed_slot')
+        .map(r => r.value as { day: string; block: number }),
+    }))
+  })
+
+  const gradeBlocks = calculateGradeBlocks(blockClasses)
+  let total = 0
+  for (const count of gradeBlocks.values()) {
+    total += count
   }
   return total
 }
@@ -207,6 +204,7 @@ export interface CurrentClass {
   subject: { id: string; name: string } | null
   days_per_week: number
   is_elective?: boolean
+  is_cotaught?: boolean
   restrictions?: Array<{
     restriction_type: string
     value: unknown
@@ -322,6 +320,14 @@ export function detectClassChanges(
 
       if (!restrictionsEqual(snapshotClass.restrictions, current.restrictions)) {
         modifications.push('restrictions changed')
+      }
+
+      if ((snapshotClass.is_cotaught || false) !== (current.is_cotaught || false)) {
+        modifications.push(`co-taught: ${snapshotClass.is_cotaught ? 'yes' : 'no'} → ${current.is_cotaught ? 'yes' : 'no'}`)
+      }
+
+      if ((snapshotClass.is_elective || false) !== (current.is_elective || false)) {
+        modifications.push(`elective: ${snapshotClass.is_elective ? 'yes' : 'no'} → ${current.is_elective ? 'yes' : 'no'}`)
       }
 
       if (modifications.length > 0) {

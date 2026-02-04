@@ -149,6 +149,7 @@ export async function generateSchedulesRemote(
         subject: c.subject,
         daysPerWeek: c.daysPerWeek,
         isElective: c.isElective || false,  // Electives skip grade conflicts
+        isCotaught: c.isCotaught || false,  // Co-taught classes scheduled together
         availableDays: c.availableDays,
         availableBlocks: c.availableBlocks,
         fixedSlots: c.fixedSlots,

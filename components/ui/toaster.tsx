@@ -8,6 +8,7 @@ export function Toaster() {
       position="bottom-right"
       containerClassName="no-print"
       toastOptions={{
+        duration: 10000,
         style: {
           background: "hsl(var(--background))",
           color: "hsl(var(--foreground))",
@@ -15,14 +16,14 @@ export function Toaster() {
           fontSize: "0.875rem", // text-sm equivalent
         },
         success: {
-          duration: 3000,
+          duration: 10000,
           iconTheme: {
             primary: "hsl(142.1 76.2% 36.3%)",
             secondary: "white",
           },
         },
         error: {
-          duration: 4000,
+          duration: 10000,
           iconTheme: {
             primary: "hsl(var(--destructive))",
             secondary: "white",

@@ -2,7 +2,7 @@
 
 import { useState, useRef, useEffect } from "react"
 import { cn } from "@/lib/utils"
-import { ChevronDown, AlertTriangle, Check } from "lucide-react"
+import { ChevronDown, AlertTriangle, Check, Users } from "lucide-react"
 
 interface Grade {
   id: string
@@ -15,7 +15,9 @@ interface GradeSelectorProps {
   grades: Grade[]
   selectedIds: string[]
   isElective: boolean
-  onChange: (ids: string[], isElective: boolean) => void
+  isCotaught?: boolean
+  cotaughtTeachers?: string[]  // Names of other teachers with same grade+subject
+  onChange: (ids: string[], isElective: boolean, isCotaught?: boolean) => void
   hasRestrictions?: boolean
   placeholder?: string
   compact?: boolean
@@ -25,6 +27,8 @@ export function GradeSelector({
   grades,
   selectedIds,
   isElective,
+  isCotaught = false,
+  cotaughtTeachers,
   onChange,
   hasRestrictions = false,
   placeholder = "Select grade",
@@ -112,6 +116,12 @@ export function GradeSelector({
     onChange(selectedIds, enabled)
   }
 
+  function handleCotaughtToggle(enabled: boolean) {
+    onChange(selectedIds, isElective, enabled)
+  }
+
+  const cotaughtEnabled = isCotaught || (cotaughtTeachers && cotaughtTeachers.length > 0)
+
   const showElectiveWarning = isElective && !hasRestrictions
 
   return (
@@ -127,6 +137,9 @@ export function GradeSelector({
         )}
       >
         <span className="truncate flex-1">{formatDisplay()}</span>
+        {isCotaught && (
+          <Users className="h-3 w-3 text-purple-500 flex-shrink-0" />
+        )}
         {showElectiveWarning && (
           <AlertTriangle className="h-3 w-3 text-amber-500 flex-shrink-0" />
         )}
@@ -240,6 +253,36 @@ export function GradeSelector({
                   ✓ Time slot set
                 </div>
               )}
+            </div>
+
+            {/* Co-taught Checkbox */}
+            <div className="border-t pt-3">
+              <label className={cn(
+                "flex items-start gap-2",
+                cotaughtEnabled ? "cursor-pointer" : "cursor-not-allowed opacity-50"
+              )}>
+                <div
+                  onClick={() => cotaughtEnabled && handleCotaughtToggle(!isCotaught)}
+                  className={cn(
+                    "w-4 h-4 rounded border flex items-center justify-center mt-0.5 transition-colors",
+                    isCotaught
+                      ? "bg-purple-600 border-purple-600"
+                      : cotaughtEnabled
+                        ? "border-slate-300 hover:border-slate-400"
+                        : "border-slate-200 bg-slate-50"
+                  )}
+                >
+                  {isCotaught && <Check className="h-3 w-3 text-white" />}
+                </div>
+                <div className="flex-1">
+                  <div className="text-sm font-medium">Co-taught</div>
+                  <div className="text-xs text-muted-foreground">
+                    {cotaughtTeachers && cotaughtTeachers.length > 0
+                      ? `Schedule with ${cotaughtTeachers.join(', ')}`
+                      : "Available when another teacher has the same grade + subject"}
+                  </div>
+                </div>
+              </label>
             </div>
 
           </div>

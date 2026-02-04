@@ -103,6 +103,7 @@ class ClassEntry:
     days_per_week: int
     grade_display: str = ''  # Display name for schedules (e.g., '6th-7th Grade')
     is_elective: bool = False  # Electives skip grade conflicts
+    is_cotaught: bool = False  # Co-taught classes must be scheduled together
     available_days: list = field(default_factory=lambda: DAYS.copy())
     available_blocks: list = field(default_factory=lambda: BLOCKS.copy())
     fixed_slots: list = field(default_factory=list)  # [(day, block), ...]
@@ -118,6 +119,7 @@ class Session:
     valid_slots: list
     is_fixed: bool = False
     is_elective: bool = False  # Electives skip grade conflicts
+    is_cotaught: bool = False  # Co-taught classes must be scheduled together
 
 
 @dataclass
@@ -359,7 +361,8 @@ def build_sessions(
                         subject=cls.subject,
                         valid_slots=[slot],
                         is_fixed=True,
-                        is_elective=cls.is_elective
+                        is_elective=cls.is_elective,
+                        is_cotaught=cls.is_cotaught
                     ))
                     session_id += 1
         else:
@@ -400,7 +403,8 @@ def build_sessions(
                     subject=cls.subject,
                     valid_slots=valid_slots,
                     is_fixed=False,
-                    is_elective=cls.is_elective
+                    is_elective=cls.is_elective,
+                    is_cotaught=cls.is_cotaught
                 ))
                 session_id += 1
 
@@ -515,7 +519,12 @@ def solve_with_cpsat(sessions: list[Session], seed: int = 0, time_limit: float =
     slot_vars = {}
     non_fixed_vars = []
     for s in shuffled_sessions:
-        if len(s.valid_slots) == 1:
+        if len(s.valid_slots) == 0:
+            # No valid slots - session can't be placed (slots all blocked by locked teachers)
+            # Skip this session entirely - constraints will work without it
+            logger.warning(f"Session {s.id} ({s.teacher}/{s.subject}) has no valid slots - skipping")
+            continue
+        elif len(s.valid_slots) == 1:
             # Fixed slot - create constant
             slot_vars[s.id] = model.NewConstant(s.valid_slots[0])
         else:
@@ -540,10 +549,13 @@ def solve_with_cpsat(sessions: list[Session], seed: int = 0, time_limit: float =
             value_strategy
         )
 
+    # Filter sessions to only those with variables (excludes sessions with no valid slots)
+    active_sessions = [s for s in sessions if s.id in slot_vars]
+
     # Hard Constraint 1: No teacher conflicts (teacher can't be in two places at once)
-    teachers = list(set(s.teacher for s in sessions))
+    teachers = list(set(s.teacher for s in active_sessions))
     for teacher in teachers:
-        teacher_sessions = [s for s in sessions if s.teacher == teacher]
+        teacher_sessions = [s for s in active_sessions if s.teacher == teacher]
         if len(teacher_sessions) > 1:
             teacher_vars = [slot_vars[s.id] for s in teacher_sessions]
             model.AddAllDifferent(teacher_vars)
@@ -556,8 +568,8 @@ def solve_with_cpsat(sessions: list[Session], seed: int = 0, time_limit: float =
     # - Regular vs Regular (same grades): CONFLICT - standard grade blocking
     #
     for grade in active_grades:
-        regular_sessions = [s for s in sessions if grade in s.grades and not s.is_elective]
-        elective_sessions = [s for s in sessions if grade in s.grades and s.is_elective]
+        regular_sessions = [s for s in active_sessions if grade in s.grades and not s.is_elective]
+        elective_sessions = [s for s in active_sessions if grade in s.grades and s.is_elective]
 
         # Regular vs Regular: all must be at different times
         if len(regular_sessions) > 1:
@@ -578,7 +590,7 @@ def solve_with_cpsat(sessions: list[Session], seed: int = 0, time_limit: float =
     if is_rule_enabled(rules, 'no_duplicate_subjects'):
         for grade in active_grades:
             subjects_for_grade = set()
-            for s in sessions:
+            for s in active_sessions:
                 if s.is_elective:
                     continue
                 if grade in s.grades:
@@ -586,7 +598,7 @@ def solve_with_cpsat(sessions: list[Session], seed: int = 0, time_limit: float =
 
             for subject in subjects_for_grade:
                 # Get all sessions for this grade+subject (excluding electives)
-                gs_sessions = [s for s in sessions
+                gs_sessions = [s for s in active_sessions
                              if grade in s.grades and s.subject == subject and not s.is_elective]
 
                 if len(gs_sessions) > 1:
@@ -609,7 +621,9 @@ def solve_with_cpsat(sessions: list[Session], seed: int = 0, time_limit: float =
     from collections import defaultdict
     cotaught_groups = defaultdict(list)  # (grade, subject) -> [sessions]
 
-    for s in sessions:
+    for s in active_sessions:
+        if not s.is_cotaught:
+            continue
         for grade in s.grades:
             key = (grade, s.subject)
             cotaught_groups[key].append(s)
@@ -690,7 +704,7 @@ def solve_with_cpsat(sessions: list[Session], seed: int = 0, time_limit: float =
         if solutions:
             return solutions
         # Fallback: if callback didn't capture, get at least one solution
-        assignment = {s.id: solver.Value(slot_vars[s.id]) for s in sessions}
+        assignment = {s.id: solver.Value(slot_vars[s.id]) for s in active_sessions}
         return [assignment]
 
     return []
@@ -724,8 +738,10 @@ def build_schedules(assignment: dict, sessions: list[Session], teachers: list[Te
     for grade in all_grades:
         grade_schedules[grade] = {day: {b: None for b in BLOCKS} for day in DAYS}
 
-    # Fill in assignments
+    # Fill in assignments (skip sessions not in assignment, e.g. those with no valid slots)
     for s in sessions:
+        if s.id not in assignment:
+            continue
         slot = assignment[s.id]
         day_idx = slot_to_day(slot)
         block_idx = slot_to_block(slot)
@@ -1404,6 +1420,7 @@ def generate_schedules(
             subject=c['subject'],
             days_per_week=c.get('daysPerWeek', 1),
             is_elective=c.get('isElective', False),
+            is_cotaught=c.get('isCotaught', False),
             available_days=c.get('availableDays') or DAYS.copy(),
             available_blocks=c.get('availableBlocks') or BLOCKS.copy(),
             fixed_slots=[(fs[0], fs[1]) for fs in (c.get('fixedSlots') or [])]

@@ -21,7 +21,7 @@ import { Loader2, Play, Download, Coffee, History, AlertTriangle, X, Server, Eye
 import { generateSchedulesRemote, type ScheduleDiagnostics } from "@/lib/scheduler-remote"
 import type { Teacher, ClassEntry, ScheduleOption } from "@/lib/types"
 import { useGeneration } from "@/lib/generation-context"
-import { isScheduledClass } from "@/lib/schedule-utils"
+import { isScheduledClass, calculateGradeBlocks, buildCotaughtGroups } from "@/lib/schedule-utils"
 import toast from "react-hot-toast"
 
 // Sort grades: Kindergarten first, then by grade number
@@ -126,6 +126,7 @@ interface DBClass {
   grade_ids?: string[]
   grades?: Array<{ id: string; name: string; display_name: string; sort_order: number }>
   is_elective?: boolean
+  is_cotaught?: boolean
   subject: { id: string; name: string }
   days_per_week: number
   restrictions: Array<{
@@ -272,6 +273,7 @@ export default function GeneratePage() {
         subject: c.subject.name,
         daysPerWeek: c.days_per_week,
         isElective: c.is_elective || false,
+        isCotaught: c.is_cotaught || false,
       }
 
       // Process restrictions
@@ -413,6 +415,7 @@ export default function GeneratePage() {
                 display_name: g.display_name,
               })),
               is_elective: c.is_elective || false,
+              is_cotaught: c.is_cotaught || false,
               subject_id: c.subject?.id || null,
               subject_name: c.subject?.name || null,
               days_per_week: c.days_per_week,
@@ -523,42 +526,34 @@ export default function GeneratePage() {
 
   const selectedResult = results?.[parseInt(selectedOption) - 1]
 
-  // Calculate block capacity (grade-sessions: each grade in a class needs a slot)
-  // Co-taught classes only count once, electives count per fixed slot
-  const seenGradeSubject = new Set<string>() // For co-taught dedup
-  const seenElectiveSlots = new Set<string>() // For elective slot dedup
-  let totalGradeSessions = 0
+  // Calculate block capacity using shared helper
+  const blockCountClasses: import('@/lib/schedule-utils').BlockCountClass[] = []
   const uniqueGrades = new Set<string>()
 
   for (const c of classes) {
     const classGrades = c.grades && c.grades.length > 0 ? c.grades : (c.grade ? [c.grade] : [])
 
-    // Track unique grades
     classGrades.forEach(g => uniqueGrades.add(g.id))
 
+    const fixedSlots = c.restrictions
+      ?.filter(r => r.restriction_type === 'fixed_slot')
+      .map(r => r.value as { day: string; block: number }) || []
+
     for (const grade of classGrades) {
-      if (c.is_elective) {
-        // Electives: count each unique time slot once per grade
-        const fixedSlots = c.restrictions
-          ?.filter(r => r.restriction_type === 'fixed_slot')
-          .map(r => r.value as { day: string; block: number }) || []
-
-        for (const slot of fixedSlots) {
-          const slotKey = `${grade.id}:${slot.day}:${slot.block}`
-          if (!seenElectiveSlots.has(slotKey)) {
-            seenElectiveSlots.add(slotKey)
-            totalGradeSessions++
-          }
-        }
-      } else {
-        // Regular class - skip if we've already counted this grade+subject (co-taught)
-        const key = `${grade.id}:${c.subject?.id}`
-        if (seenGradeSubject.has(key)) continue
-        seenGradeSubject.add(key)
-
-        totalGradeSessions += c.days_per_week
-      }
+      blockCountClasses.push({
+        gradeKey: grade.id,
+        subjectKey: c.subject?.id || '',
+        daysPerWeek: c.days_per_week,
+        isElective: c.is_elective || false,
+        isCotaught: c.is_cotaught || false,
+        fixedSlots,
+      })
     }
+  }
+  const gradeBlockCounts = calculateGradeBlocks(blockCountClasses)
+  let totalGradeSessions = 0
+  for (const count of gradeBlockCounts.values()) {
+    totalGradeSessions += count
   }
 
   // Capture teaching-only count before adding study halls
@@ -581,52 +576,33 @@ export default function GeneratePage() {
   // Count incomplete classes
   const incompleteClasses = classes.filter(c => !c.teacher || !c.grade || !c.subject)
 
-  // Detect co-taught classes (same grade + subject with different teachers)
-  const cotaughtGroups: Array<{ gradeDisplay: string; subjectName: string; teacherNames: string[] }> = []
-  const gradeSubjectMap = new Map<string, { teachers: Set<string>; gradeDisplay: string; subjectName: string }>()
-
-  for (const c of classes) {
-    // Use the grade display name from the class
+  // Build co-taught display groups using shared helper
+  const cotaughtGroups = buildCotaughtGroups(classes.map(c => {
+    let gradeDisplay = ''
     const gradeKey = c.grades && c.grades.length > 0
       ? c.grades.map(g => g.name).sort().join(',')
       : c.grade?.name || ''
-    const subjectKey = c.subject?.name || ''
-    const key = `${gradeKey}|${subjectKey}`
-
-    if (!gradeSubjectMap.has(key)) {
-      // Format grade display as range (e.g., "6th-11th") if multiple grades
-      let gradeDisplay = ''
-      if (c.grades && c.grades.length > 0) {
-        if (c.grades.length === 1) {
-          gradeDisplay = c.grades[0].display_name
-        } else {
-          const sorted = [...c.grades].sort((a, b) => a.sort_order - b.sort_order)
-          const first = sorted[0].display_name.replace(' Grade', '')
-          const last = sorted[sorted.length - 1].display_name.replace(' Grade', '')
-          gradeDisplay = `${first}-${last}`
-        }
-      } else if (c.grade) {
-        gradeDisplay = c.grade.display_name
+    if (c.grades && c.grades.length > 0) {
+      if (c.grades.length === 1) {
+        gradeDisplay = c.grades[0].display_name
+      } else {
+        const sorted = [...c.grades].sort((a, b) => a.sort_order - b.sort_order)
+        const first = sorted[0].display_name.replace(' Grade', '')
+        const last = sorted[sorted.length - 1].display_name.replace(' Grade', '')
+        gradeDisplay = `${first}-${last}`
       }
-      gradeSubjectMap.set(key, {
-        teachers: new Set([c.teacher.name]),
-        gradeDisplay,
-        subjectName: c.subject?.name || ''
-      })
-    } else {
-      gradeSubjectMap.get(key)!.teachers.add(c.teacher.name)
+    } else if (c.grade) {
+      gradeDisplay = c.grade.display_name
     }
-  }
-
-  for (const { teachers: teacherSet, gradeDisplay, subjectName } of gradeSubjectMap.values()) {
-    if (teacherSet.size > 1) {
-      cotaughtGroups.push({
-        gradeDisplay,
-        subjectName,
-        teacherNames: Array.from(teacherSet)
-      })
+    return {
+      teacherName: c.teacher.name,
+      gradeKey,
+      gradeDisplay,
+      subjectKey: c.subject?.name || '',
+      subjectName: c.subject?.name || '',
+      isCotaught: c.is_cotaught || false,
     }
-  }
+  }))
 
   // Detect electives without fixed slot restrictions
   const electivesWithoutRestrictions = classes.filter(c => {
