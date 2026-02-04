@@ -222,7 +222,7 @@ export function getBlockType(entry: ScheduleEntry): typeof BLOCK_TYPE_OPEN | typ
 // but only OPEN blocks can have labels (Study Halls always show their grade).
 // -----------------------------------------------------------------------------
 
-import type { TeacherSchedule, OpenBlockLabels, ScheduleOption } from "./types"
+import type { TeacherSchedule, OpenBlockLabels, ScheduleOption, StudyHallAssignment } from "./types"
 
 const DAYS_ORDER = ["Mon", "Tues", "Wed", "Thurs", "Fri"]
 const BLOCKS_ORDER = [1, 2, 3, 4, 5]
@@ -372,10 +372,87 @@ export function recalculateOptionStats(option: ScheduleOption): ScheduleOption {
     return { ...stat, teaching, studyHall, open, totalUsed: teaching + studyHall, backToBackIssues }
   })
 
+  // Reconcile studyHallAssignments against actual schedule data.
+  // This catches stale entries from regen, freeform, swap, or any other modification
+  // that moved/removed study halls without updating the assignments array.
+  const reconciledAssignments = reconcileStudyHallAssignments(
+    option.studyHallAssignments,
+    option.teacherSchedules
+  )
+
   return {
     ...option,
     teacherStats,
+    studyHallAssignments: reconciledAssignments,
     backToBackIssues: teacherStats.reduce((sum, s) => sum + s.backToBackIssues, 0),
-    studyHallsPlaced: option.studyHallAssignments?.filter(sh => sh.teacher !== null).length ?? 0,
+    studyHallsPlaced: teacherStats.reduce((sum, s) => sum + s.studyHall, 0),
   }
+}
+
+/**
+ * Reconcile studyHallAssignments against the actual teacher schedules.
+ * - Stale entries (assignment says placed, but schedule disagrees) → marked unplaced
+ * - Study halls in schedule but missing from assignments → added
+ * - Correct entries → kept as-is
+ */
+function reconcileStudyHallAssignments(
+  assignments: StudyHallAssignment[],
+  teacherSchedules: Record<string, TeacherSchedule>
+): StudyHallAssignment[] {
+  // Build set of actual study halls from schedule: "group|teacher|day|block"
+  const actualStudyHalls = new Map<string, { teacher: string; day: string; block: number }>()
+  for (const [teacher, schedule] of Object.entries(teacherSchedules)) {
+    for (const day of DAYS_ORDER) {
+      for (const block of BLOCKS_ORDER) {
+        const entry = schedule?.[day]?.[block]
+        if (entry && isStudyHall(entry[1])) {
+          const group = entry[0] // grade display name is the group
+          actualStudyHalls.set(`${group}|${teacher}|${day}|${block}`, { teacher, day, block })
+        }
+      }
+    }
+  }
+
+  // Track which actual study halls are accounted for by assignments
+  const matchedActuals = new Set<string>()
+
+  // Reconcile existing assignments
+  const reconciled: StudyHallAssignment[] = assignments.map(sh => {
+    if (sh.teacher && sh.day && sh.block != null) {
+      const key = `${sh.group}|${sh.teacher}|${sh.day}|${sh.block}`
+      if (actualStudyHalls.has(key)) {
+        // Assignment matches schedule — keep it
+        matchedActuals.add(key)
+        return sh
+      }
+      // Assignment is stale — study hall not in schedule at claimed location
+      // Check if this group exists elsewhere in the schedule
+      for (const [actualKey, loc] of actualStudyHalls) {
+        if (actualKey.startsWith(`${sh.group}|`) && !matchedActuals.has(actualKey)) {
+          matchedActuals.add(actualKey)
+          return { ...sh, teacher: loc.teacher, day: loc.day, block: loc.block }
+        }
+      }
+      // Group not found anywhere — mark as unplaced
+      return { ...sh, teacher: null, day: null, block: null }
+    }
+    // Already unplaced — check if it was placed since (e.g., manual placement)
+    for (const [actualKey, loc] of actualStudyHalls) {
+      if (actualKey.startsWith(`${sh.group}|`) && !matchedActuals.has(actualKey)) {
+        matchedActuals.add(actualKey)
+        return { ...sh, teacher: loc.teacher, day: loc.day, block: loc.block }
+      }
+    }
+    return sh
+  })
+
+  // Add any study halls found in schedule but not in assignments at all
+  for (const [key, loc] of actualStudyHalls) {
+    if (!matchedActuals.has(key)) {
+      const group = key.split('|')[0]
+      reconciled.push({ group, teacher: loc.teacher, day: loc.day, block: loc.block })
+    }
+  }
+
+  return reconciled
 }

@@ -33,6 +33,7 @@ interface ScheduleGridProps {
   onToggleExclude?: () => void
   // Swap mode props
   swapMode?: boolean
+  manualStudyHallMode?: boolean // Manual study hall placement - enables cell clicking
   selectedCell?: CellLocation | null
   validTargets?: CellLocation[]
   highlightedCells?: CellLocation[]
@@ -70,6 +71,7 @@ export function ScheduleGrid({
   isExclusionLocked,
   onToggleExclude,
   swapMode,
+  manualStudyHallMode,
   selectedCell,
   validTargets = [],
   highlightedCells = [],
@@ -232,10 +234,10 @@ export function ScheduleGrid({
       const placement = hasPendingPlacement(day, block)
       const pickedUp = isPickedUpCell(day, block)
 
-      // Error styling — placed blocks keep the indigo ring (placed) + red background (conflict)
+      // Error styling — placed blocks keep the green ring (placed) + red background (conflict)
       if (error) {
         if (placement) {
-          return cn("bg-red-100 ring-2 ring-inset ring-indigo-400 cursor-pointer")
+          return cn("bg-red-100 ring-2 ring-inset ring-green-400 cursor-pointer")
         }
         return cn(baseClass, "ring-2 ring-inset ring-red-500 bg-red-100")
       }
@@ -254,7 +256,7 @@ export function ScheduleGrid({
         if (isAutoFixed) {
           return cn(placementBg, "ring-2 ring-inset ring-amber-400 cursor-pointer")
         }
-        return cn(placementBg, "ring-2 ring-inset ring-indigo-400 cursor-pointer")
+        return cn(placementBg, "ring-2 ring-inset ring-green-400 cursor-pointer")
       }
 
       // Moved blocker cell styling - amber with pulse to show auto-moved classes
@@ -303,6 +305,18 @@ export function ScheduleGrid({
         if (cellType === "class" || cellType === "study-hall") {
           return cn(baseClass, "cursor-pointer hover:ring-2 hover:ring-inset hover:ring-slate-300")
         }
+      }
+    }
+
+    // Manual study hall placement styling
+    if (manualStudyHallMode && type === "teacher") {
+      // Valid placement targets (when a group is selected)
+      if (isValidTarget(day, block)) {
+        return cn(baseClass, "ring-2 ring-inset ring-emerald-500 bg-emerald-100 cursor-pointer hover:bg-emerald-200")
+      }
+      // Placed study halls are clickable to remove
+      if (entry && isStudyHall(entry[1])) {
+        return cn(baseClass, "cursor-pointer hover:ring-2 hover:ring-inset hover:ring-indigo-300")
       }
     }
 
@@ -360,7 +374,7 @@ export function ScheduleGrid({
       return
     }
 
-    if (!swapMode || !onCellClick) return
+    if (!(swapMode || manualStudyHallMode) || !onCellClick) return
 
     const { entry } = getCellContent(day, block)
     const cellType = getCellType(entry)

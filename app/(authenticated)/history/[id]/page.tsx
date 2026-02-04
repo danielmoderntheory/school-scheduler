@@ -6,7 +6,7 @@ import { Button } from "@/components/ui/button"
 import { Checkbox } from "@/components/ui/checkbox"
 import { ScheduleGrid } from "@/components/ScheduleGrid"
 import { ScheduleStats } from "@/components/ScheduleStats"
-import { Loader2, Download, ArrowLeft, Check, RefreshCw, Shuffle, Trash2, Star, MoreVertical, Users, GraduationCap, Printer, ArrowLeftRight, X, Hand, Pencil, Copy, ChevronDown, ChevronUp, AlertTriangle, Minus } from "lucide-react"
+import { Loader2, Download, ArrowLeft, Check, CheckCircle, RefreshCw, Shuffle, Trash2, Star, MoreVertical, Users, GraduationCap, Printer, ArrowLeftRight, X, Hand, Pencil, Copy, ChevronDown, ChevronUp, AlertTriangle, Minus, Info, Crosshair } from "lucide-react"
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -37,7 +37,7 @@ import { Label } from "@/components/ui/label"
 import Link from "next/link"
 import type { ScheduleOption, TeacherSchedule, GradeSchedule, Teacher, FloatingBlock, PendingPlacement, ValidationError, CellLocation, ClassEntry, OpenBlockLabels, PendingTransfer } from "@/lib/types"
 import { parseClassesFromSnapshot, parseTeachersFromSnapshot, parseRulesFromSnapshot, hasValidSnapshots, detectClassChanges, computeExpectedTeachingSessions, type GenerationStats, type ChangeDetectionResult, type CurrentClass, type ClassSnapshot, type TeacherSnapshot } from "@/lib/snapshot-utils"
-import { parseGradeDisplayToNumbers, parseGradeDisplayToNames, gradesOverlap, gradeNumToDisplay, isClassElective, shouldIgnoreGradeConflict, formatGradeDisplayCompact } from "@/lib/grade-utils"
+import { parseGradeDisplayToNumbers, parseGradeDisplayToNames, gradesOverlap, gradeNumToDisplay, isClassElective, shouldIgnoreGradeConflict } from "@/lib/grade-utils"
 import { BLOCK_TYPE_OPEN, BLOCK_TYPE_STUDY_HALL, isOpenBlock, isStudyHall, isScheduledClass, isOccupiedBlock, entryIsOpen, entryIsOccupied, entryIsScheduledClass, isFullTime, setOpenBlockLabel, recalculateOptionStats } from "@/lib/schedule-utils"
 import toast from "react-hot-toast"
 import { generateSchedules, reassignStudyHalls } from "@/lib/scheduler"
@@ -296,6 +296,8 @@ interface Generation {
   quarter: { id: string; name: string }
 }
 
+const successIcon = <CheckCircle className="h-4 w-4 text-emerald-600" />
+
 export default function HistoryDetailPage() {
   const params = useParams()
   const searchParams = useSearchParams()
@@ -327,6 +329,8 @@ export default function HistoryDetailPage() {
   const [studyHallMode, setStudyHallMode] = useState(false) // Whether we're in study hall reassignment mode
   const [studyHallSeed, setStudyHallSeed] = useState<number | null>(null) // Seed for study hall shuffling
   const [excludedFromStudyHalls, setExcludedFromStudyHalls] = useState<Set<string>>(new Set()) // Teachers excluded from study hall assignment
+  const [manualStudyHallMode, setManualStudyHallMode] = useState(false) // Whether manual placement sub-mode is active
+  const [selectedStudyHallGroup, setSelectedStudyHallGroup] = useState<string | null>(null) // Which unplaced group is selected for manual placement
   const [lockedExclusions, setLockedExclusions] = useState<Set<string>>(new Set()) // Teachers that can't be un-excluded (ineligible by rule)
   const [forceCreateNew, setForceCreateNew] = useState<boolean | null>(null) // null = auto (create if 1 revision), true = always create new, false = always update
 
@@ -871,7 +875,7 @@ export default function HistoryDetailPage() {
       if (res.ok) {
         setGeneration({ ...generation, is_starred: true, notes: starNote.trim() || null })
         setShowStarDialog(false)
-        toast.success("Schedule starred")
+        toast("Schedule starred", { icon: successIcon })
       } else {
         toast.error("Failed to star schedule")
       }
@@ -893,7 +897,7 @@ export default function HistoryDetailPage() {
       })
       if (res.ok) {
         setGeneration({ ...generation, is_starred: false })
-        toast.success("Schedule unstarred")
+        toast("Schedule unstarred", { icon: successIcon })
       } else {
         toast.error("Failed to unstar schedule")
       }
@@ -916,7 +920,7 @@ export default function HistoryDetailPage() {
       if (res.ok) {
         setGeneration({ ...generation, notes: starNote.trim() || null })
         setShowStarDialog(false)
-        toast.success("Note updated")
+        toast("Note updated", { icon: successIcon })
       } else {
         toast.error("Failed to update note")
       }
@@ -1459,7 +1463,7 @@ export default function HistoryDetailPage() {
       setPreviewOption(newOption)
       setPreviewType("regen")
       setPreviewStrategy(usedStrategy)
-      toast.success(usedJsFallback ? "Schedules regenerated (JS solver)" : "Schedules regenerated (OR-Tools)")
+      toast(usedJsFallback ? "Schedules regenerated (JS solver)" : "Schedules regenerated (OR-Tools)", { icon: successIcon })
     } catch (error) {
       console.error('Regeneration error:', error)
       toast.error("Failed to generate variation")
@@ -1543,6 +1547,7 @@ export default function HistoryDetailPage() {
       }
 
       // Merge study hall assignments: keep original, update only if teacher was selected
+      // Note: reconciliation in recalculateOptionStats will catch any stale entries
       const mergedStudyHalls = originalOption.studyHallAssignments.map(sh => {
         if (sh.teacher && previewTeachers.has(sh.teacher)) {
           // Find the updated study hall for this group from preview
@@ -1795,7 +1800,7 @@ export default function HistoryDetailPage() {
                       if (saveAsNew) {
                         setViewingOption(previousSelectedOption)
                       }
-                      toast.success("Changes undone")
+                      toast("Changes undone", { icon: successIcon })
                     } else {
                       toast.error("Failed to undo changes")
                     }
@@ -1812,7 +1817,7 @@ export default function HistoryDetailPage() {
           ),
           {
             duration: 60000,
-            icon: <Check className="h-4 w-4 text-emerald-600" />,
+            icon: successIcon,
           }
         )
         undoToastId.current = toastId
@@ -1841,7 +1846,7 @@ export default function HistoryDetailPage() {
     setRegenMode(false)
     setSelectedForRegen(new Set())
     setUseCurrentClasses(false)
-    toast("Preview discarded", { icon: "🗑️" })
+    toast("Preview discarded", { icon: <Trash2 className="h-4 w-4 text-gray-500" /> })
   }
 
   // Handle OPEN block label changes - updates the current option and saves to database
@@ -1962,6 +1967,12 @@ export default function HistoryDetailPage() {
     }
     // Note: No validation here - Study Hall mode only assigns to OPEN blocks,
     // so it can't fix grade/subject conflicts. Showing them would just be confusing.
+
+    // Auto-activate manual placement if there are unplaced study halls
+    // Uses unplacedStudyHalls which cross-references assignments against actual schedule
+    if (unplacedStudyHalls.length > 0) {
+      setManualStudyHallMode(true)
+    }
   }
 
   function exitStudyHallMode() {
@@ -1973,6 +1984,8 @@ export default function HistoryDetailPage() {
     setLockedExclusions(new Set())
     setValidationErrors([])
     setForceCreateNew(null)
+    setManualStudyHallMode(false)
+    setSelectedStudyHallGroup(null)
   }
 
   function toggleStudyHallExclusion(teacher: string) {
@@ -1989,13 +2002,13 @@ export default function HistoryDetailPage() {
 
   /**
    * Clear all study halls from the schedule, converting them to OPEN.
-   * Creates a preview that can be saved. Useful for cleaning up before running other modes.
+   * Creates a preview (not saved) so the user can then randomize, manually place, or save.
    */
-  async function clearAllStudyHalls() {
-    const currentOption = generation?.options?.[parseInt(viewingOption) - 1]
+  function clearAllStudyHalls() {
+    const currentOption = previewOption || generation?.options?.[parseInt(viewingOption) - 1]
     if (!generation || !currentOption) return
 
-    const DAYS = ['Mon', 'Tues', 'Wed', 'Thurs', 'Fri']
+    const DAYS_LIST = ['Mon', 'Tues', 'Wed', 'Thurs', 'Fri']
 
     // Deep copy the current option
     const newTeacherSchedules = JSON.parse(JSON.stringify(currentOption.teacherSchedules))
@@ -2003,8 +2016,8 @@ export default function HistoryDetailPage() {
     let clearedCount = 0
 
     // Remove all study halls from teacher schedules
-    for (const [teacher, schedule] of Object.entries(newTeacherSchedules) as [string, TeacherSchedule][]) {
-      for (const day of DAYS) {
+    for (const [, schedule] of Object.entries(newTeacherSchedules) as [string, TeacherSchedule][]) {
+      for (const day of DAYS_LIST) {
         for (let block = 1; block <= 5; block++) {
           const entry = schedule[day]?.[block]
           if (entry && isStudyHall(entry[1])) {
@@ -2016,8 +2029,8 @@ export default function HistoryDetailPage() {
     }
 
     // Remove study halls from grade schedules too
-    for (const [grade, schedule] of Object.entries(newGradeSchedules) as [string, GradeSchedule][]) {
-      for (const day of DAYS) {
+    for (const [, schedule] of Object.entries(newGradeSchedules) as [string, GradeSchedule][]) {
+      for (const day of DAYS_LIST) {
         for (let block = 1; block <= 5; block++) {
           const entry = schedule[day]?.[block]
           if (entry && isStudyHall(entry[1])) {
@@ -2027,102 +2040,33 @@ export default function HistoryDetailPage() {
       }
     }
 
-    // Create the cleared option
-    const clearedOption: ScheduleOption = {
+    // Mark all study hall assignments as unplaced
+    const newAssignments = currentOption.studyHallAssignments?.map(sh => ({
+      ...sh,
+      teacher: null,
+      day: null,
+      block: null
+    })) || []
+
+    // Build preview option with recalculated stats
+    const clearedOption = recalculateOptionStats({
       ...currentOption,
       teacherSchedules: newTeacherSchedules,
       gradeSchedules: newGradeSchedules,
-      studyHallsPlaced: 0,
-      // Keep study hall assignments but mark as unplaced
-      studyHallAssignments: currentOption.studyHallAssignments?.map(sh => ({
-        ...sh,
-        teacher: null,
-        day: null,
-        block: null
-      })) || []
+      studyHallAssignments: newAssignments,
+    })
+
+    if (clearedCount === 0) {
+      toast("No study halls to clear")
+      return
     }
 
-    // Save directly without validation (user explicitly requested to clear)
-    // Respect user's toggle for create new vs update
-    const createNew = forceCreateNew !== null ? forceCreateNew : (generation.options.length === 1)
-    const updatedOptions = createNew
-      ? [...generation.options, { ...clearedOption, optionNumber: generation.options.length + 1 }]
-      : generation.options.map((opt, idx) =>
-          idx === parseInt(viewingOption) - 1 ? clearedOption : opt
-        )
-
-    // Store previous state for undo
-    const previousOptions = generation.options
-    const previousSelectedOption = viewingOption
-
-    try {
-      const updateRes = await fetch(`/api/history/${id}`, {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ options: updatedOptions }),
-      })
-
-      if (updateRes.ok) {
-        setGeneration({ ...generation, options: updatedOptions })
-        if (createNew) {
-          setViewingOption((generation.options.length + 1).toString())
-        }
-        // Exit study hall mode
-        setStudyHallMode(false)
-        setPreviewOption(null)
-        setPreviewType(null)
-
-        // Dismiss any existing undo toast
-        if (undoToastId.current) toast.dismiss(undoToastId.current)
-
-        // Show success toast with undo option (60 seconds)
-        const toastId = toast(
-          (t) => (
-            <div className="flex items-center gap-3">
-              <span className="text-sm">Cleared {clearedCount} study hall{clearedCount !== 1 ? 's' : ''}</span>
-              <button
-                onClick={async () => {
-                  toast.dismiss(t.id)
-                  undoToastId.current = null
-                  try {
-                    const undoRes = await fetch(`/api/history/${id}`, {
-                      method: "PUT",
-                      headers: { "Content-Type": "application/json" },
-                      body: JSON.stringify({ options: previousOptions }),
-                    })
-                    if (undoRes.ok) {
-                      setGeneration((prev) => prev ? { ...prev, options: previousOptions } : prev)
-                      if (createNew) {
-                        setViewingOption(previousSelectedOption)
-                      }
-                      toast.success("Study halls restored")
-                    } else {
-                      toast.error("Failed to undo")
-                    }
-                  } catch (error) {
-                    console.error('Undo error:', error)
-                    toast.error("Failed to undo")
-                  }
-                }}
-                className="px-2 py-1 text-sm font-medium text-violet-600 hover:text-violet-800 hover:bg-violet-50 rounded transition-colors"
-              >
-                Undo
-              </button>
-            </div>
-          ),
-          {
-            duration: 60000,
-            icon: <Check className="h-4 w-4 text-emerald-600" />,
-          }
-        )
-        undoToastId.current = toastId
-      } else {
-        toast.error("Failed to save changes")
-      }
-    } catch (error) {
-      console.error('Clear study halls error:', error)
-      toast.error("Failed to save changes")
-    }
+    setPreviewOption(clearedOption)
+    setPreviewType("study-hall")
+    setShowingPreview(true)
+    setManualStudyHallMode(true)
+    setSelectedStudyHallGroup(null)
+    toast(`Cleared ${clearedCount} study hall${clearedCount !== 1 ? 's' : ''}`, { icon: successIcon })
   }
 
   function generateStudyHallArrangement() {
@@ -2166,7 +2110,7 @@ export default function HistoryDetailPage() {
 
     // Check if no changes were made
     if (result.noChanges) {
-      toast(result.message || "No changes made", { icon: "ℹ️" })
+      toast(result.message || "No changes made", { icon: <Info className="h-4 w-4 text-blue-500" /> })
       return
     }
 
@@ -2229,7 +2173,265 @@ export default function HistoryDetailPage() {
     setPreviewOption(result.newOption)
     setPreviewType("study-hall")
     setShowingPreview(true)
-    toast.success("Study halls randomized")
+    setManualStudyHallMode(false)
+    setSelectedStudyHallGroup(null)
+    toast("Study halls randomized", { icon: successIcon })
+  }
+
+  // Compute unplaced study hall groups for manual placement mode
+  // Cross-references studyHallAssignments against the actual schedule to detect
+  // stale entries (e.g., study hall was removed by regen/freeform but assignment wasn't updated)
+  const unplacedStudyHalls = useMemo(() => {
+    const option = previewOption || generation?.options?.[parseInt(viewingOption) - 1]
+    if (!option?.studyHallAssignments) return []
+
+    const gradeNum = (g: string) => {
+      if (g.toLowerCase().includes("kindergarten") || g === "K") return 0
+      const m = g.match(/(\d+)/)
+      return m ? parseInt(m[1]) : 99
+    }
+
+    return option.studyHallAssignments.filter(sh => {
+      // Explicitly unplaced
+      if (sh.teacher === null) return true
+      // Verify the assignment actually exists in the schedule
+      if (sh.teacher && sh.day && sh.block != null) {
+        const entry = option.teacherSchedules[sh.teacher]?.[sh.day]?.[sh.block]
+        if (!entry || !isStudyHall(entry[1])) {
+          return true // Assignment is stale — study hall no longer in schedule
+        }
+        return false
+      }
+      return true
+    }).sort((a, b) => gradeNum(a.group) - gradeNum(b.group))
+  }, [previewOption, generation?.options, viewingOption])
+
+  // Compute valid placement targets when a study hall group is selected
+  useEffect(() => {
+    if (!manualStudyHallMode || !selectedStudyHallGroup) {
+      // Only clear if we're in study hall mode (don't clobber swap mode targets)
+      if (studyHallMode) setValidTargets([])
+      return
+    }
+
+    const option = previewOption || generation?.options?.[parseInt(viewingOption) - 1]
+    if (!option) { setValidTargets([]); return }
+
+    const grade = selectedStudyHallGroup
+    const DAYS_LIST = ["Mon", "Tues", "Wed", "Thurs", "Fri"]
+    const BLOCKS_LIST = [1, 2, 3, 4, 5]
+    const targets: CellLocation[] = []
+
+    // Pre-compute: days where this grade already has a study hall
+    const gradeStudyHallDays = new Set<string>()
+    for (const [, schedule] of Object.entries(option.teacherSchedules)) {
+      for (const day of DAYS_LIST) {
+        for (const block of BLOCKS_LIST) {
+          const entry = schedule?.[day]?.[block]
+          if (entry && isStudyHall(entry[1]) && gradesOverlap(entry[0], grade)) {
+            gradeStudyHallDays.add(day)
+          }
+        }
+      }
+    }
+
+    // Pre-compute: slots where this grade has a class (busy)
+    const gradeBusySlots = new Set<string>()
+    for (const [, schedule] of Object.entries(option.teacherSchedules)) {
+      for (const day of DAYS_LIST) {
+        for (const block of BLOCKS_LIST) {
+          const entry = schedule?.[day]?.[block]
+          if (entry && entry[1] && isScheduledClass(entry[1]) && gradesOverlap(entry[0], grade)) {
+            gradeBusySlots.add(`${day}|${block}`)
+          }
+        }
+      }
+    }
+
+    for (const [teacher, schedule] of Object.entries(option.teacherSchedules)) {
+      // Skip excluded teachers
+      if (excludedFromStudyHalls.has(teacher)) continue
+
+      for (const day of DAYS_LIST) {
+        // Skip days where grade already has a study hall
+        if (gradeStudyHallDays.has(day)) continue
+
+        for (const block of BLOCKS_LIST) {
+          const entry = schedule?.[day]?.[block]
+          // Slot must be OPEN or null
+          if (entry && !isOpenBlock(entry[1])) continue
+          // Grade must be free at this slot
+          if (gradeBusySlots.has(`${day}|${block}`)) continue
+
+          targets.push({ teacher, day, block, grade: '', subject: '' })
+        }
+      }
+    }
+
+    setValidTargets(targets)
+    if (targets.length === 0) {
+      toast("No valid targets found", { icon: <Info className="h-4 w-4 text-blue-500" /> })
+    } else {
+      toast(`${targets.length} valid target${targets.length !== 1 ? 's' : ''} found`, { icon: <Crosshair className="h-4 w-4 text-violet-500" /> })
+    }
+  }, [manualStudyHallMode, selectedStudyHallGroup, previewOption, generation?.options, viewingOption, excludedFromStudyHalls, studyHallMode])
+
+  function handleManualStudyHallPlace(teacher: string, day: string, block: number) {
+    if (!selectedStudyHallGroup || !manualStudyHallMode) return
+
+    const option = previewOption || generation?.options?.[parseInt(viewingOption) - 1]
+    if (!option) return
+
+    // Deep copy schedules
+    const newTeacherSchedules = JSON.parse(JSON.stringify(option.teacherSchedules))
+    const newGradeSchedules = JSON.parse(JSON.stringify(option.gradeSchedules))
+
+    // Validate: slot must be OPEN/null
+    const currentEntry = newTeacherSchedules[teacher]?.[day]?.[block]
+    if (currentEntry && currentEntry[1] !== 'OPEN') return
+
+    // Validate: teacher must be eligible (not excluded)
+    if (excludedFromStudyHalls.has(teacher)) return
+
+    // Find the study hall group info — match using same criteria as unplacedStudyHalls
+    // (includes stale entries where teacher is set but schedule disagrees)
+    const shAssignment = option.studyHallAssignments.find(
+      (sh: { group: string; teacher: string | null; day: string | null; block: number | null }) => {
+        if (sh.group !== selectedStudyHallGroup) return false
+        if (sh.teacher === null) return true
+        // Stale entry: assignment claims placed but schedule disagrees
+        if (sh.teacher && sh.day && sh.block != null) {
+          const entry = option.teacherSchedules[sh.teacher]?.[sh.day]?.[sh.block]
+          if (!entry || !isStudyHall(entry[1])) return true
+        }
+        return false
+      }
+    )
+    if (!shAssignment) return
+
+    const grade = shAssignment.group
+
+    // Validate: grade must be free at this slot (no grade conflict)
+    for (const [, schedule] of Object.entries(newTeacherSchedules) as [string, TeacherSchedule][]) {
+      for (const b of Object.keys(schedule[day] || {})) {
+        const entry = schedule[day][Number(b)]
+        if (Number(b) === block && entry && entry[1] && isScheduledClass(entry[1])) {
+          if (gradesOverlap(entry[0], grade)) {
+            toast.error(`${grade} already has a class at this time`)
+            return
+          }
+        }
+      }
+    }
+
+    // Validate: grade shouldn't already have a study hall on this day
+    for (const [, schedule] of Object.entries(newTeacherSchedules) as [string, TeacherSchedule][]) {
+      const daySchedule = schedule?.[day]
+      if (!daySchedule) continue
+      for (const b of Object.keys(daySchedule)) {
+        const cell = daySchedule[Number(b)]
+        if (cell && isStudyHall(cell[1]) && gradesOverlap(cell[0], grade)) {
+          toast.error(`${grade} already has a study hall on ${day}`)
+          return
+        }
+      }
+    }
+
+    // Place it
+    if (!newTeacherSchedules[teacher][day]) newTeacherSchedules[teacher][day] = {}
+    newTeacherSchedules[teacher][day][block] = [grade, BLOCK_TYPE_STUDY_HALL]
+    if (newGradeSchedules[grade]) {
+      if (!newGradeSchedules[grade][day]) newGradeSchedules[grade][day] = {}
+      newGradeSchedules[grade][day][block] = [teacher, BLOCK_TYPE_STUDY_HALL]
+    }
+
+    // Update study hall assignments - only update the first unplaced/stale match
+    let placed = false
+    const newAssignments = option.studyHallAssignments.map((sh: { group: string; teacher: string | null; day: string | null; block: number | null }) => {
+      if (!placed && sh.group === selectedStudyHallGroup) {
+        // Match unplaced or stale entries (same logic as the find above)
+        const isUnplaced = sh.teacher === null
+        const isStale = sh.teacher && sh.day && sh.block != null &&
+          (() => {
+            const entry = option.teacherSchedules[sh.teacher!]?.[sh.day!]?.[sh.block!]
+            return !entry || !isStudyHall(entry[1])
+          })()
+        if (isUnplaced || isStale) {
+          placed = true
+          return { ...sh, teacher, day, block }
+        }
+      }
+      return sh
+    })
+
+    // Build updated option and recalculate stats
+    const updatedOption = recalculateOptionStats({
+      ...option,
+      teacherSchedules: newTeacherSchedules,
+      gradeSchedules: newGradeSchedules,
+      studyHallAssignments: newAssignments,
+    })
+
+    setPreviewOption(updatedOption)
+    setPreviewType("study-hall")
+    setShowingPreview(true)
+    setSelectedStudyHallGroup(null)
+
+    // Check if all study halls are now placed
+    const remaining = newAssignments.filter((sh: { teacher: string | null }) => sh.teacher === null)
+    if (remaining.length === 0) {
+      toast("All study halls placed!", { icon: successIcon })
+    } else {
+      toast(`${grade} study hall placed with ${teacher}`, { icon: successIcon })
+    }
+  }
+
+  function handleManualStudyHallRemove(teacher: string, day: string, block: number) {
+    if (!manualStudyHallMode) return
+
+    const option = previewOption || generation?.options?.[parseInt(viewingOption) - 1]
+    if (!option) return
+
+    // Deep copy schedules
+    const newTeacherSchedules = JSON.parse(JSON.stringify(option.teacherSchedules))
+    const newGradeSchedules = JSON.parse(JSON.stringify(option.gradeSchedules))
+
+    // Verify the cell is actually a study hall
+    const currentEntry = newTeacherSchedules[teacher]?.[day]?.[block]
+    if (!currentEntry || !isStudyHall(currentEntry[1])) return
+
+    const grade = currentEntry[0]
+
+    // Remove from teacher schedule
+    newTeacherSchedules[teacher][day][block] = ['', 'OPEN']
+
+    // Remove from grade schedule
+    if (newGradeSchedules[grade]?.[day]?.[block]) {
+      newGradeSchedules[grade][day][block] = null
+    }
+
+    // Mark the matching assignment as unplaced
+    let removed = false
+    const newAssignments = option.studyHallAssignments.map((sh: { group: string; teacher: string | null; day: string | null; block: number | null }) => {
+      if (!removed && sh.group === grade && sh.teacher === teacher && sh.day === day && sh.block === block) {
+        removed = true
+        return { ...sh, teacher: null, day: null, block: null }
+      }
+      return sh
+    })
+
+    const updatedOption = recalculateOptionStats({
+      ...option,
+      teacherSchedules: newTeacherSchedules,
+      gradeSchedules: newGradeSchedules,
+      studyHallAssignments: newAssignments,
+    })
+
+    setPreviewOption(updatedOption)
+    setPreviewType("study-hall")
+    setShowingPreview(true)
+    setSelectedStudyHallGroup(null)
+    toast(`${grade} study hall removed from ${teacher}`, { icon: successIcon })
   }
 
   async function handleDeleteOption(optionIndex: number) {
@@ -2302,7 +2504,7 @@ export default function HistoryDetailPage() {
           const newSelection = (currentSelection - 1).toString()
           setViewingOption(newSelection)
         }
-        toast.success(`Deleted Revision ${optionNum}`)
+        toast(`Deleted Revision ${optionNum}`, { icon: successIcon })
       } else {
         toast.error("Failed to delete option")
       }
@@ -2453,7 +2655,7 @@ export default function HistoryDetailPage() {
         setGeneration({ ...generation, options: updatedOptions })
         // Switch to the new revision
         setViewingOption(updatedOptions.length.toString())
-        toast.success(`Created Revision ${updatedOptions.length}`)
+        toast(`Created Revision ${updatedOptions.length}`, { icon: successIcon })
       } else {
         toast.error("Failed to duplicate revision")
       }
@@ -2477,7 +2679,7 @@ export default function HistoryDetailPage() {
 
       if (updateRes.ok) {
         setGeneration({ ...generation, selected_option: optionNum })
-        toast.success(`Rev ${optionNum} set as Primary`)
+        toast(`Rev ${optionNum} set as Primary`, { icon: successIcon })
       } else {
         toast.error("Failed to update selection")
       }
@@ -2728,6 +2930,18 @@ export default function HistoryDetailPage() {
   }
 
   function handleCellClick(location: CellLocation, cellType: "study-hall" | "open" | "class") {
+    // Manual study hall mode intercept
+    if (studyHallMode && manualStudyHallMode && location.teacher) {
+      if (selectedStudyHallGroup) {
+        // Placing: a group is selected, click a valid target
+        handleManualStudyHallPlace(location.teacher, location.day, location.block)
+      } else if (cellType === "study-hall") {
+        // Removing: no group selected, click a placed study hall to unplace it
+        handleManualStudyHallRemove(location.teacher, location.day, location.block)
+      }
+      return
+    }
+
     if (!swapMode || !selectedResult) return
 
     // Handle grade view
@@ -2781,9 +2995,9 @@ export default function HistoryDetailPage() {
       setValidTargets(targets)
 
       if (targets.length === 0) {
-        toast("No valid move/swap targets found", { icon: "ℹ️" })
+        toast("No valid move/swap targets found", { icon: <Info className="h-4 w-4 text-blue-500" /> })
       } else {
-        toast(`${targets.length} valid target${targets.length !== 1 ? 's' : ''} found`, { icon: "✓" })
+        toast(`${targets.length} valid target${targets.length !== 1 ? 's' : ''} found`, { icon: <Crosshair className="h-4 w-4 text-violet-500" /> })
       }
       return
     }
@@ -2841,9 +3055,9 @@ export default function HistoryDetailPage() {
     setValidTargets(targets)
 
     if (targets.length === 0) {
-      toast("No valid swap targets found", { icon: "ℹ️" })
+      toast("No valid swap targets found", { icon: <Info className="h-4 w-4 text-blue-500" /> })
     } else {
-      toast(`${targets.length} valid target${targets.length !== 1 ? 's' : ''} found`, { icon: "✓" })
+      toast(`${targets.length} valid target${targets.length !== 1 ? 's' : ''} found`, { icon: <Crosshair className="h-4 w-4 text-violet-500" /> })
     }
   }
 
@@ -2891,7 +3105,7 @@ export default function HistoryDetailPage() {
         newGradeSchedules[gradeGroup][target.day][target.block] = [target.teacher, BLOCK_TYPE_STUDY_HALL]
       }
 
-      toast(`Study Hall reassigned: ${source.teacher} → ${target.teacher} (${target.day} B${target.block})`, { icon: "✓" })
+      toast(`Study Hall reassigned: ${source.teacher} → ${target.teacher} (${target.day} B${target.block})`, { icon: successIcon })
     }
 
     // Update working schedules
@@ -2954,7 +3168,7 @@ export default function HistoryDetailPage() {
     })
     setSwapCount(prev => prev + 1)
 
-    toast(`Moved ${grade} ${subject}: ${source.day} B${source.block} → ${target.day} B${target.block}`, { icon: "✓" })
+    toast(`Moved ${grade} ${subject}: ${source.day} B${source.block} → ${target.day} B${target.block}`, { icon: successIcon })
 
     // Highlight the destination cell
     highlightCells([
@@ -3060,7 +3274,7 @@ export default function HistoryDetailPage() {
     })
     setSwapCount(prev => prev + 1)
 
-    toast(successMessage, { icon: "✓" })
+    toast(successMessage, { icon: successIcon })
     highlightCells(destinationCells)
 
     // Clear swap state
@@ -3190,7 +3404,7 @@ export default function HistoryDetailPage() {
                       if (undoRes.ok) {
                         setGeneration((prev) => prev ? { ...prev, options: previousOptions } : prev)
                         setViewingOption(previousSelectedOption)
-                        toast.success("Changes undone")
+                        toast("Changes undone", { icon: successIcon })
                       } else {
                         toast.error("Failed to undo")
                       }
@@ -3206,7 +3420,7 @@ export default function HistoryDetailPage() {
             ),
             {
               duration: 60000,
-              icon: <Check className="h-4 w-4 text-emerald-600" />,
+              icon: successIcon,
             }
           )
           undoToastId.current = toastId
@@ -3264,7 +3478,7 @@ export default function HistoryDetailPage() {
                 if (updateRes.ok) {
                   setGeneration((prev) => prev ? { ...prev, options: previousOptions } : prev)
                   setHighlightedCells([])
-                  toast.success("Swap undone")
+                  toast("Swap undone", { icon: successIcon })
                 } else {
                   toast.error("Failed to undo swap")
                 }
@@ -3281,7 +3495,7 @@ export default function HistoryDetailPage() {
       ),
       {
         duration: 60000,
-        icon: <Check className="h-4 w-4 text-emerald-600" />,
+        icon: successIcon,
       }
     )
     undoToastId.current = toastId
@@ -3387,7 +3601,7 @@ export default function HistoryDetailPage() {
     setStudyHallsStripped(true)
     setWorkingSchedules({ teacherSchedules: newTeacherSchedules, gradeSchedules: newGradeSchedules })
     setValidationErrors([])
-    toast.success(`Stripped ${stripped.length} Study Hall${stripped.length !== 1 ? 's' : ''} (will be reassigned on save)`)
+    toast(`Stripped ${stripped.length} Study Hall${stripped.length !== 1 ? 's' : ''} (will be reassigned on save)`, { icon: successIcon })
   }
 
   /**
@@ -3419,7 +3633,7 @@ export default function HistoryDetailPage() {
     setStudyHallsStripped(false)
     setWorkingSchedules({ teacherSchedules: newTeacherSchedules, gradeSchedules: newGradeSchedules })
     setValidationErrors([])
-    toast.success("Study Halls restored")
+    toast("Study Halls restored", { icon: successIcon })
   }
 
   function handlePickUpBlock(location: CellLocation) {
@@ -4100,7 +4314,7 @@ export default function HistoryDetailPage() {
       const allBlockers = findBlockers(workingSchedules, placedBlocks)
 
       if (allBlockers.length === 0) {
-        toast.success("No conflicts found!")
+        toast("No conflicts found!", { icon: successIcon })
         setValidationErrors([])
         return
       }
@@ -4264,7 +4478,7 @@ export default function HistoryDetailPage() {
               undoToastId.current = null
               // Restore previous schedules
               setWorkingSchedules(previousSchedules)
-              toast.success("Fix undone")
+              toast("Fix undone", { icon: successIcon })
             }}
             className="px-2 py-1 text-sm font-medium text-amber-600 hover:text-amber-800 hover:bg-amber-50 rounded transition-colors"
           >
@@ -4274,7 +4488,7 @@ export default function HistoryDetailPage() {
       ),
       {
         duration: 60000,
-        icon: <Check className="h-4 w-4 text-emerald-600" />,
+        icon: successIcon,
       }
     )
     undoToastId.current = toastId
@@ -4302,7 +4516,7 @@ export default function HistoryDetailPage() {
 
     setWorkingSchedules({ teacherSchedules: newTeacherSchedules, gradeSchedules: newGradeSchedules })
     setConflictResolution(null)
-    toast.success("Undo complete - blocking classes restored to original positions")
+    toast("Undo complete - blocking classes restored to original positions", { icon: successIcon })
   }
 
   // =============================================================================
@@ -5709,7 +5923,7 @@ export default function HistoryDetailPage() {
                 })
                 if (restoreRes.ok) {
                   setGeneration({ ...generation, options: previousOptions })
-                  toast.success("Repair undone")
+                  toast("Repair undone", { icon: successIcon })
                 }
               }}
               className="px-2 py-1 text-sm font-medium text-blue-600 hover:text-blue-800 hover:bg-blue-50 rounded"
@@ -5913,7 +6127,7 @@ export default function HistoryDetailPage() {
     setValidationErrors(errors)
 
     if (errors.length === 0) {
-      toast.success("No validation errors found")
+      toast("No validation errors found", { icon: successIcon })
     } else {
       toast.error(`${errors.length} validation error${errors.length !== 1 ? 's' : ''} found`)
     }
@@ -5982,6 +6196,7 @@ export default function HistoryDetailPage() {
     }
 
     // Update studyHallAssignments if any study halls were moved
+    // Note: reconciliation in recalculateOptionStats will also catch stale/removed entries
     let updatedStudyHallAssignments = [...selectedResult.studyHallAssignments]
     for (const placement of pendingPlacements) {
       const block = floatingBlocks.find(b => b.id === placement.blockId)
@@ -6100,7 +6315,7 @@ export default function HistoryDetailPage() {
                         if (createNew) {
                           setViewingOption(previousSelectedOption)
                         }
-                        toast.success("Changes undone")
+                        toast("Changes undone", { icon: successIcon })
                       } else {
                         toast.error("Failed to undo changes")
                       }
@@ -6117,7 +6332,7 @@ export default function HistoryDetailPage() {
             ),
             {
               duration: 60000,
-              icon: <Check className="h-4 w-4 text-emerald-600" />,
+              icon: successIcon,
             }
           )
           undoToastId.current = toastId
@@ -6720,10 +6935,10 @@ export default function HistoryDetailPage() {
                           {conflictResolution
                             ? `Fix preview: ${conflictResolution.movedBlockers.length} blocking class${conflictResolution.movedBlockers.length !== 1 ? 'es were' : ' was'} moved (pulsing). Accept, try different, or undo.`
                             : selectedFloatingBlock
-                              ? "Click an OPEN slot to place the selected block"
+                              ? "Click a slot to place the selected block"
                               : floatingBlocks.length === 0
                                 ? "Click any class to pick it up and move it to a different time slot."
-                                : "Select a floating block, then click an OPEN slot to place it. Use Check & Fix to resolve conflicts."}
+                                : "Select a floating block, then click a slot to place it. Use Check & Fix to resolve conflicts."}
                         </p>
                       </div>
                     </div>
@@ -6844,38 +7059,119 @@ export default function HistoryDetailPage() {
                       {shouldCreateNew ? 'Save as new revision' : `Update Revision ${viewingOption}`}
                     </button>
                   </div>
-                  {/* Validation errors list - includes Fix buttons for auto-fixable conflicts */}
-                  {validationErrors.length > 0 && !conflictResolution && (
-                    <div className="mt-3 pt-3 border-t border-indigo-200">
-                      <div className="flex items-center justify-between mb-1">
-                        <div className={`text-xs font-medium ${conflictingBlockIds.length > 0 ? 'text-amber-600' : 'text-red-600'}`}>
-                          {conflictingBlockIds.length > 0 ? 'Conflicts:' : 'Existing conflicts in schedule:'}
-                        </div>
-                        {conflictingBlockIds.length > 1 && (
-                          <button
-                            onClick={() => handleCheckAndFix()}
-                            className="inline-flex items-center gap-1 px-2 py-0.5 text-xs font-medium text-amber-700 bg-amber-100 hover:bg-amber-200 border border-amber-300 rounded-md transition-colors"
-                          >
-                            Fix All
-                          </button>
-                        )}
-                      </div>
-                      <ul className={`text-xs space-y-1 ${conflictingBlockIds.length > 0 ? 'text-amber-700' : 'text-red-600'}`}>
-                        {validationErrors.map((error, idx) => (
-                          <li key={idx} className="flex items-center gap-2">
-                            <span className={`${conflictingBlockIds.length > 0 ? 'text-amber-500' : 'text-red-400'}`}>•</span>
-                            <span>{error.message}</span>
-                            {error.blockId && conflictingBlockIds.includes(error.blockId) && (
-                              <button
-                                onClick={() => handleCheckAndFix(error.blockId)}
-                                className="shrink-0 px-1.5 py-0.5 text-[10px] font-medium text-amber-700 bg-amber-50 hover:bg-amber-100 border border-amber-300 rounded transition-colors"
-                              >
-                                Fix
-                              </button>
+                  {/* Two-column area: Conflicts (left) + Grade Schedule (right) */}
+                  {!conflictResolution && (validationErrors.length > 0 || selectedFloatingBlock) && (
+                    <div className="mt-3 pt-3 border-t border-indigo-200 grid grid-cols-1 lg:grid-cols-2 gap-4">
+                      {/* Left column: Validation errors */}
+                      {validationErrors.length > 0 ? (
+                        <div className="min-w-0">
+                          <div className={`text-xs font-medium mb-1 ${conflictingBlockIds.length > 0 ? 'text-amber-600' : 'text-red-600'}`}>
+                            {conflictingBlockIds.length > 0 ? 'Conflicts:' : 'Existing conflicts in schedule:'}
+                          </div>
+                          <ul className={`text-xs space-y-1 ${conflictingBlockIds.length > 0 ? 'text-amber-700' : 'text-red-600'}`}>
+                            {validationErrors.map((error, idx) => (
+                              <li key={idx} className="flex items-start gap-2">
+                                <span className={`mt-0.5 ${conflictingBlockIds.length > 0 ? 'text-amber-500' : 'text-red-400'}`}>•</span>
+                                <span className="flex-1">{error.message}</span>
+                                {error.blockId && conflictingBlockIds.includes(error.blockId) && (
+                                  <button
+                                    onClick={() => handleCheckAndFix(error.blockId)}
+                                    className="shrink-0 px-1.5 py-0.5 text-[10px] font-medium text-amber-700 bg-amber-50 hover:bg-amber-100 border border-amber-300 rounded transition-colors"
+                                  >
+                                    Fix
+                                  </button>
+                                )}
+                              </li>
+                            ))}
+                            {conflictingBlockIds.length > 1 && (
+                              <li className="flex items-center pt-1">
+                                <button
+                                  onClick={() => handleCheckAndFix()}
+                                  className="px-1.5 py-0.5 text-[10px] font-medium text-amber-700 bg-amber-100 hover:bg-amber-200 border border-amber-300 rounded transition-colors"
+                                >
+                                  Auto-fix all conflicts
+                                </button>
+                              </li>
                             )}
-                          </li>
-                        ))}
-                      </ul>
+                          </ul>
+                        </div>
+                      ) : selectedFloatingBlock ? (
+                        <div></div>
+                      ) : null}
+
+                      {/* Right column: Grade Schedule */}
+                      {selectedFloatingBlock && workingSchedules && (() => {
+                        const selectedBlock = floatingBlocks.find(b => b.id === selectedFloatingBlock)
+                        if (!selectedBlock) return null
+                        // Rebuild grade schedules from current teacherSchedules (source of truth during freeform)
+                        // workingSchedules.gradeSchedules is stale — not updated during freeform editing
+                        const liveGradeSchedules = rebuildGradeSchedules(
+                          workingSchedules.teacherSchedules,
+                          generation?.stats?.grades_snapshot,
+                          workingSchedules.gradeSchedules
+                        )
+                        const gradeSchedule = liveGradeSchedules[selectedBlock.grade]
+                        if (!gradeSchedule) return null
+                        const DAYS_LIST = ['Mon', 'Tues', 'Wed', 'Thurs', 'Fri']
+
+                        return (
+                          <div className="min-w-0 rounded-lg ring-2 ring-green-400/60 bg-green-50/30 p-2">
+                            <div className="flex items-baseline gap-1.5 mb-1.5">
+                              <span className="text-xs font-medium text-green-800">Grade Schedule</span>
+                              <span className="inline-flex items-center px-1.5 py-0.5 rounded border bg-green-50 border-green-200 text-xs">
+                                <span className="font-medium leading-tight">{selectedBlock.grade.replace(' Grade', '').replace('Kindergarten', 'K')}</span>
+                                <span className="text-[10px] text-muted-foreground ml-1">{selectedBlock.subject}</span>
+                              </span>
+                              <span className="text-[10px] text-green-600">— placing into {selectedBlock.grade} schedule</span>
+                            </div>
+                            <div className="grid gap-x-1 gap-y-0.5 text-[10px]" style={{ gridTemplateColumns: 'auto repeat(5, 1fr)' }}>
+                              <div></div>
+                              {DAYS_LIST.map(day => (
+                                <div key={day} className="text-center font-medium text-slate-500 text-[9px]">
+                                  {day}
+                                </div>
+                              ))}
+                              {[1, 2, 3, 4, 5].map(block => (
+                                <Fragment key={block}>
+                                  <div className="text-[9px] font-medium text-slate-500 flex items-center pr-1">
+                                    B{block}
+                                  </div>
+                                  {DAYS_LIST.map(day => {
+                                    const entry = gradeSchedule[day]?.[block]
+                                    const isOpen = !entry || entry[1] === 'OPEN'
+                                    const isSH = entry && isStudyHall(entry[1])
+                                    const teacher = entry?.[0] || ''
+                                    const subject = entry?.[1] || ''
+
+                                    return (
+                                      <div
+                                        key={`${day}-${block}`}
+                                        className={`px-1 py-0.5 rounded text-center overflow-hidden ${
+                                          isOpen
+                                            ? 'bg-green-100 text-green-700 font-semibold border border-green-400 ring-1 ring-green-300'
+                                            : isSH
+                                              ? 'bg-blue-50 border border-blue-200'
+                                              : 'bg-slate-50 border border-slate-200'
+                                        }`}
+                                        title={isOpen ? `OPEN - ${day} B${block}` : `${teacher}: ${subject}`}
+                                      >
+                                        {isOpen ? (
+                                          <span>OPEN</span>
+                                        ) : (
+                                          <>
+                                            <div className="font-medium text-[9px] leading-tight truncate">{subject}</div>
+                                            <div className="text-[8px] leading-tight text-muted-foreground truncate">{teacher.split(' ')[0]}</div>
+                                          </>
+                                        )}
+                                      </div>
+                                    )
+                                  })}
+                                </Fragment>
+                              ))}
+                            </div>
+                          </div>
+                        )
+                      })()}
                     </div>
                   )}
 
@@ -6965,6 +7261,21 @@ export default function HistoryDetailPage() {
                       <Button
                         variant="outline"
                         size="sm"
+                        onClick={() => {
+                          setManualStudyHallMode(!manualStudyHallMode)
+                          setSelectedStudyHallGroup(null)
+                        }}
+                        className={manualStudyHallMode
+                          ? "bg-violet-100 text-violet-700 border-violet-400"
+                          : "text-violet-600 border-violet-300 hover:bg-violet-100"
+                        }
+                      >
+                        <Hand className="h-4 w-4 mr-1" />
+                        Place manually
+                      </Button>
+                      <Button
+                        variant="outline"
+                        size="sm"
                         onClick={clearAllStudyHalls}
                         className="text-amber-600 border-amber-300 hover:bg-amber-100"
                         title="Remove all study halls (convert to OPEN)"
@@ -7019,6 +7330,11 @@ export default function HistoryDetailPage() {
                           Preview
                         </button>
                       </div>
+                      {unplacedStudyHalls.length > 0 && (
+                        <span className="text-red-600 font-medium">
+                          {unplacedStudyHalls.length} unplaced
+                        </span>
+                      )}
                     </div>
                     <button
                       onClick={toggleCreateNew}
@@ -7028,8 +7344,75 @@ export default function HistoryDetailPage() {
                       {shouldCreateNew ? 'Save as new revision' : `Update Revision ${viewingOption}`}
                     </button>
                   </div>
-                  {/* Note: No validation errors shown here - Study Hall mode only assigns to OPEN blocks,
-                      so it can't create or fix grade/subject conflicts */}
+                  {/* Unplaced study halls validation */}
+                  {unplacedStudyHalls.length > 0 && !manualStudyHallMode && (
+                    <div className="mt-3 pt-3 border-t border-violet-200">
+                      <div className="text-xs font-medium text-red-600 mb-1">
+                        Unplaced study halls:
+                      </div>
+                      <ul className="text-xs space-y-1 text-red-600">
+                        {unplacedStudyHalls.map((sh: { group: string }, idx: number) => (
+                          <li key={idx} className="flex items-center gap-2">
+                            <span className="text-red-400">•</span>
+                            <span>{sh.group} — not assigned</span>
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+                  {/* Manual placement: two-column — errors left, study hall blocks right */}
+                  {manualStudyHallMode && (
+                    <div className="mt-3 pt-3 border-t border-violet-200 grid grid-cols-1 lg:grid-cols-[1fr_auto] gap-4">
+                      {/* Left column: validation / status */}
+                      <div className="min-w-0">
+                        {unplacedStudyHalls.length > 0 && (
+                          <>
+                            <div className="text-xs font-medium text-red-600 mb-1">
+                              Unplaced study halls:
+                            </div>
+                            <ul className="text-xs space-y-1 text-red-600">
+                              {unplacedStudyHalls.map((sh: { group: string }, idx: number) => (
+                                <li key={idx} className="flex items-center gap-2">
+                                  <span className="text-red-400">•</span>
+                                  <span>{sh.group} — not assigned</span>
+                                </li>
+                              ))}
+                            </ul>
+                          </>
+                        )}
+                        {unplacedStudyHalls.length === 0 && (
+                          <div className="text-xs text-emerald-600 font-medium">
+                            All study halls placed
+                          </div>
+                        )}
+                      </div>
+
+                      {/* Right column: study hall blocks styled like schedule cells */}
+                      <div className="flex flex-wrap gap-2 items-start">
+                        {unplacedStudyHalls.map((sh: { group: string }) => (
+                          <button
+                            key={sh.group}
+                            onClick={() => setSelectedStudyHallGroup(
+                              selectedStudyHallGroup === sh.group ? null : sh.group
+                            )}
+                            className={`w-[72px] rounded border text-center transition-colors cursor-pointer ${
+                              selectedStudyHallGroup === sh.group
+                                ? 'bg-white border-violet-400 ring-2 ring-violet-500 shadow-sm'
+                                : 'bg-white/80 border-gray-300 hover:border-violet-400 hover:shadow-sm'
+                            }`}
+                            style={{ padding: '4px 6px' }}
+                          >
+                            <div className="font-medium text-xs leading-tight truncate text-gray-800">
+                              {sh.group}
+                            </div>
+                            <div className="text-[10px] leading-tight text-gray-500 truncate">
+                              Study Hall
+                            </div>
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  )}
                 </div>
               )}
 
@@ -7588,6 +7971,7 @@ export default function HistoryDetailPage() {
                                 isExclusionLocked={lockedExclusions.has(teacher)}
                                 onToggleExclude={() => toggleStudyHallExclusion(teacher)}
                                 swapMode={swapMode && showingPreview}
+                                manualStudyHallMode={manualStudyHallMode}
                                 selectedCell={selectedCell}
                                 validTargets={validTargets}
                                 highlightedCells={highlightedCells}
@@ -7632,10 +8016,10 @@ export default function HistoryDetailPage() {
                                           ${error
                                             ? 'bg-red-100 border-red-300 ring-2 ring-red-400'
                                             : isSelected
-                                              ? 'ring-2 ring-indigo-500'
-                                              : 'hover:ring-2 hover:ring-indigo-300'
+                                              ? 'bg-green-100 border-green-400 ring-2 ring-green-500'
+                                              : 'hover:ring-2 hover:ring-green-300'
                                           }
-                                          ${!error && (blockIsStudyHall
+                                          ${!error && !isSelected && (blockIsStudyHall
                                             ? 'bg-blue-100 border-blue-200'
                                             : 'bg-green-50 border-green-200'
                                           )}
@@ -8107,34 +8491,49 @@ export default function HistoryDetailPage() {
               Review Class Transfers
             </DialogTitle>
             <DialogDescription>
-              The following class transfers will be applied to the schedule snapshot.
+              The following class transfers will be applied to this schedule (Revision {viewingOption}).
             </DialogDescription>
           </DialogHeader>
           <div className="py-4 space-y-2 max-h-[40vh] overflow-y-auto">
             {pendingTransfers.map(r => (
               <div key={r.id} className="flex items-center gap-2 text-sm py-1.5 px-3 rounded bg-slate-50">
-                <span className="font-medium text-slate-900">{r.subject}</span>
+                <span className="font-medium text-slate-900">{r.grade} {r.subject}</span>
                 <span className="text-slate-400">:</span>
                 <span className="text-slate-600">{r.fromTeacher}</span>
                 <span className="text-slate-400">&rarr;</span>
                 <span className="text-slate-600">{r.toTeacher}</span>
                 <span className="text-xs text-slate-400 ml-auto">
-                  {r.moveType === 'all' ? 'all days' : '1 day'}
+                  {r.moveType === 'all'
+                    ? `all ${generation?.stats?.classes_snapshot?.find(c => c.teacher_name === r.fromTeacher && c.subject_name === r.subject)?.days_per_week ?? ''} classes`
+                    : '1 class'}
                 </span>
               </div>
             ))}
           </div>
-          <div className="flex items-center gap-2 pb-2">
-            <Checkbox
-              id="update-db-classes"
-              checked={reviewTransfersModal?.updateDB ?? true}
-              onCheckedChange={(checked) => {
-                setReviewTransfersModal(prev => prev ? { ...prev, updateDB: !!checked } : null)
-              }}
-            />
-            <label htmlFor="update-db-classes" className="text-sm text-slate-600 cursor-pointer">
-              Also update class definitions in the database
-            </label>
+          <div className="space-y-2 pb-2">
+            <div className="flex items-center gap-2">
+              <Checkbox
+                id="update-db-classes"
+                checked={reviewTransfersModal?.updateDB ?? true}
+                onCheckedChange={(checked) => {
+                  setReviewTransfersModal(prev => prev ? { ...prev, updateDB: !!checked } : null)
+                }}
+              />
+              <label htmlFor="update-db-classes" className="text-sm text-slate-700 cursor-pointer">
+                Also update class definitions in the database
+              </label>
+            </div>
+            {reviewTransfersModal?.updateDB ? (
+              <div className="flex items-start gap-2 px-3 py-2 rounded-md bg-amber-50 border border-amber-200 text-xs text-amber-700">
+                <AlertTriangle className="h-3.5 w-3.5 mt-0.5 shrink-0" />
+                <span>This will update class definitions — future schedule generations will reflect these transfers.</span>
+              </div>
+            ) : (
+              <div className="flex items-start gap-2 px-3 py-2 rounded-md bg-slate-50 border border-slate-200 text-xs text-slate-500">
+                <Info className="h-3.5 w-3.5 mt-0.5 shrink-0" />
+                <span>Class definitions will not be updated — future schedule generations will not reflect these transfers.</span>
+              </div>
+            )}
           </div>
           <DialogFooter className="gap-2">
             <Button
@@ -8270,94 +8669,6 @@ export default function HistoryDetailPage() {
         </DialogContent>
       </Dialog>
 
-      {/* Floating Grade Schedule Preview - shows when a floating block is selected in freeform mode */}
-      {freeformMode && selectedFloatingBlock && !conflictResolution && selectedResult && (() => {
-        const selectedBlock = floatingBlocks.find(b => b.id === selectedFloatingBlock)
-        if (!selectedBlock || !workingSchedules) return null
-
-        const gradeSchedule = workingSchedules.gradeSchedules[selectedBlock.grade]
-        if (!gradeSchedule) return null
-
-        // Get sorted teacher list to determine position
-        const sortedTeachers = Object.keys(selectedResult.teacherSchedules).sort((a, b) => {
-          const statusA = selectedResult.teacherStats.find(s => s.teacher === a)?.status || ''
-          const statusB = selectedResult.teacherStats.find(s => s.teacher === b)?.status || ''
-          if (statusA !== statusB) return statusA === 'full-time' ? -1 : 1
-          return a.localeCompare(b)
-        })
-        const teacherIndex = sortedTeachers.indexOf(selectedBlock.sourceTeacher)
-        // Even index = left column, odd index = right column (in 2-col grid)
-        // Put panel on opposite side
-        const panelOnRight = teacherIndex % 2 === 0
-
-        const DAYS = ['Mon', 'Tues', 'Wed', 'Thurs', 'Fri']
-
-        return (
-          <div className={`fixed top-1/2 -translate-y-1/2 z-50 bg-white border border-indigo-200 rounded-lg shadow-lg p-3 w-80 overflow-hidden no-print ${panelOnRight ? 'right-4' : 'left-4'}`}>
-            <div className="text-sm font-medium text-indigo-700 mb-2">
-              {formatGradeDisplayCompact(selectedBlock.grade)} Schedule
-              <span className="font-normal text-indigo-500 ml-1">— place {selectedBlock.subject}</span>
-            </div>
-            <div className="grid gap-1 text-[10px]" style={{ gridTemplateColumns: 'auto repeat(5, 1fr)' }}>
-              {/* Header row */}
-              <div className="pb-1"></div>
-              {DAYS.map(day => (
-                <div key={day} className="text-center font-medium text-slate-600 pb-1 border-b">
-                  {day}
-                </div>
-              ))}
-              {/* Schedule grid - 5 blocks x 5 days */}
-              {[1, 2, 3, 4, 5].map(block => (
-                <Fragment key={block}>
-                  <div className="text-center font-medium text-slate-600 flex items-center justify-center pr-1">
-                    B{block}
-                  </div>
-                  {DAYS.map(day => {
-                    const entry = gradeSchedule[day]?.[block]
-                    const isOpen = !entry || entry[1] === 'OPEN'
-                    const isSH = entry && isStudyHall(entry[1])
-                    const teacher = entry?.[0] || ''
-                    const subject = entry?.[1] || ''
-
-                    return (
-                      <div
-                        key={`${day}-${block}`}
-                        className={`px-1 py-1 rounded text-center overflow-hidden ${
-                          isOpen
-                            ? 'bg-emerald-100 text-emerald-700 font-medium border border-emerald-300'
-                            : isSH
-                              ? 'bg-blue-50 text-blue-600 border border-blue-200'
-                              : 'bg-slate-50 text-slate-600 border border-slate-200'
-                        }`}
-                        title={isOpen ? `OPEN - ${day} B${block}` : `${teacher}: ${subject}`}
-                      >
-                        {isOpen ? (
-                          <div className="font-semibold">OPEN</div>
-                        ) : (
-                          <>
-                            <div className="truncate text-[9px]">{subject}</div>
-                            <div className="text-[8px] text-slate-400 truncate">{teacher}</div>
-                          </>
-                        )}
-                      </div>
-                    )
-                  })}
-                </Fragment>
-              ))}
-            </div>
-            <div className="text-[10px] text-slate-500 mt-2 flex items-center gap-2">
-              <span className="flex items-center gap-1">
-                <span className="inline-block w-3 h-3 bg-emerald-100 border border-emerald-300 rounded" />
-                OPEN
-              </span>
-              <span className="flex items-center gap-1">
-                <span className="inline-block w-3 h-3 bg-blue-50 border border-blue-200 rounded" />
-                Study Hall
-              </span>
-            </div>
-          </div>
-        )
-      })()}
 
     </div>
   )
