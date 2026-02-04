@@ -6597,42 +6597,57 @@ export default function HistoryDetailPage() {
           <h3 className="font-semibold">
             {viewMode === "timetable" ? "Grade Timetables" : viewMode === "teacher" ? "Teacher Schedules" : "Grade Schedules"}
           </h3>
-          <div className="flex items-center gap-1 border rounded-md p-0.5">
+          <div className="flex items-center gap-2">
             <Button
-              variant={viewMode === "teacher" ? "secondary" : "ghost"}
+              variant="ghost"
               size="sm"
-              onClick={() => setViewMode("teacher")}
-              className="gap-1"
+              className="gap-1 text-muted-foreground"
+              onClick={() => {
+                const url = `${window.location.origin}/history/${id}${viewMode !== "teacher" ? `?view=${viewMode}` : ""}`
+                navigator.clipboard.writeText(url)
+                toast.success("Share link copied")
+              }}
             >
-              <Users className="h-4 w-4" />
-              Teacher
+              <Copy className="h-3.5 w-3.5" />
+              Share
             </Button>
-            <Button
-              variant={viewMode === "grade" ? "secondary" : "ghost"}
-              size="sm"
-              onClick={() => setViewMode("grade")}
-              className="gap-1"
-            >
-              <GraduationCap className="h-4 w-4" />
-              Grade
-            </Button>
-            {timetableTemplate && (
+            <div className="flex items-center gap-1 border rounded-md p-0.5">
               <Button
-                variant={viewMode === "timetable" ? "secondary" : "ghost"}
+                variant={viewMode === "teacher" ? "secondary" : "ghost"}
                 size="sm"
-                onClick={() => setViewMode("timetable")}
+                onClick={() => setViewMode("teacher")}
                 className="gap-1"
               >
-                <Clock className="h-4 w-4" />
-                Timetable
+                <Users className="h-4 w-4" />
+                Teacher
               </Button>
-            )}
+              <Button
+                variant={viewMode === "grade" ? "secondary" : "ghost"}
+                size="sm"
+                onClick={() => setViewMode("grade")}
+                className="gap-1"
+              >
+                <GraduationCap className="h-4 w-4" />
+                Grade
+              </Button>
+              {timetableTemplate && (
+                <Button
+                  variant={viewMode === "timetable" ? "secondary" : "ghost"}
+                  size="sm"
+                  onClick={() => setViewMode("timetable")}
+                  className="gap-1"
+                >
+                  <Clock className="h-4 w-4" />
+                  Timetable
+                </Button>
+              )}
+            </div>
           </div>
         </div>
 
         {/* Schedule Grids */}
         {viewMode === "timetable" && timetableTemplate ? (
-          <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 print-grid">
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 print-grid print-grid-single">
             {Object.entries(publicOption.gradeSchedules)
               .filter(([grade]) => !grade.includes("Elective"))
               .sort(([a], [b]) => gradeSort(a, b))
@@ -8023,6 +8038,19 @@ export default function HistoryDetailPage() {
                         <span className="text-xs text-muted-foreground">Edit OPEN Labels</span>
                       </label>
                     )}
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="gap-1 text-muted-foreground"
+                      onClick={() => {
+                        const url = `${window.location.origin}/history/${id}${viewMode !== "teacher" ? `?view=${viewMode}` : ""}`
+                        navigator.clipboard.writeText(url)
+                        toast.success("Share link copied")
+                      }}
+                    >
+                      <Copy className="h-3.5 w-3.5" />
+                      Share
+                    </Button>
                     <div className="flex items-center gap-1 border rounded-md p-0.5">
                       <Button
                         variant={viewMode === "teacher" ? "secondary" : "ghost"}
@@ -8109,7 +8137,7 @@ export default function HistoryDetailPage() {
                   )
                 })()}
                 {viewMode === "timetable" && timetableTemplate ? (
-                  <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 print-grid">
+                  <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 print-grid print-grid-single">
                     {Object.entries(selectedResult.gradeSchedules)
                       .filter(([grade]) => !grade.includes("Elective"))
                       .sort(([a], [b]) => gradeSort(a, b))

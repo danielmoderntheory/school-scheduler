@@ -90,8 +90,9 @@
     print-color-adjust: exact;
   }
 
-  /* Prevent schedule cards from breaking across pages */
-  .schedule-card {
+  /* Prevent schedule cards and timetables from breaking across pages */
+  .schedule-card,
+  .print-break-inside-avoid {
     break-inside: avoid;
     page-break-inside: avoid;
   }
@@ -109,6 +110,22 @@
     grid-template-columns: repeat(2, 1fr);
     gap: 1rem;
     background: white !important;
+  }
+
+  /* Timetable grid prints as 1 column, compact to fit 2 per page */
+  .print-grid-single {
+    grid-template-columns: 1fr !important;
+    gap: 1.5rem !important;
+  }
+
+  .print-break-inside-avoid table {
+    font-size: 11px !important;
+  }
+
+  .print-break-inside-avoid th,
+  .print-break-inside-avoid td {
+    padding-top: 2px !important;
+    padding-bottom: 2px !important;
   }
 
   /* Remove gray page backgrounds on print, but preserve card header backgrounds */

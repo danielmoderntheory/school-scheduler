@@ -1,7 +1,8 @@
 import XLSX from "xlsx-js-style"
-import type { ScheduleOption, TeacherSchedule, GradeSchedule, OpenBlockLabels } from "./types"
+import type { ScheduleOption, TeacherSchedule, GradeSchedule, OpenBlockLabels, TimetableRow, TimetableTemplate } from "./types"
 import { BLOCK_TYPE_OPEN, BLOCK_TYPE_STUDY_HALL, isOpenBlock, isStudyHall, isScheduledClass, getOpenBlockAt, getOpenBlockLabel } from "./schedule-utils"
 import { formatGradeDisplayCompact } from "./grade-utils"
+import { resolveRowsForGrade } from "./timetable-utils"
 
 const DAYS = ["Mon", "Tues", "Wed", "Thurs", "Fri"]
 const BLOCKS = [1, 2, 3, 4, 5]
@@ -262,6 +263,7 @@ function applyStyle(sheet: XLSX.WorkSheet, cellRef: string, style: object) {
   sheet[cellRef].s = style
 }
 
+
 // Helper to apply style to a range of cells in a row
 function applyRowStyle(sheet: XLSX.WorkSheet, row: number, startCol: number, endCol: number, style: object) {
   for (let col = startCol; col <= endCol; col++) {
@@ -273,6 +275,8 @@ function applyRowStyle(sheet: XLSX.WorkSheet, row: number, startCol: number, end
 export interface ExportMetadata {
   scheduleId?: string
   generatedAt?: string
+  timetableTemplate?: TimetableTemplate
+  grades?: { id: string; name: string; display_name: string; sort_order: number; homeroom_teachers?: string }[]
 }
 
 export function generateXLSX(option: ScheduleOption, metadata?: ExportMetadata): Blob {
@@ -479,6 +483,122 @@ export function generateXLSX(option: ScheduleOption, metadata?: ExportMetadata):
   ]
 
   XLSX.utils.book_append_sheet(workbook, gradeSheet, "Grade Schedules")
+
+  // Timetable sheet (if template and grades data provided)
+  if (metadata?.timetableTemplate && metadata?.grades) {
+    const template = metadata.timetableTemplate
+    const grades = metadata.grades.sort((a, b) => a.sort_order - b.sort_order)
+    const timetableData: (string | number)[][] = []
+    const timetableRowInfo: { type: "name" | "header" | "block" | "break" | "empty"; row: number }[] = []
+
+    // Sort grade schedules by grade sort order
+    const sortedGradeEntries = Object.entries(option.gradeSchedules)
+      .filter(([grade]) => !grade.includes("Elective"))
+      .sort(([a], [b]) => gradeSort(a, b))
+
+    sortedGradeEntries.forEach(([gradeName, schedule]) => {
+      const grade = grades.find(g => g.display_name === gradeName)
+      const resolved = resolveRowsForGrade(template.rows, grade?.id || '')
+
+      // Grade header row
+      timetableRowInfo.push({ type: "name", row: timetableData.length })
+      const headerText = grade?.homeroom_teachers
+        ? `${gradeName}  —  Homeroom: ${grade.homeroom_teachers}`
+        : gradeName
+      timetableData.push([headerText])
+
+      // Column headers: Time, Label, Mon, Tue, Wed, Thu, Fri
+      timetableRowInfo.push({ type: "header", row: timetableData.length })
+      timetableData.push(["Time", "", ...DAYS])
+
+      resolved.forEach((templateRow) => {
+        const isBlock = templateRow.type === "block" && templateRow.blockNumber
+
+        if (!isBlock) {
+          // Break/transition row
+          timetableRowInfo.push({ type: "break", row: timetableData.length })
+          timetableData.push([templateRow.time, templateRow.label])
+        } else {
+          // Block row with schedule data
+          timetableRowInfo.push({ type: "block", row: timetableData.length })
+          const row: (string | number)[] = [templateRow.time, templateRow.label]
+          DAYS.forEach((day) => {
+            const entry = schedule[day]?.[templateRow.blockNumber!]
+            if (!entry) {
+              row.push("")
+              return
+            }
+            // Multiple entries (electives)
+            if (Array.isArray(entry) && Array.isArray(entry[0])) {
+              const entries = entry as unknown as [string, string][]
+              const subjects = entries.map(([, subject]) => subject).join(" / ")
+              const teachers = entries.map(([teacher]) => teacher).join(", ")
+              row.push(`${subjects}\n${teachers}`)
+              return
+            }
+            const [teacher, subject] = entry as [string, string]
+            if (!subject || isOpenBlock(subject)) {
+              row.push("")
+            } else if (isStudyHall(subject)) {
+              row.push(`Study Hall\n${teacher}`)
+            } else {
+              row.push(`${subject}\n${teacher}`)
+            }
+          })
+          timetableData.push(row)
+        }
+      })
+
+      // Empty row between grades
+      timetableRowInfo.push({ type: "empty", row: timetableData.length })
+      timetableData.push([])
+    })
+
+    const timetableSheet = XLSX.utils.aoa_to_sheet(timetableData)
+    const timetableMerges: { s: { r: number; c: number }; e: { r: number; c: number } }[] = []
+
+    // Apply styles
+    timetableRowInfo.forEach(({ type, row }) => {
+      if (type === "name") {
+        // Merge entire row so grade name + homeroom text spans all columns
+        applyRowStyle(timetableSheet, row, 0, 6, styles.nameRow)
+        timetableMerges.push({ s: { r: row, c: 0 }, e: { r: row, c: 6 } })
+      } else if (type === "header") {
+        applyRowStyle(timetableSheet, row, 0, 6, styles.dayHeader)
+      } else if (type === "break") {
+        const breakStyle = {
+          fill: { fgColor: { rgb: "F1F5F9" } },
+          font: { italic: true, color: { rgb: "64748B" } },
+          alignment: { horizontal: "left" as const },
+        }
+        applyStyle(timetableSheet, XLSX.utils.encode_cell({ r: row, c: 0 }), breakStyle)
+        // Merge label across columns 1-6 so long text is visible
+        applyRowStyle(timetableSheet, row, 1, 6, breakStyle)
+        timetableMerges.push({ s: { r: row, c: 1 }, e: { r: row, c: 6 } })
+      } else if (type === "block") {
+        applyStyle(timetableSheet, XLSX.utils.encode_cell({ r: row, c: 0 }), styles.blockLabel)
+        applyStyle(timetableSheet, XLSX.utils.encode_cell({ r: row, c: 1 }), {
+          fill: { fgColor: { rgb: "EFF6FF" } },
+          font: { bold: true, color: { rgb: "334155" } },
+          alignment: { horizontal: "left" },
+        })
+        for (let col = 2; col <= 6; col++) {
+          applyStyle(timetableSheet, XLSX.utils.encode_cell({ r: row, c: col }), {
+            ...styles.scheduleCell,
+            alignment: { horizontal: "center", wrapText: true },
+          })
+        }
+      }
+    })
+
+    // Apply merges and column widths
+    timetableSheet["!merges"] = timetableMerges
+    timetableSheet["!cols"] = [
+      { wch: 14 }, { wch: 12 }, { wch: 22 }, { wch: 22 }, { wch: 22 }, { wch: 22 }, { wch: 22 }
+    ]
+
+    XLSX.utils.book_append_sheet(workbook, timetableSheet, "Timetables")
+  }
 
   // Generate blob
   const xlsxData = XLSX.write(workbook, { bookType: "xlsx", type: "array" })
