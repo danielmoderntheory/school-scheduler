@@ -37,7 +37,7 @@ import {
 import { Checkbox } from "@/components/ui/checkbox"
 import { Trash2, Loader2, ArrowLeft, Plus, GripVertical } from "lucide-react"
 import Link from "next/link"
-import toast from "react-hot-toast"
+import toast from "@/lib/toast"
 import { TimetableRow, TimetableRowType, TimetableTemplate } from "@/lib/types"
 
 interface GradeData {

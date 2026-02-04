@@ -7,7 +7,7 @@ import { Button } from "@/components/ui/button"
 import { Checkbox } from "@/components/ui/checkbox"
 import { Loader2, ChevronDown, ChevronRight, Lock } from "lucide-react"
 import { cn } from "@/lib/utils"
-import toast from "react-hot-toast"
+import toast from "@/lib/toast"
 
 // Rules that are always enforced and cannot be toggled
 const LOCKED_RULES = new Set([

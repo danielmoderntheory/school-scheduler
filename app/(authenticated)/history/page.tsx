@@ -17,7 +17,7 @@ import {
 } from "@/components/ui/alert-dialog"
 import { Loader2, Trash2, Download, Star, ChevronRight } from "lucide-react"
 import { Checkbox } from "@/components/ui/checkbox"
-import toast from "react-hot-toast"
+import toast from "@/lib/toast"
 
 interface Generation {
   id: string

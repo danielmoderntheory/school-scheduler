@@ -31,7 +31,7 @@ import {
   AlertDialogTrigger,
 } from "@/components/ui/alert-dialog"
 import { Trash2, Loader2 } from "lucide-react"
-import toast from "react-hot-toast"
+import toast from "@/lib/toast"
 import { TEACHER_STATUS_FULL_TIME, TEACHER_STATUS_PART_TIME, type TeacherStatus } from "@/lib/schedule-utils"
 
 interface Teacher {

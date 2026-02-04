@@ -24,7 +24,7 @@ import {
 } from "@/components/ui/alert-dialog"
 import { Trash2, Loader2, ArrowLeft } from "lucide-react"
 import Link from "next/link"
-import toast from "react-hot-toast"
+import toast from "@/lib/toast"
 
 interface Subject {
   id: string

@@ -17,7 +17,7 @@ import { ChevronDown, ChevronUp, Loader2, Plus, X, Clock, Users, Upload, Downloa
 import { cn } from "@/lib/utils"
 import { GradeSelector, formatGradeDisplay } from "@/components/GradeSelector"
 import { TEACHER_STATUS_FULL_TIME, isPartTime, calculateGradeBlocks, buildCotaughtGroups, type TeacherStatus } from "@/lib/schedule-utils"
-import toast from "react-hot-toast"
+import toast from "@/lib/toast"
 
 interface LastRun {
   historyId: string

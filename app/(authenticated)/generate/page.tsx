@@ -22,7 +22,7 @@ import { generateSchedulesRemote, type ScheduleDiagnostics } from "@/lib/schedul
 import type { Teacher, ClassEntry, ScheduleOption } from "@/lib/types"
 import { useGeneration } from "@/lib/generation-context"
 import { isScheduledClass, calculateGradeBlocks, buildCotaughtGroups } from "@/lib/schedule-utils"
-import toast from "react-hot-toast"
+import toast from "@/lib/toast"
 
 // Sort grades: Kindergarten first, then by grade number
 function gradeSort(a: string, b: string): number {

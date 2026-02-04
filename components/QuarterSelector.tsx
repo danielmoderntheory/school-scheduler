@@ -11,7 +11,7 @@ import {
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { ChevronDown, Plus, Check, Copy, Trash2 } from "lucide-react"
-import toast from "react-hot-toast"
+import toast from "@/lib/toast"
 
 interface Quarter {
   id: string

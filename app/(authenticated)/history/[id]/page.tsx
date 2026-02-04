@@ -7,7 +7,7 @@ import { Checkbox } from "@/components/ui/checkbox"
 import { ScheduleGrid } from "@/components/ScheduleGrid"
 import { ScheduleStats } from "@/components/ScheduleStats"
 import { GradeTimetable } from "@/components/GradeTimetable"
-import { Loader2, Download, ArrowLeft, Check, CheckCircle, AlertCircle, RefreshCw, Shuffle, Trash2, Star, MoreVertical, Users, GraduationCap, Printer, ArrowLeftRight, X, Hand, Pencil, Copy, ChevronDown, ChevronUp, AlertTriangle, Minus, Info, Crosshair, Clock, ImageDown } from "lucide-react"
+import { Loader2, Download, ArrowLeft, Check, RefreshCw, Shuffle, Trash2, Star, MoreVertical, Users, GraduationCap, Printer, ArrowLeftRight, X, Hand, Pencil, Copy, ChevronDown, ChevronUp, AlertTriangle, Minus, Info, Crosshair, Clock, ImageDown } from "lucide-react"
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -44,7 +44,7 @@ import { resolveRowsForGrade } from "@/lib/timetable-utils"
 import { parseClassesFromSnapshot, parseTeachersFromSnapshot, parseRulesFromSnapshot, hasValidSnapshots, detectClassChanges, computeExpectedTeachingSessions, type GenerationStats, type ChangeDetectionResult, type CurrentClass, type ClassSnapshot, type TeacherSnapshot } from "@/lib/snapshot-utils"
 import { parseGradeDisplayToNumbers, parseGradeDisplayToNames, gradesOverlap, gradesEqual, gradeNumToDisplay, isClassElective, shouldIgnoreGradeConflict } from "@/lib/grade-utils"
 import { BLOCK_TYPE_OPEN, BLOCK_TYPE_STUDY_HALL, isOpenBlock, isStudyHall, isScheduledClass, isOccupiedBlock, entryIsOpen, entryIsOccupied, entryIsScheduledClass, isFullTime, setOpenBlockLabel, recalculateOptionStats } from "@/lib/schedule-utils"
-import toast from "react-hot-toast"
+import toast, { successIcon, errorIcon, warningIcon } from "@/lib/toast"
 import { generateSchedules, reassignStudyHalls } from "@/lib/scheduler"
 import { generateSchedulesRemote } from "@/lib/scheduler-remote"
 import { useGeneration } from "@/lib/generation-context"
@@ -301,9 +301,6 @@ interface Generation {
   quarter: { id: string; name: string }
 }
 
-const successIcon = <CheckCircle style={{ width: 20, height: 20, minWidth: 20 }} className="text-emerald-600" />
-const errorIcon = <AlertCircle style={{ width: 20, height: 20, minWidth: 20 }} className="text-red-500" />
-const warningIcon = <AlertTriangle style={{ width: 20, height: 20, minWidth: 20 }} className="text-amber-500" />
 
 export default function HistoryDetailPage() {
   const params = useParams()
