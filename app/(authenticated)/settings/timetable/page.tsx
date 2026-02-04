@@ -351,6 +351,7 @@ export default function TimetableSettingsPage() {
                             e.target.value ? parseInt(e.target.value) : undefined
                           )
                         }
+                        onWheel={(e) => (e.target as HTMLInputElement).blur()}
                         className="h-8 w-16"
                       />
                     ) : (

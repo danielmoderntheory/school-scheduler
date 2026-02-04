@@ -6629,7 +6629,7 @@ export default function HistoryDetailPage() {
 
         {/* Schedule Grids */}
         {viewMode === "timetable" && timetableTemplate ? (
-          <div className="grid grid-cols-1 gap-4 print-grid">
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 print-grid">
             {Object.entries(publicOption.gradeSchedules)
               .filter(([grade]) => !grade.includes("Elective"))
               .sort(([a], [b]) => gradeSort(a, b))
@@ -8106,7 +8106,7 @@ export default function HistoryDetailPage() {
                   )
                 })()}
                 {viewMode === "timetable" && timetableTemplate ? (
-                  <div className="grid grid-cols-1 gap-4 print-grid">
+                  <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 print-grid">
                     {Object.entries(selectedResult.gradeSchedules)
                       .filter(([grade]) => !grade.includes("Elective"))
                       .sort(([a], [b]) => gradeSort(a, b))
