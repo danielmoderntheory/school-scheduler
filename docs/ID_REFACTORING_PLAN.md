@@ -7,6 +7,11 @@ Refactor the scheduler system to use database IDs (UUIDs) internally throughout,
 - Grade displays can be stored inconsistently ("10th-11th Grade" vs "10th Grade, 11th Grade")
 - String parsing is fragile and duplicated across files
 - Comparisons rely on exact string matches which can fail
+- **`teacherSchedules` keys are teacher names.** Renaming a teacher (e.g. "Sarah" → "Sarah Smith") leaves the schedule keyed by the old name — a teacher that no longer exists in the DB. The grid shows stale data.
+- **Schedule cell values store subject names as strings.** Renaming a subject (e.g. "Math" → "Mathematics") leaves old names frozen in saved schedules with no way to update them.
+- **Snapshot comparison key is `teacher_name|grade_ids|subject_name`** (`classKey()` in `snapshot-utils.ts`). Renaming a teacher or subject breaks the key match — the old name appears as "removed" and the new name as "added", producing misleading change banners on the history page.
+- **`revisionMatchesSnapshot()` uses `teacher_name|subject_name`** to verify a revision matches its snapshot. A rename causes counts to mismatch, incorrectly reporting the revision as diverged.
+- All four issues are resolved by switching to ID-based keys and only converting to display names at the render layer.
 
 ## Proposed Architecture
 

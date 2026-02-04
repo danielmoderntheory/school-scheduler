@@ -148,6 +148,50 @@ export function entryIsAvailable(entry: ScheduleEntry): boolean {
 }
 
 // -----------------------------------------------------------------------------
+// GRADE SCHEDULE CELL HELPERS
+// Grade schedule cells can now be:
+// - null (empty)
+// - [string, string] (single class: [teacher, subject])
+// - [string, string][] (multiple electives: [[teacher1, subject1], [teacher2, subject2], ...])
+// These helpers safely extract data from grade schedule cells.
+// -----------------------------------------------------------------------------
+
+/** Grade schedule cell type - can be single tuple, array of tuples, or null */
+export type GradeScheduleCell = [string, string] | [string, string][] | null
+
+/**
+ * Check if a grade schedule cell contains multiple entries (electives).
+ */
+export function isMultipleEntryCell(cell: GradeScheduleCell): cell is [string, string][] {
+  return Array.isArray(cell) && cell.length > 0 && Array.isArray(cell[0])
+}
+
+/**
+ * Extract a single entry from a grade schedule cell.
+ * Returns the first entry if multiple, or the single entry, or null.
+ * Use this when you only need one representative entry (e.g., for display or type checking).
+ */
+export function getFirstGradeEntry(cell: GradeScheduleCell): [string, string] | null {
+  if (!cell) return null
+  if (isMultipleEntryCell(cell)) {
+    return cell[0] || null
+  }
+  return cell
+}
+
+/**
+ * Get all entries from a grade schedule cell as an array.
+ * Normalizes single entries to an array for consistent handling.
+ */
+export function getAllGradeEntries(cell: GradeScheduleCell): [string, string][] {
+  if (!cell) return []
+  if (isMultipleEntryCell(cell)) {
+    return cell
+  }
+  return [cell]
+}
+
+// -----------------------------------------------------------------------------
 // DISPLAY LABELS (Future Feature)
 // Display labels allow renaming what OPEN blocks show as in exports/public views.
 // The underlying block type remains OPEN - labels are purely cosmetic.

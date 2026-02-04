@@ -376,7 +376,7 @@ export function ScheduleGrid({
 
     if (!(swapMode || manualStudyHallMode) || !onCellClick) return
 
-    const { entry } = getCellContent(day, block)
+    const { entry, isMultiple } = getCellContent(day, block)
     const cellType = getCellType(entry)
 
     if (type === "teacher") {
@@ -387,6 +387,8 @@ export function ScheduleGrid({
       }
     } else if (type === "grade") {
       // Grade view: can click classes, study halls, or valid targets
+      // Skip multi-entry cells (electives with multiple classes) - they can't be swapped individually
+      if (isMultiple) return
       if (cellType === "class" || cellType === "study-hall" || isValidTarget(day, block)) {
         const [teacher, subject] = entry || ["", ""]
         onCellClick({ grade: name, day, block, teacher, subject }, cellType === "empty" ? "open" : cellType)

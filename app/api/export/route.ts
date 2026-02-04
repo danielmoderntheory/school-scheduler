@@ -41,11 +41,15 @@ export async function GET(request: NextRequest) {
     return NextResponse.json({ error: "Invalid option number" }, { status: 400 })
   }
 
-  const option = options[optionNum - 1] as Parameters<typeof generateXLSX>[0]
+  const option = options[optionNum - 1] as Parameters<typeof generateXLSX>[0] & { label?: string }
   const shortId = generationId.slice(0, 8)
 
+  // Use letter label (A, B, C) if available, otherwise fall back to number
+  const revisionLabel = option.label || String(optionNum)
+  const filenameSafeLabel = revisionLabel.toLowerCase()
+
   const exportMetadata = {
-    scheduleId: `Rev ${optionNum} - ${shortId}`,
+    scheduleId: `Revision ${revisionLabel} - ${shortId}`,
     generatedAt: generation.generated_at,
     timetableTemplate: templateResult.data || undefined,
     grades: gradesResult.data || undefined,
@@ -56,7 +60,7 @@ export async function GET(request: NextRequest) {
     return new NextResponse(csv, {
       headers: {
         "Content-Type": "text/csv",
-        "Content-Disposition": `attachment; filename="schedule-rev-${optionNum}-${shortId}.csv"`,
+        "Content-Disposition": `attachment; filename="schedule-${filenameSafeLabel}-${shortId}.csv"`,
       },
     })
   }
@@ -66,7 +70,7 @@ export async function GET(request: NextRequest) {
   return new NextResponse(xlsx, {
     headers: {
       "Content-Type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-      "Content-Disposition": `attachment; filename="schedule-rev-${optionNum}-${shortId}.xlsx"`,
+      "Content-Disposition": `attachment; filename="schedule-${filenameSafeLabel}-${shortId}.xlsx"`,
     },
   })
 }

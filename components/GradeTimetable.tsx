@@ -23,12 +23,22 @@ export function GradeTimetable({
   function getCellContent(day: string, blockNumber: number): { subject: string; teacher: string } | null {
     const entry = gradeSchedule[day]?.[blockNumber]
     if (!entry) return null
-    // Multiple entries (electives)
+    // Multiple entries (electives) - show "Elective" instead of individual classes
     if (Array.isArray(entry) && Array.isArray(entry[0])) {
       const entries = entry as unknown as [string, string][]
-      const subjects = entries.map(([, subject]) => subject).join(" / ")
-      const teachers = entries.map(([teacher]) => teacher).join(", ")
-      return { subject: subjects, teacher: teachers }
+      // Filter to actual classes (not OPEN or Study Hall)
+      const classEntries = entries.filter(([, subject]) => subject && !isOpenBlock(subject) && !isStudyHall(subject))
+      if (classEntries.length > 1) {
+        return { subject: "Elective", teacher: "" }
+      }
+      // Single class entry or only OPEN/Study Hall - use first entry
+      if (entries.length > 0) {
+        const [teacher, subject] = entries[0]
+        if (!subject || isOpenBlock(subject)) return null
+        if (isStudyHall(subject)) return { subject: "Study Hall", teacher }
+        return { subject, teacher }
+      }
+      return null
     }
     const [teacher, subject] = entry as [string, string]
     if (!subject || isOpenBlock(subject)) return null

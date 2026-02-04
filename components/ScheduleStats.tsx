@@ -18,7 +18,7 @@ import {
 } from "@/components/ui/tooltip"
 import { Info, AlertTriangle, ChevronDown, ChevronRight } from "lucide-react"
 import type { TeacherStat, StudyHallAssignment, GradeSchedule, TeacherSchedule } from "@/lib/types"
-import { isOccupiedBlock, isScheduledClass, isFullTime } from "@/lib/schedule-utils"
+import { isOccupiedBlock, isScheduledClass, isFullTime, getFirstGradeEntry } from "@/lib/schedule-utils"
 import { parseGradeDisplayToNames } from "@/lib/grade-utils"
 
 interface ValidationIssue {
@@ -165,7 +165,8 @@ export function ScheduleStats({
 
       for (const day of DAYS) {
         for (const block of BLOCKS) {
-          const entry = schedule?.[day]?.[block]
+          const cell = schedule?.[day]?.[block]
+          const entry = getFirstGradeEntry(cell)
           // Count as filled if it's not empty and not OPEN
           if (entry && entry[1] && isOccupiedBlock(entry[1])) {
             filledBlocks++

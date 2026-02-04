@@ -101,7 +101,8 @@ export interface TeacherSchedule {
 
 export interface GradeSchedule {
   [day: string]: {
-    [block: number]: [string, string] | null; // [teacher, subject] or null
+    // [teacher, subject] for single class, array of tuples for multiple electives, or null
+    [block: number]: [string, string] | [string, string][] | null;
   };
 }
 

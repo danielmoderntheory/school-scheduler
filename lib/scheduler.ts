@@ -9,7 +9,7 @@ import type {
   Teacher, ClassEntry, ScheduleOption, TeacherStat, StudyHallAssignment,
   TeacherSchedule, GradeSchedule
 } from './types';
-import { BLOCK_TYPE_OPEN, BLOCK_TYPE_STUDY_HALL, isOpenBlock, isStudyHall, isScheduledClass, isOccupiedBlock } from './schedule-utils';
+import { BLOCK_TYPE_OPEN, BLOCK_TYPE_STUDY_HALL, isOpenBlock, isStudyHall, isScheduledClass, isOccupiedBlock, getFirstGradeEntry } from './schedule-utils';
 import { parseGradeDisplayToNumbers, parseGradeDisplayToNames, gradeNumToDisplay, gradeDisplayIncludesGrade } from './grade-utils';
 
 // Constants
@@ -587,6 +587,10 @@ function rebuildGradeSchedules(
   }
 
   // Populate from teacher schedules
+  // TWO PASSES: First multi-grade (electives), then single-grade (required classes)
+  // Electives accumulate into arrays; single-grade classes overwrite (take priority)
+
+  // Pass 1: Multi-grade entries (electives) - accumulate into arrays
   for (const [teacher, schedule] of Object.entries(teacherSchedules)) {
     for (const day of DAYS) {
       for (const block of BLOCKS) {
@@ -598,8 +602,52 @@ function rebuildGradeSchedules(
           // Parse grades using DATABASE grades (no hardcoding)
           const parsedGrades = parseGradesFromDatabase(gradeDisplay, databaseGrades);
 
-          for (const g of parsedGrades) {
-            // Initialize grade if somehow not in the list (safety)
+          // Only process multi-grade entries in this pass (electives)
+          if (parsedGrades.length > 1) {
+            for (const g of parsedGrades) {
+              // Initialize grade if somehow not in the list (safety)
+              if (!gradeSchedules[g]) {
+                gradeSchedules[g] = {};
+                for (const d of DAYS) {
+                  gradeSchedules[g][d] = {};
+                  for (const b of BLOCKS) {
+                    gradeSchedules[g][d][b] = null;
+                  }
+                }
+              }
+              const existing = gradeSchedules[g][day][block];
+              const newEntry: [string, string] = [teacher, subject];
+              if (!existing) {
+                // No existing entry - set as single tuple
+                gradeSchedules[g][day][block] = newEntry;
+              } else if (Array.isArray(existing) && Array.isArray(existing[0])) {
+                // Already an array of tuples - append
+                (existing as [string, string][]).push(newEntry);
+              } else {
+                // Single tuple exists - convert to array
+                gradeSchedules[g][day][block] = [existing as [string, string], newEntry];
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+
+  // Pass 2: Single-grade entries (required classes) - overwrite electives
+  for (const [teacher, schedule] of Object.entries(teacherSchedules)) {
+    for (const day of DAYS) {
+      for (const block of BLOCKS) {
+        const entry = schedule[day]?.[block];
+        if (entry && entry[0] && isOccupiedBlock(entry[1])) {
+          const gradeDisplay = entry[0];
+          const subject = entry[1];
+
+          const parsedGrades = parseGradesFromDatabase(gradeDisplay, databaseGrades);
+
+          // Only process single-grade entries in this pass (required classes overwrite)
+          if (parsedGrades.length === 1) {
+            const g = parsedGrades[0];
             if (!gradeSchedules[g]) {
               gradeSchedules[g] = {};
               for (const d of DAYS) {
@@ -956,7 +1004,8 @@ function redistributeOpenBlocks(
             // Check conflicts
             let hasConflict = false;
             for (const g of grades) {
-              const slot = gradeSchedules[g]?.[issueDay]?.[issueBlock];
+              const cell = gradeSchedules[g]?.[issueDay]?.[issueBlock];
+              const slot = getFirstGradeEntry(cell);
               if (slot && isOccupiedBlock(slot[1])) {
                 hasConflict = true;
                 break;
@@ -968,7 +1017,8 @@ function redistributeOpenBlocks(
             for (const g of grades) {
               for (const b of BLOCKS) {
                 if (b === issueBlock) continue;
-                const slot = gradeSchedules[g]?.[issueDay]?.[b];
+                const cell = gradeSchedules[g]?.[issueDay]?.[b];
+                const slot = getFirstGradeEntry(cell);
                 if (slot && slot[1] === subject) {
                   hasConflict = true;
                   break;
@@ -1638,7 +1688,8 @@ export function reassignStudyHalls(
     for (const grade of Object.keys(gradeSchedules)) {
       for (const day of DAYS) {
         for (const block of BLOCKS) {
-          const entry = gradeSchedules[grade]?.[day]?.[block];
+          const cell = gradeSchedules[grade]?.[day]?.[block];
+          const entry = getFirstGradeEntry(cell);
           if (entry && isStudyHall(entry[1])) {
             gradeSchedules[grade][day][block] = null;
           }

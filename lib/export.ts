@@ -223,7 +223,7 @@ const styles = {
   dayHeader: {
     fill: { fgColor: { rgb: "E2E8F0" } },
     font: { bold: true, color: { rgb: "334155" } },
-    alignment: { horizontal: "center" },
+    alignment: { horizontal: "center", vertical: "center" },
     border: {
       bottom: { style: "thin", color: { rgb: "CBD5E1" } },
     },
@@ -232,7 +232,7 @@ const styles = {
   blockLabel: {
     fill: { fgColor: { rgb: "F8FAFC" } },
     font: { bold: true, color: { rgb: "64748B" } },
-    alignment: { horizontal: "left" },
+    alignment: { horizontal: "left", vertical: "center" },
     border: {
       right: { style: "thin", color: { rgb: "E2E8F0" } },
     },
@@ -240,7 +240,7 @@ const styles = {
   // Schedule cell - white with light border
   scheduleCell: {
     fill: { fgColor: { rgb: "FFFFFF" } },
-    alignment: { horizontal: "center" },
+    alignment: { horizontal: "center", vertical: "center", wrapText: true },
     border: {
       bottom: { style: "thin", color: { rgb: "F1F5F9" } },
       right: { style: "thin", color: { rgb: "F1F5F9" } },
@@ -528,12 +528,27 @@ export function generateXLSX(option: ScheduleOption, metadata?: ExportMetadata):
               row.push("")
               return
             }
-            // Multiple entries (electives)
+            // Multiple entries (electives) - show "Elective"
             if (Array.isArray(entry) && Array.isArray(entry[0])) {
               const entries = entry as unknown as [string, string][]
-              const subjects = entries.map(([, subject]) => subject).join(" / ")
-              const teachers = entries.map(([teacher]) => teacher).join(", ")
-              row.push(`${subjects}\n${teachers}`)
+              const classEntries = entries.filter(([, subject]) => isScheduledClass(subject))
+              if (classEntries.length > 1) {
+                row.push("Elective")
+                return
+              }
+              // Single class entry or only OPEN/Study Hall - use first entry
+              if (entries.length > 0) {
+                const [teacher, subject] = entries[0]
+                if (!subject || isOpenBlock(subject)) {
+                  row.push("")
+                } else if (isStudyHall(subject)) {
+                  row.push(`Study Hall\n${teacher}`)
+                } else {
+                  row.push(`${subject}\n${teacher}`)
+                }
+                return
+              }
+              row.push("")
               return
             }
             const [teacher, subject] = entry as [string, string]
@@ -580,13 +595,10 @@ export function generateXLSX(option: ScheduleOption, metadata?: ExportMetadata):
         applyStyle(timetableSheet, XLSX.utils.encode_cell({ r: row, c: 1 }), {
           fill: { fgColor: { rgb: "EFF6FF" } },
           font: { bold: true, color: { rgb: "334155" } },
-          alignment: { horizontal: "left" },
+          alignment: { horizontal: "left", vertical: "center" },
         })
         for (let col = 2; col <= 6; col++) {
-          applyStyle(timetableSheet, XLSX.utils.encode_cell({ r: row, c: col }), {
-            ...styles.scheduleCell,
-            alignment: { horizontal: "center", wrapText: true },
-          })
+          applyStyle(timetableSheet, XLSX.utils.encode_cell({ r: row, c: col }), styles.scheduleCell)
         }
       }
     })

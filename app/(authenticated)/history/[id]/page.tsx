@@ -43,7 +43,7 @@ import type { ScheduleOption, TeacherSchedule, GradeSchedule, Teacher, FloatingB
 import { resolveRowsForGrade } from "@/lib/timetable-utils"
 import { parseClassesFromSnapshot, parseTeachersFromSnapshot, parseRulesFromSnapshot, hasValidSnapshots, detectClassChanges, computeExpectedTeachingSessions, type GenerationStats, type ChangeDetectionResult, type CurrentClass, type ClassSnapshot, type TeacherSnapshot } from "@/lib/snapshot-utils"
 import { parseGradeDisplayToNumbers, parseGradeDisplayToNames, gradesOverlap, gradesEqual, gradeNumToDisplay, isClassElective, shouldIgnoreGradeConflict } from "@/lib/grade-utils"
-import { BLOCK_TYPE_OPEN, BLOCK_TYPE_STUDY_HALL, isOpenBlock, isStudyHall, isScheduledClass, isOccupiedBlock, entryIsOpen, entryIsOccupied, entryIsScheduledClass, isFullTime, setOpenBlockLabel, recalculateOptionStats } from "@/lib/schedule-utils"
+import { BLOCK_TYPE_OPEN, BLOCK_TYPE_STUDY_HALL, isOpenBlock, isStudyHall, isScheduledClass, isOccupiedBlock, entryIsOpen, entryIsOccupied, entryIsScheduledClass, isFullTime, setOpenBlockLabel, recalculateOptionStats, getFirstGradeEntry, isMultipleEntryCell } from "@/lib/schedule-utils"
 import toast, { successIcon, errorIcon, warningIcon } from "@/lib/toast"
 import { generateSchedules, reassignStudyHalls } from "@/lib/scheduler"
 import { generateSchedulesRemote } from "@/lib/scheduler-remote"
@@ -181,7 +181,7 @@ function rebuildGradeSchedules(
   // TWO PASSES: First multi-grade (electives), then single-grade (required classes)
   // This ensures required single-grade classes take priority over electives
 
-  // Pass 1: Multi-grade entries (electives) - these can be overwritten
+  // Pass 1: Multi-grade entries (electives) - accumulate into arrays when multiple share a cell
   for (const [teacher, schedule] of Object.entries(teacherSchedules)) {
     for (const day of DAYS) {
       for (let block = 1; block <= 5; block++) {
@@ -195,7 +195,18 @@ function rebuildGradeSchedules(
         // Only process multi-grade entries in this pass
         if (targetGrades.length > 1) {
           for (const grade of targetGrades) {
-            newGradeSchedules[grade][day][block] = [teacher, subject]
+            const existing = newGradeSchedules[grade][day][block]
+            const newEntry: [string, string] = [teacher, subject]
+            if (!existing) {
+              // No existing entry - set as single tuple
+              newGradeSchedules[grade][day][block] = newEntry
+            } else if (Array.isArray(existing) && Array.isArray(existing[0])) {
+              // Already an array of tuples - append
+              (existing as [string, string][]).push(newEntry)
+            } else {
+              // Single tuple exists - convert to array
+              newGradeSchedules[grade][day][block] = [existing as [string, string], newEntry]
+            }
           }
         }
       }
@@ -1660,7 +1671,8 @@ export default function HistoryDetailPage() {
       for (const grade of allGrades) {
         for (const day of DAYS) {
           for (let block = 1; block <= 5; block++) {
-            const entry = mergedGradeSchedules[grade]?.[day]?.[block]
+            const cell = mergedGradeSchedules[grade]?.[day]?.[block]
+            const entry = getFirstGradeEntry(cell)
             if (entry && previewTeachers.has(entry[0])) {
               // This slot was taught by a selected teacher - clear it
               mergedGradeSchedules[grade][day][block] = null
@@ -1674,10 +1686,11 @@ export default function HistoryDetailPage() {
       for (const grade of allGrades) {
         for (const day of DAYS) {
           for (let block = 1; block <= 5; block++) {
-            const previewEntry = previewGradeSchedules[grade]?.[day]?.[block]
+            const previewCell = previewGradeSchedules[grade]?.[day]?.[block]
+            const previewEntry = getFirstGradeEntry(previewCell)
             if (previewEntry && previewTeachers.has(previewEntry[0])) {
               // This slot is taught by a selected teacher in preview - add it
-              mergedGradeSchedules[grade][day][block] = previewEntry
+              mergedGradeSchedules[grade][day][block] = previewCell
             }
           }
         }
@@ -2187,7 +2200,8 @@ export default function HistoryDetailPage() {
     for (const [, schedule] of Object.entries(newGradeSchedules) as [string, GradeSchedule][]) {
       for (const day of DAYS_LIST) {
         for (let block = 1; block <= 5; block++) {
-          const entry = schedule[day]?.[block]
+          const cell = schedule[day]?.[block]
+          const entry = getFirstGradeEntry(cell)
           if (entry && isStudyHall(entry[1])) {
             schedule[day][block] = null
           }
@@ -2911,7 +2925,8 @@ export default function HistoryDetailPage() {
     for (const day of DAYS) {
       subjectsByDay[day] = new Set()
       for (const block of BLOCKS) {
-        const entry = gradeSchedule[day]?.[block]
+        const cell = gradeSchedule[day]?.[block]
+        const entry = getFirstGradeEntry(cell)
         if (entry && isScheduledClass(entry[1])) {
           if (!(day === source.day && block === source.block)) {
             subjectsByDay[day].add(entry[1])
@@ -2927,12 +2942,13 @@ export default function HistoryDetailPage() {
         if (day === source.day && block === source.block) continue
 
         const teacherEntry = teacherSchedule[day]?.[block]
-        const gradeEntry = gradeSchedule[day]?.[block]
+        const gradeCell = gradeSchedule[day]?.[block]
+        const gradeEntry = getFirstGradeEntry(gradeCell)
 
         // Teacher must have OPEN at this slot
         if (!teacherEntry || !isOpenBlock(teacherEntry[1])) continue
 
-        // Grade must be free (no class)
+        // Grade must be free (no class) - skip multi-entry elective cells too
         if (gradeEntry && isScheduledClass(gradeEntry[1])) continue
 
         // No subject conflict - source subject can't already be on this day
@@ -2949,7 +2965,12 @@ export default function HistoryDetailPage() {
         // Skip source cell
         if (day === source.day && block === source.block) continue
 
-        const gradeEntry = gradeSchedule[day]?.[block]
+        const gradeCell = gradeSchedule[day]?.[block]
+
+        // Skip multi-entry elective cells - can't swap with those
+        if (isMultipleEntryCell(gradeCell)) continue
+
+        const gradeEntry = getFirstGradeEntry(gradeCell)
 
         // Must be a class (not OPEN, Study Hall, or empty)
         if (!gradeEntry || !isScheduledClass(gradeEntry[1])) continue
@@ -3006,7 +3027,8 @@ export default function HistoryDetailPage() {
     for (const day of DAYS) {
       subjectsByDay[day] = new Set()
       for (const block of BLOCKS) {
-        const entry = gradeSchedule[day]?.[block]
+        const cell = gradeSchedule[day]?.[block]
+        const entry = getFirstGradeEntry(cell)
         if (entry && isScheduledClass(entry[1])) {
           // Don't count the source cell's subject
           if (!(day === source.day && block === source.block)) {
@@ -3024,12 +3046,13 @@ export default function HistoryDetailPage() {
         if (day === source.day && block === source.block) continue
 
         const teacherEntry = teacherSchedule[day]?.[block]
-        const gradeEntry = gradeSchedule[day]?.[block]
+        const gradeCell = gradeSchedule[day]?.[block]
+        const gradeEntry = getFirstGradeEntry(gradeCell)
 
         // Teacher must have OPEN at this slot
         if (!teacherEntry || !isOpenBlock(teacherEntry[1])) continue
 
-        // Grade must be free (no class, or OPEN/Study Hall is ok to swap into conceptually but we're moving a class)
+        // Grade must be free (no class) - skip multi-entry elective cells too
         if (gradeEntry && isScheduledClass(gradeEntry[1])) continue
 
         // No subject conflict - source subject can't already be on this day
@@ -3046,7 +3069,12 @@ export default function HistoryDetailPage() {
         // Skip source cell
         if (day === source.day && block === source.block) continue
 
-        const gradeEntry = gradeSchedule[day]?.[block]
+        const gradeCell = gradeSchedule[day]?.[block]
+
+        // Skip multi-entry elective cells - can't swap with those
+        if (isMultipleEntryCell(gradeCell)) continue
+
+        const gradeEntry = getFirstGradeEntry(gradeCell)
 
         // Must be a class (not OPEN, Study Hall, or empty)
         if (!gradeEntry || !isScheduledClass(gradeEntry[1])) continue
@@ -3348,7 +3376,8 @@ export default function HistoryDetailPage() {
     // Get the source class info from working schedules
     const sourceTeacher = source.teacher!
     const sourceSubject = source.subject!
-    const sourceGradeEntry = swapWorkingSchedules.gradeSchedules[grade]?.[source.day]?.[source.block]
+    const sourceGradeCell = swapWorkingSchedules.gradeSchedules[grade]?.[source.day]?.[source.block]
+    const sourceGradeEntry = getFirstGradeEntry(sourceGradeCell)
     const sourceTeacherEntry = swapWorkingSchedules.teacherSchedules[sourceTeacher]?.[source.day]?.[source.block]
 
     if (!sourceGradeEntry || !sourceTeacherEntry) {
@@ -3359,7 +3388,8 @@ export default function HistoryDetailPage() {
     }
 
     // Check if this is Option 1 (move to OPEN) or Option 2 (swap with another class)
-    const targetGradeEntry = swapWorkingSchedules.gradeSchedules[grade]?.[target.day]?.[target.block]
+    const targetGradeCell = swapWorkingSchedules.gradeSchedules[grade]?.[target.day]?.[target.block]
+    const targetGradeEntry = getFirstGradeEntry(targetGradeCell)
     const isOption1 = !targetGradeEntry || !isScheduledClass(targetGradeEntry[1])
 
     let successMessage = ""
@@ -7477,11 +7507,13 @@ export default function HistoryDetailPage() {
                                     B{block}
                                   </div>
                                   {DAYS_LIST.map(day => {
-                                    const entry = gradeSchedule[day]?.[block]
+                                    const cell = gradeSchedule[day]?.[block]
+                                    const entry = getFirstGradeEntry(cell)
                                     const isOpen = !entry || entry[1] === 'OPEN'
                                     const isSH = entry && isStudyHall(entry[1])
+                                    const isMultiple = isMultipleEntryCell(cell)
                                     const teacher = entry?.[0] || ''
-                                    const subject = entry?.[1] || ''
+                                    const subject = isMultiple ? 'Elective' : (entry?.[1] || '')
 
                                     return (
                                       <div
@@ -7491,9 +7523,11 @@ export default function HistoryDetailPage() {
                                             ? 'bg-green-100 text-green-700 font-semibold border border-green-400 ring-1 ring-green-300'
                                             : isSH
                                               ? 'bg-blue-50 border border-blue-200'
-                                              : 'bg-slate-50 border border-slate-200'
+                                              : isMultiple
+                                                ? 'bg-purple-50 border border-purple-200'
+                                                : 'bg-slate-50 border border-slate-200'
                                         }`}
-                                        title={isOpen ? `OPEN - ${day} B${block}` : `${teacher}: ${subject}`}
+                                        title={isOpen ? `OPEN - ${day} B${block}` : isMultiple ? 'Elective' : `${teacher}: ${subject}`}
                                       >
                                         {isOpen ? (
                                           <span>OPEN</span>
