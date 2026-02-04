@@ -46,6 +46,9 @@ export async function PUT(
     }
   }
 
+  // Touch the parent class's updated_at
+  await supabase.from("classes").update({ updated_at: new Date().toISOString() }).eq("id", classId)
+
   // Return updated restrictions
   const { data, error } = await supabase
     .from("restrictions")
