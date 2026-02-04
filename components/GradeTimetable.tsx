@@ -37,7 +37,7 @@ export function GradeTimetable({
   }
 
   return (
-    <div className="border rounded-lg overflow-hidden print-break-inside-avoid flex flex-col">
+    <div data-card-name={gradeName} className="border rounded-lg overflow-hidden bg-white print-break-inside-avoid flex flex-col">
       {/* Header */}
       <div className="px-3 py-2 font-medium border-b bg-slate-50 flex items-center justify-between">
         <div className="flex items-center gap-2">

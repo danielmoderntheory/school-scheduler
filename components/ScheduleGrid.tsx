@@ -5,7 +5,7 @@ import { cn } from "@/lib/utils"
 import { Badge } from "@/components/ui/badge"
 import { Checkbox } from "@/components/ui/checkbox"
 import { Input } from "@/components/ui/input"
-import { RefreshCw, AlertTriangle, Check, Ban, X, ArrowLeftRight } from "lucide-react"
+import { RefreshCw, AlertTriangle, Check, Ban, X, ArrowLeftRight, Pencil } from "lucide-react"
 import type { TeacherSchedule, GradeSchedule, FloatingBlock, PendingPlacement, ValidationError, CellLocation, OpenBlockLabels } from "@/lib/types"
 import { BLOCK_TYPE_OPEN, isOpenBlock, isStudyHall, isScheduledClass, isFullTime, getOpenBlockAt, getOpenBlockLabel } from "@/lib/schedule-utils"
 import { formatGradeDisplayCompact, isClassElective, isClassCotaught, type ClassSnapshotEntry } from "@/lib/grade-utils"
@@ -396,6 +396,7 @@ export function ScheduleGrid({
 
   return (
     <div
+      data-card-name={name}
       className={cn(
         "border rounded-lg overflow-hidden bg-white shadow-sm transition-all schedule-card",
         isSelected && "ring-2 ring-sky-500 border-sky-500"
@@ -563,7 +564,7 @@ export function ScheduleGrid({
                             <div className="relative">
                               <span
                                 className={cn(
-                                  "cursor-pointer hover:underline text-center",
+                                  "cursor-pointer hover:underline text-center inline-flex items-center gap-1",
                                   label
                                     ? "text-[11px] text-slate-700 font-semibold leading-[1.2]"
                                     : "text-xs text-muted-foreground"
@@ -581,6 +582,7 @@ export function ScheduleGrid({
                                 }}
                               >
                                 {displayText}
+                                {!label && <Pencil className="h-2.5 w-2.5 text-muted-foreground/50" />}
                               </span>
                               {isDropdownOpen && labelDropdownPos && (
                                 <div

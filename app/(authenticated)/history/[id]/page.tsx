@@ -7,12 +7,15 @@ import { Checkbox } from "@/components/ui/checkbox"
 import { ScheduleGrid } from "@/components/ScheduleGrid"
 import { ScheduleStats } from "@/components/ScheduleStats"
 import { GradeTimetable } from "@/components/GradeTimetable"
-import { Loader2, Download, ArrowLeft, Check, CheckCircle, AlertCircle, RefreshCw, Shuffle, Trash2, Star, MoreVertical, Users, GraduationCap, Printer, ArrowLeftRight, X, Hand, Pencil, Copy, ChevronDown, ChevronUp, AlertTriangle, Minus, Info, Crosshair, Clock } from "lucide-react"
+import { Loader2, Download, ArrowLeft, Check, CheckCircle, AlertCircle, RefreshCw, Shuffle, Trash2, Star, MoreVertical, Users, GraduationCap, Printer, ArrowLeftRight, X, Hand, Pencil, Copy, ChevronDown, ChevronUp, AlertTriangle, Minus, Info, Crosshair, Clock, ImageDown } from "lucide-react"
 import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuSeparator,
+  DropdownMenuSub,
+  DropdownMenuSubContent,
+  DropdownMenuSubTrigger,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
 import {
@@ -321,6 +324,7 @@ export default function HistoryDetailPage() {
   const [saving, setSaving] = useState(false)
   const [isPublicView, setIsPublicView] = useState<boolean | null>(null) // null = checking, true = public, false = authenticated
   const [userRole, setUserRole] = useState<"admin" | "readonly" | null>(null) // User's auth role
+  const [isCapturingPng, setIsCapturingPng] = useState(false)
 
   // Regeneration state - teachers selected for regeneration
   const [regenMode, setRegenMode] = useState(false)
@@ -897,6 +901,19 @@ export default function HistoryDetailPage() {
 
     checkForChanges()
   }, [generation?.id, generation?.quarter_id, generation?.stats?.snapshotVersion, isPublicView])
+
+  async function handleDownloadPng() {
+    setIsCapturingPng(true)
+    try {
+      const { downloadSchedulesAsPng } = await import("@/lib/png-export")
+      await downloadSchedulesAsPng({ viewMode })
+    } catch (err) {
+      console.error("PNG capture failed:", err)
+      toast.error("Failed to capture schedules as PNG")
+    } finally {
+      setIsCapturingPng(false)
+    }
+  }
 
   function openStarDialog(editMode: boolean = false) {
     setStarNote(generation?.notes || "")
@@ -6581,23 +6598,34 @@ export default function HistoryDetailPage() {
               Revision {generation.selected_option || 1}
             </span>
           </div>
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={() => window.print()}
-            className="gap-1.5"
-          >
-            <Printer className="h-4 w-4" />
-            Print
-          </Button>
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button variant="outline" size="sm" className="gap-1.5">
+                <Download className="h-4 w-4" />
+                Export
+                <ChevronDown className="h-3 w-3" />
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end">
+              <DropdownMenuItem onClick={handleDownloadPng} disabled={isCapturingPng}>
+                {isCapturingPng ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : <ImageDown className="h-4 w-4 mr-2" />}
+                PNG
+              </DropdownMenuItem>
+              <DropdownMenuSeparator />
+              <DropdownMenuItem onClick={() => window.print()}>
+                <Printer className="h-4 w-4 mr-2" />
+                Print
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
         </div>
 
         {/* View toggle */}
-        <div className="flex items-center justify-between mb-4 no-print">
+        <div className="flex flex-wrap-reverse items-center justify-between gap-2 mb-4 no-print">
           <h3 className="font-semibold">
             {viewMode === "timetable" ? "Grade Timetables" : viewMode === "teacher" ? "Teacher Schedules" : "Grade Schedules"}
           </h3>
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 ml-auto">
             <Button
               variant="ghost"
               size="sm"
@@ -6605,11 +6633,13 @@ export default function HistoryDetailPage() {
               onClick={() => {
                 const url = `${window.location.origin}/history/${id}${viewMode !== "teacher" ? `?view=${viewMode}` : ""}`
                 navigator.clipboard.writeText(url)
-                toast.success("Share link copied")
+                const viewLabel = viewMode === "timetable" ? "Timetable" : viewMode === "teacher" ? "Teacher" : "Grade"
+                toast.success(`${viewLabel} view link copied`)
               }}
             >
               <Copy className="h-3.5 w-3.5" />
-              Share
+              <span className="hidden sm:inline">Share {viewMode === "timetable" ? "Timetable" : viewMode === "teacher" ? "Teacher" : "Grade"} View</span>
+              <span className="sm:hidden">Share</span>
             </Button>
             <div className="flex items-center gap-1 border rounded-md p-0.5">
               <Button
@@ -6619,7 +6649,7 @@ export default function HistoryDetailPage() {
                 className="gap-1"
               >
                 <Users className="h-4 w-4" />
-                Teacher
+                <span className="hidden sm:inline">Teacher</span>
               </Button>
               <Button
                 variant={viewMode === "grade" ? "secondary" : "ghost"}
@@ -6628,7 +6658,7 @@ export default function HistoryDetailPage() {
                 className="gap-1"
               >
                 <GraduationCap className="h-4 w-4" />
-                Grade
+                <span className="hidden sm:inline">Grade</span>
               </Button>
               {timetableTemplate && (
                 <Button
@@ -6638,7 +6668,7 @@ export default function HistoryDetailPage() {
                   className="gap-1"
                 >
                   <Clock className="h-4 w-4" />
-                  Timetable
+                  <span className="hidden sm:inline">Timetable</span>
                 </Button>
               )}
             </div>
@@ -6844,37 +6874,40 @@ export default function HistoryDetailPage() {
             </div>
 
             <div className="flex items-center gap-2 no-print">
-              {/* Export buttons - hidden during modes */}
+              {/* Export dropdown - hidden during modes */}
               {!previewOption && !regenMode && !swapMode && !freeformMode && !studyHallMode && (
-                <>
-                  <a
-                    href={`/api/export?generation_id=${id}&option=${viewingOption}&format=xlsx`}
-                    download
-                  >
+                <DropdownMenu>
+                  <DropdownMenuTrigger asChild>
                     <Button variant="outline" size="sm" className="gap-1">
                       <Download className="h-4 w-4" />
-                      XLSX
+                      Export
+                      <ChevronDown className="h-3 w-3" />
                     </Button>
-                  </a>
-                  <a
-                    href={`/api/export?generation_id=${id}&option=${viewingOption}&format=csv`}
-                    download
-                  >
-                    <Button variant="outline" size="sm" className="gap-1">
-                      <Download className="h-4 w-4" />
-                      CSV
-                    </Button>
-                  </a>
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    className="gap-1"
-                    onClick={() => window.print()}
-                  >
-                    <Printer className="h-4 w-4" />
-                    Print
-                  </Button>
-                </>
+                  </DropdownMenuTrigger>
+                  <DropdownMenuContent align="end">
+                    <DropdownMenuItem asChild>
+                      <a href={`/api/export?generation_id=${id}&option=${viewingOption}&format=xlsx`} download>
+                        <Download className="h-4 w-4 mr-2" />
+                        XLSX
+                      </a>
+                    </DropdownMenuItem>
+                    <DropdownMenuItem asChild>
+                      <a href={`/api/export?generation_id=${id}&option=${viewingOption}&format=csv`} download>
+                        <Download className="h-4 w-4 mr-2" />
+                        CSV
+                      </a>
+                    </DropdownMenuItem>
+                    <DropdownMenuItem onClick={handleDownloadPng} disabled={isCapturingPng}>
+                      {isCapturingPng ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : <ImageDown className="h-4 w-4 mr-2" />}
+                      PNG
+                    </DropdownMenuItem>
+                    <DropdownMenuSeparator />
+                    <DropdownMenuItem onClick={() => window.print()}>
+                      <Printer className="h-4 w-4 mr-2" />
+                      Print
+                    </DropdownMenuItem>
+                  </DropdownMenuContent>
+                </DropdownMenu>
               )}
 
               {/* Class Changes Indicator - small button that opens dialog */}
@@ -6922,14 +6955,22 @@ export default function HistoryDetailPage() {
                       Reassign Study Halls
                     </DropdownMenuItem>
                     <DropdownMenuSeparator />
-                    <DropdownMenuItem onClick={handleValidateSchedule} disabled={regenMode || swapMode || freeformMode || studyHallMode || repairMode || !!previewOption}>
-                      <AlertTriangle className="h-4 w-4 mr-2" />
-                      Validate Schedule
-                    </DropdownMenuItem>
-                    <DropdownMenuItem onClick={handleStartRepairMode} disabled={regenMode || swapMode || freeformMode || studyHallMode || repairMode || !!previewOption}>
-                      <RefreshCw className="h-4 w-4 mr-2" />
-                      Repair Schedule
-                    </DropdownMenuItem>
+                    <DropdownMenuSub>
+                      <DropdownMenuSubTrigger disabled={regenMode || swapMode || freeformMode || studyHallMode || repairMode || !!previewOption}>
+                        <AlertTriangle className="h-4 w-4 mr-2" />
+                        Diagnostics
+                      </DropdownMenuSubTrigger>
+                      <DropdownMenuSubContent>
+                        <DropdownMenuItem onClick={handleValidateSchedule}>
+                          <AlertTriangle className="h-4 w-4 mr-2" />
+                          Validate Schedule
+                        </DropdownMenuItem>
+                        <DropdownMenuItem onClick={handleStartRepairMode}>
+                          <RefreshCw className="h-4 w-4 mr-2" />
+                          Repair Schedule
+                        </DropdownMenuItem>
+                      </DropdownMenuSubContent>
+                    </DropdownMenuSub>
                     <DropdownMenuItem onClick={handleDuplicateRevision} disabled={regenMode || swapMode || freeformMode || studyHallMode || repairMode}>
                       <Copy className="h-4 w-4 mr-2" />
                       Duplicate Revision
@@ -8022,22 +8063,29 @@ export default function HistoryDetailPage() {
 
               {/* Schedule Grids */}
               <div>
-                <div className="flex items-center justify-between mb-4">
-                  <h3 className="font-semibold">
-                    {viewMode === "timetable" ? "Grade Timetables" : viewMode === "teacher" ? "Teacher Schedules" : "Grade Schedules"}
-                  </h3>
-                  <div className="flex items-center gap-3 no-print">
-                    {/* Edit OPEN Labels toggle - only for admin users in teacher view, hidden during edit modes */}
+                <div className="flex flex-wrap-reverse items-center justify-between gap-2 mb-4">
+                  <div className="flex items-center gap-3">
+                    <h3 className="font-semibold">
+                      {viewMode === "timetable" ? "Grade Timetables" : viewMode === "teacher" ? "Teacher Schedules" : "Grade Schedules"}
+                    </h3>
+                    {/* Annotate open blocks toggle - only for admin users in teacher view, hidden during edit modes */}
                     {userRole === "admin" && viewMode === "teacher" && !regenMode && !swapMode && !freeformMode && !studyHallMode && (
-                      <label className="flex items-center gap-1.5 cursor-pointer">
-                        <Checkbox
-                          checked={showOpenLabels}
-                          onCheckedChange={(checked) => setShowOpenLabels(checked === true)}
-                          className="data-[state=checked]:bg-slate-600 data-[state=checked]:border-slate-600"
-                        />
-                        <span className="text-xs text-muted-foreground">Edit OPEN Labels</span>
-                      </label>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={() => {
+                          const next = !showOpenLabels
+                          setShowOpenLabels(next)
+                          if (next) toast("Tap any Open block to add a label", { icon: <Pencil className="h-4 w-4 text-gray-500" /> })
+                        }}
+                        className="gap-1 no-print text-muted-foreground"
+                      >
+                        <Pencil className="h-3.5 w-3.5" />
+                        {showOpenLabels ? "Done Annotating" : "Annotate Open Blocks"}
+                      </Button>
                     )}
+                  </div>
+                  <div className="flex flex-wrap items-center gap-2 sm:gap-3 ml-auto no-print">
                     <Button
                       variant="ghost"
                       size="sm"
@@ -8045,11 +8093,13 @@ export default function HistoryDetailPage() {
                       onClick={() => {
                         const url = `${window.location.origin}/history/${id}${viewMode !== "teacher" ? `?view=${viewMode}` : ""}`
                         navigator.clipboard.writeText(url)
-                        toast.success("Share link copied")
+                        const viewLabel = viewMode === "timetable" ? "Timetable" : viewMode === "teacher" ? "Teacher" : "Grade"
+                        toast.success(`${viewLabel} view link copied`)
                       }}
                     >
                       <Copy className="h-3.5 w-3.5" />
-                      Share
+                      <span className="hidden sm:inline">Share {viewMode === "timetable" ? "Timetable" : viewMode === "teacher" ? "Teacher" : "Grade"} View</span>
+                      <span className="sm:hidden">Share</span>
                     </Button>
                     <div className="flex items-center gap-1 border rounded-md p-0.5">
                       <Button
@@ -8064,7 +8114,7 @@ export default function HistoryDetailPage() {
                         className="gap-1"
                       >
                         <Users className="h-4 w-4" />
-                        Teacher
+                        <span className="hidden sm:inline">Teacher</span>
                       </Button>
                       <Button
                         variant={viewMode === "grade" ? "secondary" : "ghost"}
@@ -8078,7 +8128,7 @@ export default function HistoryDetailPage() {
                         className="gap-1"
                       >
                         <GraduationCap className="h-4 w-4" />
-                        Grade
+                        <span className="hidden sm:inline">Grade</span>
                       </Button>
                       {timetableTemplate && (
                         <Button
@@ -8089,7 +8139,7 @@ export default function HistoryDetailPage() {
                           className="gap-1"
                         >
                           <Clock className="h-4 w-4" />
-                          Timetable
+                          <span className="hidden sm:inline">Timetable</span>
                         </Button>
                       )}
                     </div>
@@ -8254,7 +8304,7 @@ export default function HistoryDetailPage() {
                                 onUnplace={handleUnplaceBlock}
                                 onDeselect={() => setSelectedFloatingBlock(null)}
                                 openBlockLabels={selectedResult.openBlockLabels}
-                                showOpenLabels={showOpenLabels}
+                                showOpenLabels={!regenMode && !swapMode && !freeformMode && !studyHallMode}
                                 onOpenLabelChange={userRole === "admin" && showOpenLabels && !regenMode && !swapMode && !freeformMode && !studyHallMode ? handleOpenLabelChange : undefined}
                               />
                               {/* Unplaced floating blocks from this teacher */}
