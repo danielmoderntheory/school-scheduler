@@ -20,9 +20,11 @@ export function middleware(request: NextRequest) {
 
   // Allow unauthenticated access to shared schedule pages (public view mode)
   // Match /history/[uuid] pattern for both page and API
+  // Also allow read-only access to grades and timetable templates (needed for timetable view)
   const isHistoryDetailPage = request.nextUrl.pathname.match(/^\/history\/[a-f0-9-]+$/i)
   const isHistoryDetailApi = request.nextUrl.pathname.match(/^\/api\/history\/[a-f0-9-]+$/i)
-  if (isHistoryDetailPage || isHistoryDetailApi) {
+  const isPublicReadApi = request.nextUrl.pathname === "/api/timetable-templates" || request.nextUrl.pathname === "/api/grades"
+  if (isHistoryDetailPage || isHistoryDetailApi || (isPublicReadApi && request.method === "GET")) {
     // Allow access but don't set auth - page will detect public view mode
     return NextResponse.next()
   }

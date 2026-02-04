@@ -308,11 +308,14 @@ export default function HistoryDetailPage() {
   const router = useRouter()
   const id = params.id as string
   const isNewGeneration = searchParams.get('new') === 'true'
+  const initialView = searchParams.get('view')
   const { setIsGenerating: setGlobalGenerating } = useGeneration()
   const [generation, setGeneration] = useState<Generation | null>(null)
   const [loading, setLoading] = useState(true)
   const [viewingOption, setViewingOption] = useState("1")
-  const [viewMode, setViewMode] = useState<"teacher" | "grade" | "timetable">("teacher")
+  const [viewMode, setViewMode] = useState<"teacher" | "grade" | "timetable">(
+    initialView === "timetable" || initialView === "grade" ? initialView : "teacher"
+  )
   const [timetableTemplate, setTimetableTemplate] = useState<TimetableTemplate | null>(null)
   const [gradesData, setGradesData] = useState<{ id: string; display_name: string; sort_order: number; homeroom_teachers?: string }[]>([])
   const [saving, setSaving] = useState(false)
