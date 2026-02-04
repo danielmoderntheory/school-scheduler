@@ -167,10 +167,10 @@ export function QuarterSelector() {
                 onChange={(e) => setNewQuarterNum(parseInt(e.target.value))}
                 className="flex-1 h-8 rounded-md border border-input bg-background px-2 text-sm"
               >
-                <option value={1}>Q1</option>
-                <option value={2}>Q2</option>
-                <option value={3}>Q3</option>
-                <option value={4}>Q4</option>
+                <option value={1}>Q1 Fall</option>
+                <option value={2}>Q2 Winter</option>
+                <option value={3}>Q3 Spring</option>
+                <option value={4}>Q4 Summer</option>
               </select>
             </div>
             {quarters.length > 0 && (

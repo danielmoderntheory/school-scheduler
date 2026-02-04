@@ -13,7 +13,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog"
-import { ChevronDown, ChevronUp, Loader2, Plus, X, Clock, Users, Upload, Download, Check, History, Star } from "lucide-react"
+import { ChevronDown, ChevronUp, Loader2, Plus, X, Clock, Users, Upload, Download, Check, History, Star, Lock } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { GradeSelector, formatGradeDisplay } from "@/components/GradeSelector"
 import { TEACHER_STATUS_FULL_TIME, isPartTime, calculateGradeBlocks, buildCotaughtGroups, type TeacherStatus } from "@/lib/schedule-utils"
@@ -103,6 +103,7 @@ export default function ClassesPage() {
   const [activeQuarter, setActiveQuarter] = useState<Quarter | null>(null)
   const [loading, setLoading] = useState(true)
   const [lastRun, setLastRun] = useState<LastRun | null>(null)
+  const [tableLocked, setTableLocked] = useState(true)
   const [showImportDialog, setShowImportDialog] = useState(false)
   const [showExportDialog, setShowExportDialog] = useState(false)
   const [showImportFromHistoryDialog, setShowImportFromHistoryDialog] = useState(false)
@@ -123,6 +124,14 @@ export default function ClassesPage() {
   const [importWarnings, setImportWarnings] = useState<string[]>([])
   const undoToastId = useRef<string | null>(null)
   const pendingDeletes = useRef<Map<string, NodeJS.Timeout>>(new Map())
+  const initialLoadDone = useRef(false)
+
+  // Unlock table when classes are modified after initial load
+  useEffect(() => {
+    if (initialLoadDone.current) {
+      setTableLocked(false)
+    }
+  }, [classes])
 
   useEffect(() => {
     loadData()
@@ -178,29 +187,41 @@ export default function ClassesPage() {
         })
         setClasses(sorted)
 
-        // Fetch last saved generation for this quarter from the database
+        // Fetch last saved generation: prefer starred, fall back to most recent
         try {
-          const historyRes = await fetch(`/api/history?quarter_id=${active.id}&limit=1`)
-          if (historyRes.ok) {
-            const historyData = await historyRes.json()
-            if (historyData.length > 0) {
-              const lastGen = historyData[0]
-              const diffMs = Date.now() - new Date(lastGen.generated_at).getTime()
-              const hoursAgo = diffMs / (1000 * 60 * 60)
-              // Only show if within 48 hours
-              if (hoursAgo <= 48) {
-                const bestOption = lastGen.options?.[0]
-                setLastRun({
-                  historyId: lastGen.id,
-                  timestamp: lastGen.generated_at,
-                  quarterId: active.id,
-                  quarterName: active.name,
-                  studyHallsPlaced: bestOption?.studyHallsPlaced ?? 0,
-                  backToBackIssues: bestOption?.backToBackIssues ?? 0,
-                  starred: lastGen.is_starred ?? false,
-                })
-              }
+          let lastGen = null
+          // Try starred first
+          const starredRes = await fetch(`/api/history?quarter_id=${active.id}&limit=1&starred_only=true`)
+          if (starredRes.ok) {
+            const starredData = await starredRes.json()
+            if (starredData.length > 0) lastGen = starredData[0]
+          }
+          // Fall back to most recent
+          if (!lastGen) {
+            const historyRes = await fetch(`/api/history?quarter_id=${active.id}&limit=1`)
+            if (historyRes.ok) {
+              const historyData = await historyRes.json()
+              if (historyData.length > 0) lastGen = historyData[0]
             }
+          }
+          if (lastGen) {
+            const bestOption = lastGen.options?.[0]
+            setLastRun({
+              historyId: lastGen.id,
+              timestamp: lastGen.generated_at,
+              quarterId: active.id,
+              quarterName: active.name,
+              studyHallsPlaced: bestOption?.studyHallsPlaced ?? 0,
+              backToBackIssues: bestOption?.backToBackIssues ?? 0,
+              starred: lastGen.is_starred ?? false,
+            })
+            // Lock table only if no classes were modified after the schedule was generated
+            const generatedAt = new Date(lastGen.generated_at).getTime()
+            const maxUpdatedAt = classesData.reduce((max: number, c: { updated_at?: string; created_at?: string }) => {
+              const t = new Date(c.updated_at || c.created_at || 0).getTime()
+              return t > max ? t : max
+            }, 0)
+            setTableLocked(maxUpdatedAt <= generatedAt)
           }
         } catch (e) {
           // Ignore history fetch errors
@@ -210,6 +231,7 @@ export default function ClassesPage() {
       toast.error("Failed to load data")
     } finally {
       setLoading(false)
+      initialLoadDone.current = true
     }
   }
 
@@ -1792,16 +1814,26 @@ Maria\t6th-11th Elective\tSpanish 101\t1\tMon Block 5`}
       </div>
 
       {showLastRunNotice && (
-        <div className="mb-4 flex items-center gap-2 px-3 py-2 rounded-lg bg-sky-50 border border-sky-200 text-sm text-sky-700">
-          <Clock className="h-4 w-4 flex-shrink-0" />
-          <span>
-            You generated a schedule for these classes{" "}
-            <span className="font-medium">{formatTimeAgo(lastRun.timestamp)}</span>.
-          </span>
-          <Link href={`/history/${lastRun.historyId}`} className="ml-auto text-sky-600 hover:text-sky-800 font-medium">
-            View results →
-          </Link>
-        </div>
+        lastRun.starred ? (
+          <div className="mb-4 flex items-center gap-2 px-3 py-2 rounded-lg bg-amber-50 border border-amber-200 text-sm text-amber-700">
+            <Star className="h-4 w-4 flex-shrink-0 fill-amber-400 text-amber-400" />
+            <span>You have a starred schedule for these classes.</span>
+            <Link href={`/history/${lastRun.historyId}`} className="ml-auto text-amber-600 hover:text-amber-800 font-medium">
+              View results →
+            </Link>
+          </div>
+        ) : (
+          <div className="mb-4 flex items-center gap-2 px-3 py-2 rounded-lg bg-sky-50 border border-sky-200 text-sm text-sky-700">
+            <Clock className="h-4 w-4 flex-shrink-0" />
+            <span>
+              You generated a schedule for these classes{" "}
+              <span className="font-medium">{formatTimeAgo(lastRun.timestamp)}</span>.
+            </span>
+            <Link href={`/history/${lastRun.historyId}`} className="ml-auto text-sky-600 hover:text-sky-800 font-medium">
+              View results →
+            </Link>
+          </div>
+        )
       )}
 
 
@@ -1829,7 +1861,18 @@ Maria\t6th-11th Elective\tSpanish 101\t1\tMon Block 5`}
         </div>
       )}
 
-      <div className="border rounded-lg overflow-hidden bg-white shadow-sm">
+      <div className="relative border rounded-lg overflow-hidden bg-white shadow-sm">
+        {showLastRunNotice && tableLocked && (
+          <div className="absolute inset-0 z-20 bg-white/40 flex items-center justify-center">
+            <div className="flex flex-col items-center gap-3 bg-white/90 rounded-xl px-8 py-6 shadow-sm">
+              <Lock className="h-8 w-8 text-slate-400" />
+              <p className="text-sm font-medium text-slate-600">Classes are locked</p>
+              <Button variant="outline" size="sm" onClick={() => setTableLocked(false)}>
+                Unlock
+              </Button>
+            </div>
+          </div>
+        )}
         <div className="max-h-[calc(100vh-12rem)] overflow-auto">
           <table className="w-full text-sm border-collapse">
           <thead className="sticky top-0 bg-slate-50 z-10">

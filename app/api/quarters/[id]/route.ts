@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server"
 import { supabase } from "@/lib/supabase"
+import { formatQuarterName } from "@/lib/types"
 
 export async function PUT(
   request: NextRequest,
@@ -9,11 +10,23 @@ export async function PUT(
   const body = await request.json()
 
   const updates: Record<string, unknown> = {}
-  if (body.name !== undefined) updates.name = body.name
   if (body.year !== undefined) updates.year = body.year
   if (body.quarter_num !== undefined) updates.quarter_num = body.quarter_num
   if (body.start_date !== undefined) updates.start_date = body.start_date
   if (body.end_date !== undefined) updates.end_date = body.end_date
+
+  // Auto-regenerate name when year or quarter_num changes
+  if (body.year !== undefined || body.quarter_num !== undefined) {
+    // Fetch current values for fields not being updated
+    const { data: current } = await supabase.from("quarters").select("year, quarter_num").eq("id", id).single()
+    if (current) {
+      const year = body.year ?? current.year
+      const quarterNum = body.quarter_num ?? current.quarter_num
+      updates.name = formatQuarterName(quarterNum, year)
+    }
+  } else if (body.name !== undefined) {
+    updates.name = body.name
+  }
 
   const { data, error } = await supabase
     .from("quarters")

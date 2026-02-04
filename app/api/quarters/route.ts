@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server"
 import { supabase } from "@/lib/supabase"
+import { formatQuarterName } from "@/lib/types"
 
 export async function GET() {
   const { data, error } = await supabase
@@ -26,7 +27,7 @@ export async function POST(request: NextRequest) {
 
   const isFirst = !existing || existing.length === 0
 
-  const name = `Q${body.quarter_num} ${body.year}`
+  const name = formatQuarterName(body.quarter_num, body.year)
 
   // Create the new quarter
   const { data: newQuarter, error } = await supabase

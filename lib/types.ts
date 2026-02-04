@@ -51,6 +51,15 @@ export interface Quarter {
   isActive: boolean;
 }
 
+const QUARTER_SEASONS: Record<number, string> = { 1: 'Fall', 2: 'Winter', 3: 'Spring', 4: 'Summer' };
+
+/** Format a quarter name: "Q1 Fall 2025-26" */
+export function formatQuarterName(quarterNum: number, year: number): string {
+  const season = QUARTER_SEASONS[quarterNum] || `Q${quarterNum}`;
+  const nextYear = String(year + 1).slice(-2);
+  return `Q${quarterNum} ${season} ${year}-${nextYear}`;
+}
+
 export interface Rule {
   id: string;
   name: string;
@@ -120,6 +129,8 @@ export interface ScheduleOption {
   teacherStats: TeacherStat[];
   builtWithSnapshotVersion?: number; // Timestamp of snapshot this option was built with
   openBlockLabels?: OpenBlockLabels; // Custom display labels for OPEN blocks
+  label?: string; // Stable letter label (A, B, C) for version identification
+  updatedAt?: string; // ISO timestamp of last modification
 }
 
 // Lightweight solution for alternative browsing (no stats computed)

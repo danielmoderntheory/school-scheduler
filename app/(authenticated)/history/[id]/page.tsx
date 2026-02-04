@@ -7,7 +7,7 @@ import { Checkbox } from "@/components/ui/checkbox"
 import { ScheduleGrid } from "@/components/ScheduleGrid"
 import { ScheduleStats } from "@/components/ScheduleStats"
 import { GradeTimetable } from "@/components/GradeTimetable"
-import { Loader2, Download, ArrowLeft, Check, RefreshCw, Shuffle, Trash2, Star, MoreVertical, Users, GraduationCap, Printer, ArrowLeftRight, X, Hand, Pencil, Copy, ChevronDown, ChevronUp, AlertTriangle, Minus, Info, Crosshair, Clock, ImageDown } from "lucide-react"
+import { Loader2, Download, ArrowLeft, Check, RefreshCw, Shuffle, Trash2, Star, MoreVertical, Users, GraduationCap, Printer, ArrowLeftRight, X, Hand, Pencil, Copy, ChevronDown, ChevronUp, AlertTriangle, Minus, Info, Crosshair, Clock, ImageDown, Globe } from "lucide-react"
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -287,6 +287,30 @@ function analyzeTeacherGrades(schedule: TeacherSchedule): { primaryGrade: number
     hasPrimary: primaryGrades.length > 0,
     gradeSpread: gradeCounts.size
   }
+}
+
+/** Format a date as short relative/absolute: "2h ago", "3d ago", "Jan 28" */
+function formatShortDate(iso: string): string {
+  const date = new Date(iso)
+  const now = new Date()
+  const diffMs = now.getTime() - date.getTime()
+  const diffMins = Math.floor(diffMs / 60000)
+  if (diffMins < 60) return `${Math.max(1, diffMins)}m ago`
+  const diffHours = Math.floor(diffMins / 60)
+  if (diffHours < 24) return `${diffHours}h ago`
+  const diffDays = Math.floor(diffHours / 24)
+  if (diffDays < 7) return `${diffDays}d ago`
+  return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
+}
+
+/** Get the next available letter label (A, B, C...) given existing options */
+function getNextLabel(options: ScheduleOption[]): string {
+  const existingLabels = new Set(options.map(o => o.label).filter(Boolean))
+  let charCode = 65 // 'A'
+  while (existingLabels.has(String.fromCharCode(charCode))) {
+    charCode++
+  }
+  return String.fromCharCode(charCode)
 }
 
 interface Generation {
@@ -830,17 +854,60 @@ export default function HistoryDetailPage() {
       const res = await fetch(`/api/history/${id}`)
       if (res.ok) {
         const data = await res.json()
+
+        // Auto-assign stable letter labels to options that lack them
+        if (data.options?.length > 0) {
+          let needsSave = false
+          const existingLabels = new Set(data.options.map((o: ScheduleOption) => o.label).filter(Boolean))
+          let nextCharCode = 65 // 'A'
+          for (const opt of data.options) {
+            if (!opt.label) {
+              while (existingLabels.has(String.fromCharCode(nextCharCode))) {
+                nextCharCode++
+              }
+              opt.label = String.fromCharCode(nextCharCode)
+              existingLabels.add(opt.label)
+              nextCharCode++
+              needsSave = true
+            }
+            // Backfill updatedAt for legacy options
+            if (!opt.updatedAt) {
+              opt.updatedAt = data.generated_at
+              needsSave = true
+            }
+          }
+          if (needsSave) {
+            // Persist labels so they're stable on next load
+            fetch(`/api/history/${id}`, {
+              method: "PUT",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ options: data.options }),
+            }).catch(() => {}) // Fire and forget
+          }
+        }
+
         setGeneration(data)
 
-        // Check URL hash for revision number (e.g., #2 for Revision 2)
-        const hash = window.location.hash.replace('#', '')
-        const hashNum = parseInt(hash)
+        // Check URL hash for version label (e.g., #b for Version B)
+        // Also supports legacy numeric hashes (e.g., #2)
+        const hash = window.location.hash.replace('#', '').toLowerCase()
 
-        if (hash && !isNaN(hashNum) && hashNum >= 1 && hashNum <= (data.options?.length || 1)) {
-          // Use hash if valid
-          setViewingOption(hashNum.toString())
+        if (hash) {
+          // Try matching by label (e.g., "b" → Version B)
+          const labelIndex = data.options?.findIndex((o: ScheduleOption) => o.label?.toLowerCase() === hash)
+          if (labelIndex !== undefined && labelIndex >= 0) {
+            setViewingOption((labelIndex + 1).toString())
+          } else {
+            // Fallback: try legacy numeric hash
+            const hashNum = parseInt(hash)
+            if (!isNaN(hashNum) && hashNum >= 1 && hashNum <= (data.options?.length || 1)) {
+              setViewingOption(hashNum.toString())
+            } else if (data.selected_option) {
+              setViewingOption(data.selected_option.toString())
+            }
+          }
         } else if (data.selected_option) {
-          // Fall back to primary (selected) option
+          // Fall back to published option
           setViewingOption(data.selected_option.toString())
         }
       } else {
@@ -857,16 +924,21 @@ export default function HistoryDetailPage() {
   useEffect(() => {
     if (generation) {
       const shortId = generation.id.slice(0, 8)
-      document.title = `${generation.quarter?.name || 'Schedule'} Rev ${viewingOption} - ${shortId}`
+      const optIndex = parseInt(viewingOption) - 1
+      const isPrimary = generation.selected_option === parseInt(viewingOption) || (!generation.selected_option && viewingOption === "1")
+      const optLabel = generation.options?.[optIndex]?.label || viewingOption
+      const titleSuffix = isPrimary ? 'Published' : `Version ${optLabel}`
+      document.title = `${generation.quarter?.name || 'Schedule'} ${titleSuffix} - ${shortId}`
     }
   }, [generation, viewingOption])
 
-  // Update URL hash when viewing option changes (for shareable links to specific revisions)
-  // Skip for public view since only primary revision is shown
+  // Update URL hash when viewing option changes (e.g., #a, #b)
+  // Skip for public view since only published version is shown
   useEffect(() => {
     if (generation && viewingOption && isPublicView === false) {
-      // Use replaceState to update hash without adding to browser history
-      const newUrl = `${window.location.pathname}#${viewingOption}`
+      const optIndex = parseInt(viewingOption) - 1
+      const label = generation.options?.[optIndex]?.label?.toLowerCase() || viewingOption
+      const newUrl = `${window.location.pathname}#${label}`
       window.history.replaceState(null, '', newUrl)
     }
   }, [generation, viewingOption, isPublicView])
@@ -1785,24 +1857,32 @@ export default function HistoryDetailPage() {
       if (!saveAsNew) {
         // Update current option in place
         const optionIndex = parseInt(viewingOption) - 1
+        const currentLabel = generation.options[optionIndex]?.label
+        const isPrimary = (generation.selected_option || 1) === optionIndex + 1
+        const displayName = isPrimary ? 'Published' : `Version ${currentLabel}`
         updatedOptions = [...generation.options]
         updatedOptions[optionIndex] = {
           ...optionToSave,
           optionNumber: optionIndex + 1,
+          label: currentLabel,
+          updatedAt: new Date().toISOString(),
           ...(snapshotVersion && { builtWithSnapshotVersion: snapshotVersion }),
         }
         successMessage = previewType === "study-hall"
-          ? `Study halls reassigned for Rev ${optionIndex + 1}`
-          : `Rev ${optionIndex + 1} updated`
+          ? `Study halls reassigned for ${displayName}`
+          : `${displayName} updated`
       } else {
         // Save as new option
         const newOptionNumber = generation.options.length + 1
+        const newLabel = getNextLabel(generation.options)
         updatedOptions = [...generation.options, {
           ...optionToSave,
           optionNumber: newOptionNumber,
+          label: newLabel,
+          updatedAt: new Date().toISOString(),
           ...(snapshotVersion && { builtWithSnapshotVersion: snapshotVersion }),
         }]
-        successMessage = `Saved as Rev ${newOptionNumber}`
+        successMessage = `Saved as Version ${newLabel}`
       }
 
       // Use the pre-built stats (with updated snapshots if using current classes)
@@ -2519,15 +2599,17 @@ export default function HistoryDetailPage() {
     }
 
     const optionNum = optionIndex + 1
-    if (!confirm(`Delete Revision ${optionNum}? This cannot be undone.`)) {
+    const deletedLabel = generation.options[optionIndex]?.label || String.fromCharCode(65 + optionIndex)
+    const isPrimary = (generation.selected_option || 1) === optionNum
+    const deleteLabel = isPrimary ? 'Published' : `Version ${deletedLabel}`
+    if (!confirm(`Delete ${deleteLabel}? This cannot be undone.`)) {
       return
     }
 
     try {
-      // Remove the option and renumber remaining ones
+      // Remove the option — keep labels intact (no renumbering)
       const updatedOptions = generation.options
         .filter((_, i) => i !== optionIndex)
-        .map((opt, i) => ({ ...opt, optionNumber: i + 1 }))
 
       // Check if we're deleting the PRIMARY revision (generation.selected_option)
       const primaryRevision = generation.selected_option || 1
@@ -2536,7 +2618,7 @@ export default function HistoryDetailPage() {
       if (primaryRevision === optionNum) {
         // Deleting the primary - pick a new one (prefer previous, fall back to first)
         if (optionIndex > 0) {
-          newPrimaryRevision = optionIndex // Previous option (now renumbered)
+          newPrimaryRevision = optionIndex // Previous option (now at this index)
         } else {
           newPrimaryRevision = 1 // First remaining option
         }
@@ -2564,22 +2646,18 @@ export default function HistoryDetailPage() {
         const currentSelection = parseInt(viewingOption)
         if (currentSelection === optionNum) {
           // Deleted the viewed tab - switch to nearest revision
-          // Prefer previous option (smaller number), fall back to next
           let newSelection: string
           if (optionIndex > 0) {
-            // There's an option before the deleted one - select it
             newSelection = optionIndex.toString()
           } else {
-            // No option before, select the first one (was second, now first)
             newSelection = "1"
           }
           setViewingOption(newSelection)
         } else if (currentSelection > optionNum) {
-          // Adjust tab selection if we deleted an earlier option
           const newSelection = (currentSelection - 1).toString()
           setViewingOption(newSelection)
         }
-        toast(`Deleted Revision ${optionNum}`, { icon: successIcon })
+        toast(`Deleted ${deleteLabel}`, { icon: successIcon })
       } else {
         toast.error("Failed to delete option")
       }
@@ -2717,6 +2795,8 @@ export default function HistoryDetailPage() {
       // Deep copy the current revision
       const duplicatedOption = JSON.parse(JSON.stringify(selectedResult))
       duplicatedOption.optionNumber = generation.options.length + 1
+      duplicatedOption.label = getNextLabel(generation.options)
+      duplicatedOption.updatedAt = new Date().toISOString()
 
       const updatedOptions = [...generation.options, duplicatedOption]
 
@@ -2730,13 +2810,13 @@ export default function HistoryDetailPage() {
         setGeneration({ ...generation, options: updatedOptions })
         // Switch to the new revision
         setViewingOption(updatedOptions.length.toString())
-        toast(`Created Revision ${updatedOptions.length}`, { icon: successIcon })
+        toast(`Created Version ${duplicatedOption.label}`, { icon: successIcon })
       } else {
-        toast.error("Failed to duplicate revision")
+        toast.error("Failed to duplicate version")
       }
     } catch (error) {
-      console.error('Duplicate revision error:', error)
-      toast.error("Failed to duplicate revision")
+      console.error('Duplicate version error:', error)
+      toast.error("Failed to duplicate version")
     }
   }
 
@@ -2754,7 +2834,8 @@ export default function HistoryDetailPage() {
 
       if (updateRes.ok) {
         setGeneration({ ...generation, selected_option: optionNum })
-        toast(`Rev ${optionNum} set as Primary`, { icon: successIcon })
+        const optLabel = generation.options[optionNum - 1]?.label || String.fromCharCode(64 + optionNum)
+        toast(`Version ${optLabel} published`, { icon: successIcon })
       } else {
         toast.error("Failed to update selection")
       }
@@ -3427,14 +3508,19 @@ export default function HistoryDetailPage() {
       let successMessage: string
       let newOptionNumber: string | null = null
 
+      updatedOption.updatedAt = new Date().toISOString()
       if (createNew) {
+        const newLabel = getNextLabel(generation.options)
+        updatedOption.label = newLabel
         updatedOptions = [...generation.options, updatedOption]
-        successMessage = `Saved ${swapCount} swap${swapCount !== 1 ? 's' : ''} as Rev ${generation.options.length + 1}`
+        successMessage = `Saved ${swapCount} swap${swapCount !== 1 ? 's' : ''} as Version ${newLabel}`
         newOptionNumber = (generation.options.length + 1).toString()
       } else {
         updatedOptions = [...generation.options]
         updatedOptions[optionIndex] = updatedOption
-        successMessage = `Applied ${swapCount} swap${swapCount !== 1 ? 's' : ''} to Rev ${viewingOption}`
+        const isPrimary = (generation.selected_option || 1) === optionIndex + 1
+        const displayName = isPrimary ? 'Published' : `Version ${generation.options[optionIndex]?.label || viewingOption}`
+        successMessage = `Applied ${swapCount} swap${swapCount !== 1 ? 's' : ''} to ${displayName}`
       }
 
       try {
@@ -5969,6 +6055,7 @@ export default function HistoryDetailPage() {
       ...selectedResult,
       teacherSchedules: repairPreview.teacherSchedules,
       gradeSchedules: repairPreview.gradeSchedules,
+      updatedAt: new Date().toISOString(),
     }
 
     // Update options array
@@ -6376,12 +6463,15 @@ export default function HistoryDetailPage() {
       let updatedOptions: ScheduleOption[]
       let newOptionIndex: number
 
+      updatedOption.updatedAt = new Date().toISOString()
       if (createNew) {
         // Append as new option
+        updatedOption.label = getNextLabel(generation.options)
         updatedOptions = [...generation.options, updatedOption]
         newOptionIndex = updatedOptions.length
       } else {
-        // Overwrite current option
+        // Overwrite current option — preserve label
+        updatedOption.label = generation.options[optionIndex]?.label
         updatedOptions = [...generation.options]
         updatedOptions[optionIndex] = updatedOption
         newOptionIndex = optionIndex + 1
@@ -6416,9 +6506,12 @@ export default function HistoryDetailPage() {
           const moveCount = floatingBlocks.length
           const transferCount = pendingTransfers.length
           const transferSuffix = transferCount > 0 ? ` (${transferCount} transfer${transferCount !== 1 ? 's' : ''})` : ''
+          const newLabel = updatedOptions[newOptionIndex - 1]?.label || ''
+          const isPrimaryOpt = (generation.selected_option || 1) === newOptionIndex
+          const displayOpt = createNew ? `Version ${newLabel}` : (isPrimaryOpt ? 'Published' : `Version ${newLabel}`)
           const message = createNew
-            ? `Created Rev ${newOptionIndex} with ${moveCount} change${moveCount !== 1 ? 's' : ''}${transferSuffix}`
-            : `Applied ${moveCount} change${moveCount !== 1 ? 's' : ''} to Rev ${viewingOption}${transferSuffix}`
+            ? `Created ${displayOpt} with ${moveCount} change${moveCount !== 1 ? 's' : ''}${transferSuffix}`
+            : `Applied ${moveCount} change${moveCount !== 1 ? 's' : ''} to ${displayOpt}${transferSuffix}`
 
           // Dismiss any existing undo toast
           if (undoToastId.current) toast.dismiss(undoToastId.current)
@@ -6579,20 +6672,15 @@ export default function HistoryDetailPage() {
           <div className="flex items-center gap-3 text-sm text-muted-foreground">
             <span>{new Date(generation.generated_at).toLocaleString()}</span>
             <span className="text-slate-300">{generation.id.slice(0, 8)}</span>
-            {generation.notes && (
-              <span className="text-slate-600 italic">
-                — &ldquo;{generation.notes}&rdquo;
-              </span>
-            )}
           </div>
         </div>
 
-        {/* Revision indicator and Print button */}
+        {/* Published indicator and Print button */}
         <div className="flex items-center justify-between mb-4 no-print">
           <div className="inline-flex rounded-lg bg-gray-100 p-1">
             <span className="px-3 py-1.5 rounded-md text-sm bg-white text-gray-900 shadow-sm font-medium flex items-center gap-1.5">
               <Check className="h-3.5 w-3.5 text-emerald-600" />
-              Revision {generation.selected_option || 1}
+              Published
             </span>
           </div>
           <DropdownMenu>
@@ -6631,7 +6719,7 @@ export default function HistoryDetailPage() {
                 const url = `${window.location.origin}/history/${id}${viewMode !== "teacher" ? `?view=${viewMode}` : ""}`
                 navigator.clipboard.writeText(url)
                 const viewLabel = viewMode === "timetable" ? "Timetable" : viewMode === "teacher" ? "Teacher" : "Grade"
-                toast.success(`${viewLabel} view link copied`)
+                toast.success(`${viewLabel} view link copied — shows published version`)
               }}
             >
               <Copy className="h-3.5 w-3.5" />
@@ -6787,25 +6875,27 @@ export default function HistoryDetailPage() {
         <div className="flex items-center gap-3 text-sm text-muted-foreground">
           <span>{new Date(generation.generated_at).toLocaleString()}</span>
           <span className="text-slate-300">{generation.id.slice(0, 8)}</span>
-          {generation.notes ? (
-            <span className="text-slate-600 italic no-print group">
-              — &ldquo;{generation.notes}&rdquo;
+          {userRole === "admin" && (
+            generation.notes ? (
+              <span className="text-slate-600 italic no-print group">
+                — &ldquo;{generation.notes}&rdquo;
+                <button
+                  onClick={() => openStarDialog(true)}
+                  className="ml-1 opacity-0 group-hover:opacity-100 text-slate-400 hover:text-slate-600 transition-opacity"
+                  title="Edit note"
+                >
+                  <Pencil className="h-3 w-3 inline" />
+                </button>
+              </span>
+            ) : (
               <button
                 onClick={() => openStarDialog(true)}
-                className="ml-1 opacity-0 group-hover:opacity-100 text-slate-400 hover:text-slate-600 transition-opacity"
-                title="Edit note"
+                className="text-slate-400 hover:text-slate-600 no-print"
+                title="Add note"
               >
-                <Pencil className="h-3 w-3 inline" />
+                <span className="text-xs">+ Add note</span>
               </button>
-            </span>
-          ) : (
-            <button
-              onClick={() => openStarDialog(true)}
-              className="text-slate-400 hover:text-slate-600 no-print"
-              title="Add note"
-            >
-              <span className="text-xs">+ Add note</span>
-            </button>
+            )
           )}
         </div>
       </div>
@@ -6813,62 +6903,97 @@ export default function HistoryDetailPage() {
       {generation.options && generation.options.length > 0 && (
         <div className="space-y-6">
           <div className="flex items-center justify-between no-print sticky top-0 z-10 bg-white py-2 -mt-2">
-            <div className="flex flex-col gap-1">
-              <div className="inline-flex rounded-lg bg-gray-100 p-1">
-                {generation.options.map((opt, i) => {
-                  const isThisOption = viewingOption === (i + 1).toString()
-                  const isActive = isThisOption && (!previewOption || !showingPreview)
-                  const isSelected = generation.selected_option === i + 1
-                  // Disable switching options while in an edit mode
-                  const inEditMode = swapMode || freeformMode || studyHallMode || regenMode
-                  // During preview, allow clicking current option to toggle to original view
-                  const isClickable = !isGenerating && !inEditMode && (!previewOption || isThisOption)
-                  // Health status: green (perfect), yellow (incomplete), red (conflicts)
-                  const healthStatus = optionHealthStatuses[i] || 'yellow'
-                  const healthColor = healthStatus === 'green'
-                    ? 'bg-emerald-500'
-                    : healthStatus === 'yellow'
-                      ? 'bg-amber-400'
-                      : 'bg-red-500'
-                  const healthTitle = healthStatus === 'green'
-                    ? 'Complete schedule with no conflicts'
-                    : healthStatus === 'yellow'
-                      ? 'Incomplete schedule (missing blocks, grades, or study halls)'
-                      : 'Schedule has conflicts'
-                  return (
-                    <button
-                      key={i}
-                      onClick={() => {
-                        if (previewOption && isThisOption) {
-                          setShowingPreview(false)
-                        } else {
-                          setViewingOption((i + 1).toString())
-                        }
-                      }}
-                      disabled={!isClickable}
-                      title={inEditMode ? "Exit current mode before switching options" : healthTitle}
-                      className={`
-                        px-3 py-1.5 rounded-md text-sm transition-all flex items-center gap-1.5
-                        ${isActive
-                          ? 'bg-white text-gray-900 shadow-sm font-medium'
-                          : isSelected
-                            ? 'text-gray-600 hover:text-gray-900 font-medium'
-                            : 'text-gray-400 hover:text-gray-600 font-normal'
-                        }
-                        disabled:opacity-50 disabled:cursor-not-allowed
-                      `}
-                    >
-                      {isSelected && (
-                        <Check className="h-3.5 w-3.5 text-emerald-600" />
-                      )}
-                      <span className="hidden lg:inline">Revision {i + 1}</span>
-                      <span className="lg:hidden">Rev {i + 1}</span>
-                      <span className={`w-2 h-2 rounded-full ${healthColor}`} title={healthTitle} />
-                    </button>
-                  )
-                })}
-              </div>
-            </div>
+            {(() => {
+              const primaryIndex = (generation.selected_option || 1) - 1
+              const viewingIndex = parseInt(viewingOption) - 1
+              const viewingPrimary = viewingIndex === primaryIndex
+              const inEditMode = swapMode || freeformMode || studyHallMode || regenMode
+              const currentLabel = generation.options[viewingIndex]?.label || ''
+              const hasMultiple = generation.options.length > 1
+
+              return (
+                <div className="flex items-center gap-3">
+                  {hasMultiple ? (
+                    <DropdownMenu>
+                      <DropdownMenuTrigger asChild>
+                        <button
+                          disabled={isGenerating || inEditMode}
+                          className="px-2.5 py-1.5 rounded-md text-sm bg-white text-gray-900 font-medium ring-1 ring-gray-300 hover:ring-gray-400 flex items-center gap-1.5 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+                        >
+                          {viewingPrimary ? (
+                            <>
+                              <Check className="h-3.5 w-3.5 text-emerald-600" />
+                              Published
+                            </>
+                          ) : (
+                            `Version ${currentLabel}`
+                          )}
+                          <ChevronDown className="h-3 w-3 text-gray-400" />
+                        </button>
+                      </DropdownMenuTrigger>
+                      <DropdownMenuContent align="start">
+                        {generation.options.map((opt, i) => {
+                          const isPublished = i === primaryIndex
+                          const healthStatus = optionHealthStatuses[i] || 'yellow'
+                          const healthColor = healthStatus === 'green'
+                            ? 'bg-emerald-500'
+                            : healthStatus === 'yellow'
+                              ? 'bg-amber-400'
+                              : 'bg-red-500'
+                          const healthTitle = healthStatus === 'green'
+                            ? 'Complete schedule with no conflicts'
+                            : healthStatus === 'yellow'
+                              ? 'Incomplete schedule (missing blocks, grades, or study halls)'
+                              : 'Schedule has conflicts'
+                          const isViewing = viewingIndex === i
+                          return (
+                            <DropdownMenuItem
+                              key={i}
+                              onClick={() => setViewingOption((i + 1).toString())}
+                              className={isViewing ? 'bg-gray-100' : ''}
+                            >
+                              <span className="flex items-center gap-2 w-full">
+                                Version {opt.label || String.fromCharCode(65 + i)}
+                                {isPublished ? (
+                                  <span className="text-[10px] font-medium text-emerald-700 bg-emerald-50 border border-emerald-200 rounded px-1 py-0.5 leading-none">
+                                    Published
+                                  </span>
+                                ) : opt.updatedAt && (
+                                  <span className="text-[10px] text-muted-foreground">
+                                    {formatShortDate(opt.updatedAt)}
+                                  </span>
+                                )}
+                                <span className={`w-2 h-2 rounded-full ${healthColor} ml-auto`} title={healthTitle} />
+                              </span>
+                            </DropdownMenuItem>
+                          )
+                        })}
+                      </DropdownMenuContent>
+                    </DropdownMenu>
+                  ) : (
+                    <span className="px-2.5 py-1.5 rounded-md text-sm bg-white text-gray-900 font-medium ring-1 ring-gray-300 flex items-center gap-1.5">
+                      <Check className="h-3.5 w-3.5 text-emerald-600" />
+                      Published
+                    </span>
+                  )}
+
+                  {/* Draft tag + nudge when viewing a non-published version */}
+                  {!viewingPrimary && (
+                    <>
+                      <span
+                        className="text-[11px] font-medium text-amber-700 bg-amber-50 border border-amber-200 rounded px-1.5 py-0.5 leading-none"
+                        title="Only the published version is shared on public links"
+                      >
+                        Draft
+                      </span>
+                      <span className="text-xs text-muted-foreground">
+                        Not visible on shared links
+                      </span>
+                    </>
+                  )}
+                </div>
+              )
+            })()}
 
             <div className="flex items-center gap-2 no-print">
               {/* Export dropdown - hidden during modes */}
@@ -6914,7 +7039,7 @@ export default function HistoryDetailPage() {
                   size="sm"
                   onClick={() => setShowChangesDialog(true)}
                   className="gap-1.5 text-amber-700 border-amber-300 bg-amber-50 hover:bg-amber-100 no-print"
-                  title={snapshotNeedsUpdate ? classChanges?.summary : 'This revision needs to be aligned with updated classes'}
+                  title={snapshotNeedsUpdate ? classChanges?.summary : 'This version needs to be aligned with updated classes'}
                 >
                   <AlertTriangle className="h-3.5 w-3.5" />
                   <span className="text-xs">
@@ -6970,12 +7095,12 @@ export default function HistoryDetailPage() {
                     </DropdownMenuSub>
                     <DropdownMenuItem onClick={handleDuplicateRevision} disabled={regenMode || swapMode || freeformMode || studyHallMode || repairMode}>
                       <Copy className="h-4 w-4 mr-2" />
-                      Duplicate Revision
+                      Duplicate Version
                     </DropdownMenuItem>
                     {generation.selected_option !== parseInt(viewingOption) && !previewOption && (
                       <DropdownMenuItem onClick={handleMarkAsSelected}>
-                        <Star className="h-4 w-4 mr-2" />
-                        Mark as Selected
+                        <Globe className="h-4 w-4 mr-2" />
+                        Publish This Version
                       </DropdownMenuItem>
                     )}
                     {generation.options.length > 1 && !previewOption && (
@@ -6986,7 +7111,11 @@ export default function HistoryDetailPage() {
                           className="text-red-600 focus:text-red-600"
                         >
                           <Trash2 className="h-4 w-4 mr-2" />
-                          Delete Revision {viewingOption}
+                          Delete {(() => {
+                            const idx = parseInt(viewingOption) - 1
+                            const isPrimary = (generation.selected_option || 1) === parseInt(viewingOption)
+                            return isPrimary ? 'Published' : `Version ${generation.options[idx]?.label || viewingOption}`
+                          })()}
                         </DropdownMenuItem>
                       </>
                     )}
@@ -7109,7 +7238,7 @@ export default function HistoryDetailPage() {
                       className="text-amber-600/70 hover:text-amber-700 cursor-pointer select-none"
                       title="Click to toggle"
                     >
-                      {shouldCreateNew ? 'Save as new revision' : `Update Revision ${viewingOption}`}
+                      {shouldCreateNew ? 'Save as new version' : 'Update ' + ((generation.selected_option || 1) === parseInt(viewingOption) ? 'Published' : 'Version ' + (generation.options[parseInt(viewingOption) - 1]?.label || viewingOption))}
                     </button>
                   </div>
                   {/* Validation errors list */}
@@ -7267,7 +7396,7 @@ export default function HistoryDetailPage() {
                       className="text-indigo-600/70 hover:text-indigo-700 cursor-pointer select-none"
                       title="Click to toggle"
                     >
-                      {shouldCreateNew ? 'Save as new revision' : `Update Revision ${viewingOption}`}
+                      {shouldCreateNew ? 'Save as new version' : 'Update ' + ((generation.selected_option || 1) === parseInt(viewingOption) ? 'Published' : 'Version ' + (generation.options[parseInt(viewingOption) - 1]?.label || viewingOption))}
                     </button>
                   </div>
                   {/* Two-column area: Conflicts (left) + Grade Schedule (right) */}
@@ -7552,7 +7681,7 @@ export default function HistoryDetailPage() {
                       className="text-violet-600/70 hover:text-violet-700 cursor-pointer select-none"
                       title="Click to toggle"
                     >
-                      {shouldCreateNew ? 'Save as new revision' : `Update Revision ${viewingOption}`}
+                      {shouldCreateNew ? 'Save as new version' : 'Update ' + ((generation.selected_option || 1) === parseInt(viewingOption) ? 'Published' : 'Version ' + (generation.options[parseInt(viewingOption) - 1]?.label || viewingOption))}
                     </button>
                   </div>
                   {/* Unplaced study halls validation */}
@@ -8005,7 +8134,7 @@ export default function HistoryDetailPage() {
                           className="text-sky-600/70 hover:text-sky-700 cursor-pointer select-none"
                           title="Click to toggle"
                         >
-                          {shouldCreateNew ? 'Save as new revision' : `Update Revision ${viewingOption}`}
+                          {shouldCreateNew ? 'Save as new version' : 'Update ' + ((generation.selected_option || 1) === parseInt(viewingOption) ? 'Published' : 'Version ' + (generation.options[parseInt(viewingOption) - 1]?.label || viewingOption))}
                         </button>
                       </div>
                       {/* Validation errors and soft warnings */}
@@ -8091,7 +8220,7 @@ export default function HistoryDetailPage() {
                         const url = `${window.location.origin}/history/${id}${viewMode !== "teacher" ? `?view=${viewMode}` : ""}`
                         navigator.clipboard.writeText(url)
                         const viewLabel = viewMode === "timetable" ? "Timetable" : viewMode === "teacher" ? "Teacher" : "Grade"
-                        toast.success(`${viewLabel} view link copied`)
+                        toast.success(`${viewLabel} view link copied — shows published version`)
                       }}
                     >
                       <Copy className="h-3.5 w-3.5" />
@@ -8399,7 +8528,7 @@ export default function HistoryDetailPage() {
           <AlertDialogHeader>
             <AlertDialogTitle className="flex items-center gap-2">
               <AlertTriangle className="h-5 w-5 text-amber-600" />
-              {snapshotNeedsUpdate ? 'Classes have changed' : 'Revision needs alignment'}
+              {snapshotNeedsUpdate ? 'Classes have changed' : 'Version needs alignment'}
             </AlertDialogTitle>
             <AlertDialogDescription asChild>
               <div className="space-y-3">
@@ -8436,7 +8565,7 @@ export default function HistoryDetailPage() {
                 ) : (
                   <>
                     <p>
-                      Another revision has been updated with the latest class configuration. This revision still uses the older configuration.
+                      Another version has been updated with the latest class configuration. This version still uses the older configuration.
                     </p>
                     {generation?.stats?.snapshotAffectedTeachers && generation.stats.snapshotAffectedTeachers.length > 0 && (
                       <p className="text-sm">
@@ -8448,7 +8577,7 @@ export default function HistoryDetailPage() {
                 <p className="text-sm text-slate-500">
                   {snapshotNeedsUpdate
                     ? 'You can apply these changes by regenerating affected teachers, or keep the schedule unchanged.'
-                    : 'You can align this revision by regenerating teachers, or keep it unchanged.'}
+                    : 'You can align this version by regenerating teachers, or keep it unchanged.'}
                 </p>
               </div>
             </AlertDialogDescription>
@@ -8809,7 +8938,7 @@ export default function HistoryDetailPage() {
               Review Class Transfers
             </DialogTitle>
             <DialogDescription>
-              The following class transfers will be applied to this schedule (Revision {viewingOption}).
+              The following class transfers will be applied to this schedule.
             </DialogDescription>
           </DialogHeader>
           <div className="py-4 space-y-2 max-h-[40vh] overflow-y-auto">
