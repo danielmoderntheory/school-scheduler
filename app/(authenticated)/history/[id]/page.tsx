@@ -6,7 +6,8 @@ import { Button } from "@/components/ui/button"
 import { Checkbox } from "@/components/ui/checkbox"
 import { ScheduleGrid } from "@/components/ScheduleGrid"
 import { ScheduleStats } from "@/components/ScheduleStats"
-import { Loader2, Download, ArrowLeft, Check, CheckCircle, AlertCircle, RefreshCw, Shuffle, Trash2, Star, MoreVertical, Users, GraduationCap, Printer, ArrowLeftRight, X, Hand, Pencil, Copy, ChevronDown, ChevronUp, AlertTriangle, Minus, Info, Crosshair } from "lucide-react"
+import { GradeTimetable } from "@/components/GradeTimetable"
+import { Loader2, Download, ArrowLeft, Check, CheckCircle, AlertCircle, RefreshCw, Shuffle, Trash2, Star, MoreVertical, Users, GraduationCap, Printer, ArrowLeftRight, X, Hand, Pencil, Copy, ChevronDown, ChevronUp, AlertTriangle, Minus, Info, Crosshair, Clock } from "lucide-react"
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -35,7 +36,8 @@ import {
 import { Textarea } from "@/components/ui/textarea"
 import { Label } from "@/components/ui/label"
 import Link from "next/link"
-import type { ScheduleOption, TeacherSchedule, GradeSchedule, Teacher, FloatingBlock, PendingPlacement, ValidationError, CellLocation, ClassEntry, OpenBlockLabels, PendingTransfer } from "@/lib/types"
+import type { ScheduleOption, TeacherSchedule, GradeSchedule, Teacher, FloatingBlock, PendingPlacement, ValidationError, CellLocation, ClassEntry, OpenBlockLabels, PendingTransfer, TimetableTemplate } from "@/lib/types"
+import { resolveRowsForGrade } from "@/lib/timetable-utils"
 import { parseClassesFromSnapshot, parseTeachersFromSnapshot, parseRulesFromSnapshot, hasValidSnapshots, detectClassChanges, computeExpectedTeachingSessions, type GenerationStats, type ChangeDetectionResult, type CurrentClass, type ClassSnapshot, type TeacherSnapshot } from "@/lib/snapshot-utils"
 import { parseGradeDisplayToNumbers, parseGradeDisplayToNames, gradesOverlap, gradesEqual, gradeNumToDisplay, isClassElective, shouldIgnoreGradeConflict } from "@/lib/grade-utils"
 import { BLOCK_TYPE_OPEN, BLOCK_TYPE_STUDY_HALL, isOpenBlock, isStudyHall, isScheduledClass, isOccupiedBlock, entryIsOpen, entryIsOccupied, entryIsScheduledClass, isFullTime, setOpenBlockLabel, recalculateOptionStats } from "@/lib/schedule-utils"
@@ -310,7 +312,9 @@ export default function HistoryDetailPage() {
   const [generation, setGeneration] = useState<Generation | null>(null)
   const [loading, setLoading] = useState(true)
   const [viewingOption, setViewingOption] = useState("1")
-  const [viewMode, setViewMode] = useState<"teacher" | "grade">("teacher")
+  const [viewMode, setViewMode] = useState<"teacher" | "grade" | "timetable">("teacher")
+  const [timetableTemplate, setTimetableTemplate] = useState<TimetableTemplate | null>(null)
+  const [gradesData, setGradesData] = useState<{ id: string; display_name: string; sort_order: number; homeroom_teachers?: string }[]>([])
   const [saving, setSaving] = useState(false)
   const [isPublicView, setIsPublicView] = useState<boolean | null>(null) // null = checking, true = public, false = authenticated
   const [userRole, setUserRole] = useState<"admin" | "readonly" | null>(null) // User's auth role
@@ -726,6 +730,30 @@ export default function HistoryDetailPage() {
   useEffect(() => {
     loadGeneration()
   }, [id])
+
+  // Load timetable template + grades data for timetable view
+  useEffect(() => {
+    async function loadTimetableData() {
+      try {
+        const [templatesRes, gradesRes] = await Promise.all([
+          fetch('/api/timetable-templates'),
+          fetch('/api/grades'),
+        ])
+        const templates = await templatesRes.json()
+        const gradesRawData = await gradesRes.json()
+        if (templates.length > 0) setTimetableTemplate(templates[0])
+        setGradesData(gradesRawData.map((g: { id: string; display_name: string; sort_order: number; homeroom_teachers?: string }) => ({
+          id: g.id,
+          display_name: g.display_name,
+          sort_order: g.sort_order,
+          homeroom_teachers: g.homeroom_teachers,
+        })))
+      } catch {
+        // Non-critical: timetable view just won't be available
+      }
+    }
+    loadTimetableData()
+  }, [])
 
   // Remove 'new' query param after initial view so shared URLs don't include it
   // Wait for generation to load so the UI has applied defaultExpanded first
@@ -6564,82 +6592,119 @@ export default function HistoryDetailPage() {
         {/* View toggle */}
         <div className="flex items-center justify-between mb-4 no-print">
           <h3 className="font-semibold">
-            {viewMode === "teacher" ? "Teacher Schedules" : "Grade Schedules"}
+            {viewMode === "timetable" ? "Grade Timetables" : viewMode === "teacher" ? "Teacher Schedules" : "Grade Schedules"}
           </h3>
-          <div className="flex items-center gap-3">
-{/* Public view always shows labels (read-only) */}
+          <div className="flex items-center gap-1 border rounded-md p-0.5">
             <Button
-              variant="outline"
+              variant={viewMode === "teacher" ? "secondary" : "ghost"}
               size="sm"
-              onClick={() => setViewMode(viewMode === "teacher" ? "grade" : "teacher")}
-              className="gap-1.5"
+              onClick={() => setViewMode("teacher")}
+              className="gap-1"
             >
-              {viewMode === "teacher" ? (
-                <GraduationCap className="h-4 w-4" />
-              ) : (
-                <Users className="h-4 w-4" />
-              )}
-              View by {viewMode === "teacher" ? "Grade" : "Teacher"}
+              <Users className="h-4 w-4" />
+              Teacher
             </Button>
+            <Button
+              variant={viewMode === "grade" ? "secondary" : "ghost"}
+              size="sm"
+              onClick={() => setViewMode("grade")}
+              className="gap-1"
+            >
+              <GraduationCap className="h-4 w-4" />
+              Grade
+            </Button>
+            {timetableTemplate && (
+              <Button
+                variant={viewMode === "timetable" ? "secondary" : "ghost"}
+                size="sm"
+                onClick={() => setViewMode("timetable")}
+                className="gap-1"
+              >
+                <Clock className="h-4 w-4" />
+                Timetable
+              </Button>
+            )}
           </div>
         </div>
 
         {/* Schedule Grids */}
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 print-grid">
-          {viewMode === "teacher"
-            ? Object.entries(publicOption.teacherSchedules)
-                .sort(([teacherA, scheduleA], [teacherB, scheduleB]) => {
-                  const statA = publicOption.teacherStats.find(s => s.teacher === teacherA)
-                  const statB = publicOption.teacherStats.find(s => s.teacher === teacherB)
-                  const infoA = analyzeTeacherGrades(scheduleA)
-                  const infoB = analyzeTeacherGrades(scheduleB)
-
-                  // 1. Full-time before part-time
-                  if (statA?.status === 'full-time' && statB?.status !== 'full-time') return -1
-                  if (statA?.status !== 'full-time' && statB?.status === 'full-time') return 1
-
-                  // 2. Teachers with a primary grade before those without
-                  if (infoA.hasPrimary && !infoB.hasPrimary) return -1
-                  if (!infoA.hasPrimary && infoB.hasPrimary) return 1
-
-                  // 3. Sort by primary grade
-                  if (infoA.primaryGrade !== infoB.primaryGrade) {
-                    return infoA.primaryGrade - infoB.primaryGrade
-                  }
-
-                  // 4. Sort by grade spread
-                  if (infoA.gradeSpread !== infoB.gradeSpread) {
-                    return infoA.gradeSpread - infoB.gradeSpread
-                  }
-
-                  // 5. Alphabetical
-                  return teacherA.localeCompare(teacherB)
-                })
-                .map(([teacher, schedule]) => (
-                  <ScheduleGrid
-                    key={teacher}
-                    schedule={schedule}
-                    type="teacher"
-                    name={teacher}
-                    status={publicOption.teacherStats.find(s => s.teacher === teacher)?.status}
-                    classesSnapshot={generation?.stats?.classes_snapshot}
-                    openBlockLabels={publicOption.openBlockLabels}
-                    showOpenLabels={true}
+        {viewMode === "timetable" && timetableTemplate ? (
+          <div className="grid grid-cols-1 gap-4 print-grid">
+            {Object.entries(publicOption.gradeSchedules)
+              .filter(([grade]) => !grade.includes("Elective"))
+              .sort(([a], [b]) => gradeSort(a, b))
+              .map(([gradeName, schedule]) => {
+                const grade = gradesData.find(g => g.display_name === gradeName)
+                const resolved = resolveRowsForGrade(timetableTemplate.rows, grade?.id || '')
+                return (
+                  <GradeTimetable
+                    key={gradeName}
+                    gradeName={gradeName}
+                    gradeId={grade?.id || ''}
+                    homeroomTeachers={grade?.homeroom_teachers}
+                    templateRows={resolved}
+                    gradeSchedule={schedule}
                   />
-                ))
-            : Object.entries(publicOption.gradeSchedules)
-                .sort(([a], [b]) => gradeSort(a, b))
-                .map(([grade, schedule]) => (
-                  <ScheduleGrid
-                    key={grade}
-                    schedule={schedule}
-                    type="grade"
-                    name={grade}
-                    classesSnapshot={generation?.stats?.classes_snapshot}
-                  />
-                ))
-          }
-        </div>
+                )
+              })}
+          </div>
+        ) : (
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 print-grid">
+            {viewMode === "teacher"
+              ? Object.entries(publicOption.teacherSchedules)
+                  .sort(([teacherA, scheduleA], [teacherB, scheduleB]) => {
+                    const statA = publicOption.teacherStats.find(s => s.teacher === teacherA)
+                    const statB = publicOption.teacherStats.find(s => s.teacher === teacherB)
+                    const infoA = analyzeTeacherGrades(scheduleA)
+                    const infoB = analyzeTeacherGrades(scheduleB)
+
+                    // 1. Full-time before part-time
+                    if (statA?.status === 'full-time' && statB?.status !== 'full-time') return -1
+                    if (statA?.status !== 'full-time' && statB?.status === 'full-time') return 1
+
+                    // 2. Teachers with a primary grade before those without
+                    if (infoA.hasPrimary && !infoB.hasPrimary) return -1
+                    if (!infoA.hasPrimary && infoB.hasPrimary) return 1
+
+                    // 3. Sort by primary grade
+                    if (infoA.primaryGrade !== infoB.primaryGrade) {
+                      return infoA.primaryGrade - infoB.primaryGrade
+                    }
+
+                    // 4. Sort by grade spread
+                    if (infoA.gradeSpread !== infoB.gradeSpread) {
+                      return infoA.gradeSpread - infoB.gradeSpread
+                    }
+
+                    // 5. Alphabetical
+                    return teacherA.localeCompare(teacherB)
+                  })
+                  .map(([teacher, schedule]) => (
+                    <ScheduleGrid
+                      key={teacher}
+                      schedule={schedule}
+                      type="teacher"
+                      name={teacher}
+                      status={publicOption.teacherStats.find(s => s.teacher === teacher)?.status}
+                      classesSnapshot={generation?.stats?.classes_snapshot}
+                      openBlockLabels={publicOption.openBlockLabels}
+                      showOpenLabels={true}
+                    />
+                  ))
+              : Object.entries(publicOption.gradeSchedules)
+                  .sort(([a], [b]) => gradeSort(a, b))
+                  .map(([grade, schedule]) => (
+                    <ScheduleGrid
+                      key={grade}
+                      schedule={schedule}
+                      type="grade"
+                      name={grade}
+                      classesSnapshot={generation?.stats?.classes_snapshot}
+                    />
+                  ))
+            }
+          </div>
+        )}
       </div>
     )
   }
@@ -7941,7 +8006,7 @@ export default function HistoryDetailPage() {
               <div>
                 <div className="flex items-center justify-between mb-4">
                   <h3 className="font-semibold">
-                    {viewMode === "teacher" ? "Teacher Schedules" : "Grade Schedules"}
+                    {viewMode === "timetable" ? "Grade Timetables" : viewMode === "teacher" ? "Teacher Schedules" : "Grade Schedules"}
                   </h3>
                   <div className="flex items-center gap-3 no-print">
                     {/* Edit OPEN Labels toggle - only for admin users in teacher view, hidden during edit modes */}
@@ -7955,25 +8020,48 @@ export default function HistoryDetailPage() {
                         <span className="text-xs text-muted-foreground">Edit OPEN Labels</span>
                       </label>
                     )}
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      onClick={() => {
-                        setViewMode(viewMode === "teacher" ? "grade" : "teacher")
-                        // Clear swap state when switching views
-                        setSelectedCell(null)
-                        setValidTargets([])
-                      }}
-                      disabled={isGenerating}
-                      className="gap-1.5"
-                    >
-                      {viewMode === "teacher" ? (
-                        <GraduationCap className="h-4 w-4" />
-                      ) : (
+                    <div className="flex items-center gap-1 border rounded-md p-0.5">
+                      <Button
+                        variant={viewMode === "teacher" ? "secondary" : "ghost"}
+                        size="sm"
+                        onClick={() => {
+                          setViewMode("teacher")
+                          setSelectedCell(null)
+                          setValidTargets([])
+                        }}
+                        disabled={isGenerating}
+                        className="gap-1"
+                      >
                         <Users className="h-4 w-4" />
+                        Teacher
+                      </Button>
+                      <Button
+                        variant={viewMode === "grade" ? "secondary" : "ghost"}
+                        size="sm"
+                        onClick={() => {
+                          setViewMode("grade")
+                          setSelectedCell(null)
+                          setValidTargets([])
+                        }}
+                        disabled={isGenerating}
+                        className="gap-1"
+                      >
+                        <GraduationCap className="h-4 w-4" />
+                        Grade
+                      </Button>
+                      {timetableTemplate && (
+                        <Button
+                          variant={viewMode === "timetable" ? "secondary" : "ghost"}
+                          size="sm"
+                          onClick={() => setViewMode("timetable")}
+                          disabled={isGenerating}
+                          className="gap-1"
+                        >
+                          <Clock className="h-4 w-4" />
+                          Timetable
+                        </Button>
                       )}
-                      View by {viewMode === "teacher" ? "Grade" : "Teacher"}
-                    </Button>
+                    </div>
                   </div>
                 </div>
                 {/* Show message when in regen preview mode */}
@@ -8017,6 +8105,27 @@ export default function HistoryDetailPage() {
                     </>
                   )
                 })()}
+                {viewMode === "timetable" && timetableTemplate ? (
+                  <div className="grid grid-cols-1 gap-4 print-grid">
+                    {Object.entries(selectedResult.gradeSchedules)
+                      .filter(([grade]) => !grade.includes("Elective"))
+                      .sort(([a], [b]) => gradeSort(a, b))
+                      .map(([gradeName, schedule]) => {
+                        const grade = gradesData.find(g => g.display_name === gradeName)
+                        const resolved = resolveRowsForGrade(timetableTemplate.rows, grade?.id || '')
+                        return (
+                          <GradeTimetable
+                            key={gradeName}
+                            gradeName={gradeName}
+                            gradeId={grade?.id || ''}
+                            homeroomTeachers={grade?.homeroom_teachers}
+                            templateRows={resolved}
+                            gradeSchedule={schedule}
+                          />
+                        )
+                      })}
+                  </div>
+                ) : (
                 <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 print-grid">
                   {viewMode === "teacher"
                     ? Object.entries(selectedResult.teacherSchedules)
@@ -8199,6 +8308,7 @@ export default function HistoryDetailPage() {
                           />
                         ))}
                 </div>
+                )}
               </div>
             </div>
           )}

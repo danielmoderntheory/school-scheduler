@@ -12,7 +12,7 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
-import { Settings, Users, History, Cog, Heart, GraduationCap, BookOpen, LogIn, LogOut } from "lucide-react"
+import { Settings, Users, History, Cog, Heart, GraduationCap, BookOpen, LogIn, LogOut, Clock } from "lucide-react"
 import { DropdownMenuSeparator } from "@/components/ui/dropdown-menu"
 import { useGeneration } from "@/lib/generation-context"
 
@@ -25,6 +25,7 @@ const moreItems = [
   { href: "/teachers", label: "Teachers", icon: Users },
   { href: "/settings/grades", label: "Grades", icon: GraduationCap },
   { href: "/settings/subjects", label: "Subjects", icon: BookOpen },
+  { href: "/settings/timetable", label: "Timetable", icon: Clock },
   { href: "/rules", label: "Rules", icon: Cog },
   { href: "/history", label: "History", icon: History },
 ]

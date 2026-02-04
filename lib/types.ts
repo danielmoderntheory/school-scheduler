@@ -151,6 +151,26 @@ export type Block = typeof BLOCKS[number];
 // Grade type is now dynamic - grades come from the database
 export type Grade = string;
 
+// Timetable Template Types
+export type TimetableRowType = 'block' | 'break' | 'transition'
+
+export interface TimetableRow {
+  sort_order: number
+  time: string          // e.g. "8:20-9:20" or "2:45"
+  label: string         // e.g. "Block 1", "Lunch/Break"
+  type: TimetableRowType
+  blockNumber?: number  // Only for type='block': maps to schedule block 1-5
+  grade_ids?: string[]  // Grade UUIDs. Empty/absent = all grades.
+}
+
+export interface TimetableTemplate {
+  id: string
+  name: string
+  rows: TimetableRow[]
+  created_at?: string
+  updated_at?: string
+}
+
 // Freeform Mode Types
 export interface CellLocation {
   teacher: string;

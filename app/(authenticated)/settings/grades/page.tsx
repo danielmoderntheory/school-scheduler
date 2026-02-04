@@ -31,6 +31,7 @@ interface Grade {
   name: string
   display_name: string
   sort_order: number
+  homeroom_teachers?: string
 }
 
 export default function GradesSettingsPage() {
@@ -158,6 +159,7 @@ export default function GradesSettingsPage() {
                 <TableHead className="w-[50px]">Order</TableHead>
                 <TableHead className="w-[150px]">Name</TableHead>
                 <TableHead>Display Name</TableHead>
+                <TableHead>Homeroom Teachers</TableHead>
                 <TableHead className="w-[60px]"></TableHead>
               </TableRow>
             </TableHeader>
@@ -175,6 +177,14 @@ export default function GradesSettingsPage() {
                       value={grade.display_name}
                       onSave={(value) => updateGrade(grade.id, "display_name", value)}
                       saving={savingId === grade.id}
+                    />
+                  </TableCell>
+                  <TableCell>
+                    <EditableText
+                      value={grade.homeroom_teachers || ""}
+                      onSave={(value) => updateGrade(grade.id, "homeroom_teachers", value || null)}
+                      saving={savingId === grade.id}
+                      placeholder="e.g. Ms. Smith, Mr. Jones"
                     />
                   </TableCell>
                   <TableCell>
@@ -208,7 +218,7 @@ export default function GradesSettingsPage() {
               ))}
               {/* Add new grade row */}
               <TableRow>
-                <TableCell colSpan={4}>
+                <TableCell colSpan={5}>
                   <form
                     onSubmit={(e) => {
                       e.preventDefault()
