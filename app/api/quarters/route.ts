@@ -6,6 +6,7 @@ export async function GET() {
   const { data, error } = await supabase
     .from("quarters")
     .select("*")
+    .is("deleted_at", null)
     .order("year", { ascending: false })
     .order("quarter_num", { ascending: false })
 

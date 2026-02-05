@@ -30,7 +30,18 @@ import {
   AlertDialogTitle,
   AlertDialogTrigger,
 } from "@/components/ui/alert-dialog"
-import { Trash2, Loader2 } from "lucide-react"
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from "@/components/ui/tooltip"
+import {
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
+} from "@/components/ui/collapsible"
+import { Trash2, Loader2, RotateCcw, ChevronDown, Archive } from "lucide-react"
 import toast from "@/lib/toast"
 import { TEACHER_STATUS_FULL_TIME, TEACHER_STATUS_PART_TIME, type TeacherStatus } from "@/lib/schedule-utils"
 
@@ -42,16 +53,40 @@ interface Teacher {
   notes: string | null
 }
 
+interface ArchiveStatus {
+  entityId: string
+  canArchive: boolean
+  reason?: string
+}
+
+interface ArchivedTeacher {
+  id: string
+  name: string
+  deleted_at: string
+}
+
 export default function TeachersPage() {
   const [teachers, setTeachers] = useState<Teacher[]>([])
   const [loading, setLoading] = useState(true)
   const [savingId, setSavingId] = useState<string | null>(null)
   const [newTeacherName, setNewTeacherName] = useState("")
   const newTeacherRef = useRef<HTMLInputElement>(null)
+  const [archiveStatus, setArchiveStatus] = useState<Map<string, ArchiveStatus>>(new Map())
+  const [archiveStatusLoaded, setArchiveStatusLoaded] = useState(false)
+  const [archivedTeachers, setArchivedTeachers] = useState<ArchivedTeacher[]>([])
+  const [archivedOpen, setArchivedOpen] = useState(false)
+  const [restoringId, setRestoringId] = useState<string | null>(null)
 
   useEffect(() => {
     loadTeachers()
+    loadArchivedTeachers()
   }, [])
+
+  useEffect(() => {
+    if (teachers.length > 0) {
+      loadArchiveStatus()
+    }
+  }, [teachers])
 
   async function loadTeachers() {
     try {
@@ -64,6 +99,37 @@ export default function TeachersPage() {
       toast.error("Failed to load teachers")
     } finally {
       setLoading(false)
+    }
+  }
+
+  async function loadArchiveStatus() {
+    try {
+      const ids = teachers.map((t) => t.id).join(",")
+      const res = await fetch(`/api/archive-status?type=teacher&ids=${ids}`)
+      if (res.ok) {
+        const data: ArchiveStatus[] = await res.json()
+        const statusMap = new Map<string, ArchiveStatus>()
+        for (const status of data) {
+          statusMap.set(status.entityId, status)
+        }
+        setArchiveStatus(statusMap)
+      }
+    } catch (error) {
+      console.error("Failed to load archive status:", error)
+    } finally {
+      setArchiveStatusLoaded(true)
+    }
+  }
+
+  async function loadArchivedTeachers() {
+    try {
+      const res = await fetch("/api/archived?type=teacher")
+      if (res.ok) {
+        const data = await res.json()
+        setArchivedTeachers(data)
+      }
+    } catch (error) {
+      console.error("Failed to load archived teachers:", error)
     }
   }
 
@@ -115,17 +181,37 @@ export default function TeachersPage() {
     }
   }
 
-  async function deleteTeacher(id: string) {
+  async function archiveTeacher(id: string) {
     try {
       const res = await fetch(`/api/teachers/${id}`, { method: "DELETE" })
       if (res.ok) {
         setTeachers((prev) => prev.filter((t) => t.id !== id))
-        toast.success("Teacher deleted")
+        loadArchivedTeachers()
+        toast.success("Teacher archived")
       } else {
-        toast.error("Failed to delete teacher")
+        toast.error("Failed to archive teacher")
       }
     } catch (error) {
-      toast.error("Failed to delete teacher")
+      toast.error("Failed to archive teacher")
+    }
+  }
+
+  async function restoreTeacher(id: string) {
+    setRestoringId(id)
+    try {
+      const res = await fetch(`/api/teachers/${id}/restore`, { method: "POST" })
+      if (res.ok) {
+        const restored = await res.json()
+        setTeachers((prev) => [...prev, restored].sort((a, b) => a.name.localeCompare(b.name)))
+        setArchivedTeachers((prev) => prev.filter((t) => t.id !== id))
+        toast.success("Teacher restored")
+      } else {
+        toast.error("Failed to restore teacher")
+      }
+    } catch (error) {
+      toast.error("Failed to restore teacher")
+    } finally {
+      setRestoringId(null)
     }
   }
 
@@ -138,131 +224,215 @@ export default function TeachersPage() {
   }
 
   return (
-    <div className="max-w-6xl mx-auto p-8">
-      <div className="mb-6">
-        <h1 className="text-3xl font-bold mb-2">Teachers</h1>
-        <p className="text-muted-foreground">
-          Click any cell to edit. Changes save automatically on blur.
-        </p>
-      </div>
+    <TooltipProvider>
+      <div className="max-w-6xl mx-auto p-8">
+        <div className="mb-6">
+          <h1 className="text-3xl font-bold mb-2">Teachers</h1>
+          <p className="text-muted-foreground">
+            Click any cell to edit. Changes save automatically on blur.
+          </p>
+        </div>
 
-      <div className="border rounded-lg">
-        <Table>
-          <TableHeader>
-            <TableRow>
-              <TableHead className="w-[250px]">Name</TableHead>
-              <TableHead className="w-[150px]">Status</TableHead>
-              <TableHead className="w-[140px]">Exclude from Study Hall</TableHead>
-              <TableHead>Notes</TableHead>
-              <TableHead className="w-[60px]"></TableHead>
-            </TableRow>
-          </TableHeader>
-          <TableBody>
-            {teachers.map((teacher) => (
-              <TableRow key={teacher.id}>
-                <TableCell>
-                  <EditableText
-                    value={teacher.name}
-                    onSave={(value) => updateTeacher(teacher.id, "name", value)}
-                    saving={savingId === teacher.id}
-                  />
-                </TableCell>
-                <TableCell>
-                  <Select
-                    value={teacher.status}
-                    onValueChange={(value) =>
-                      updateTeacher(teacher.id, "status", value)
-                    }
+        <div className="border rounded-lg">
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead className="w-[250px]">Name</TableHead>
+                <TableHead className="w-[150px]">Status</TableHead>
+                <TableHead className="w-[140px]">Exclude from Study Hall</TableHead>
+                <TableHead>Notes</TableHead>
+                <TableHead className="w-[60px]"></TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {teachers.map((teacher) => {
+                const status = archiveStatus.get(teacher.id)
+                const canArchive = archiveStatusLoaded && status?.canArchive !== false
+
+                return (
+                  <TableRow key={teacher.id}>
+                    <TableCell>
+                      <EditableText
+                        value={teacher.name}
+                        onSave={(value) => updateTeacher(teacher.id, "name", value)}
+                        saving={savingId === teacher.id}
+                      />
+                    </TableCell>
+                    <TableCell>
+                      <Select
+                        value={teacher.status}
+                        onValueChange={(value) =>
+                          updateTeacher(teacher.id, "status", value)
+                        }
+                      >
+                        <SelectTrigger className="h-8 w-[130px]">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value={TEACHER_STATUS_FULL_TIME}>Full-time</SelectItem>
+                          <SelectItem value={TEACHER_STATUS_PART_TIME}>Part-time</SelectItem>
+                        </SelectContent>
+                      </Select>
+                    </TableCell>
+                    <TableCell>
+                      <Checkbox
+                        checked={teacher.can_supervise_study_hall === true}
+                        onCheckedChange={(checked) =>
+                          updateTeacher(
+                            teacher.id,
+                            "can_supervise_study_hall",
+                            checked  // checked = excluded = true
+                          )
+                        }
+                      />
+                    </TableCell>
+                    <TableCell>
+                      <EditableText
+                        value={teacher.notes || ""}
+                        onSave={(value) =>
+                          updateTeacher(teacher.id, "notes", value || null)
+                        }
+                        saving={savingId === teacher.id}
+                        placeholder="Add notes..."
+                      />
+                    </TableCell>
+                    <TableCell>
+                      {canArchive ? (
+                        <AlertDialog>
+                          <AlertDialogTrigger asChild>
+                            <Button variant="ghost" size="icon" className="h-8 w-8">
+                              <Trash2 className="h-4 w-4 text-muted-foreground hover:text-destructive" />
+                            </Button>
+                          </AlertDialogTrigger>
+                          <AlertDialogContent>
+                            <AlertDialogHeader>
+                              <AlertDialogTitle>Archive teacher?</AlertDialogTitle>
+                              <AlertDialogDescription>
+                                This will archive {teacher.name}. They can be restored later
+                                from the archived section. Any associated classes will remain
+                                but won&apos;t include this teacher.
+                              </AlertDialogDescription>
+                            </AlertDialogHeader>
+                            <AlertDialogFooter>
+                              <AlertDialogCancel>Cancel</AlertDialogCancel>
+                              <AlertDialogAction
+                                onClick={() => archiveTeacher(teacher.id)}
+                                className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+                              >
+                                Archive
+                              </AlertDialogAction>
+                            </AlertDialogFooter>
+                          </AlertDialogContent>
+                        </AlertDialog>
+                      ) : (
+                        <Tooltip>
+                          <TooltipTrigger asChild>
+                            <Button
+                              variant="ghost"
+                              size="icon"
+                              className="h-8 w-8 cursor-not-allowed"
+                              disabled
+                            >
+                              <Trash2 className="h-4 w-4 text-muted-foreground/50" />
+                            </Button>
+                          </TooltipTrigger>
+                          <TooltipContent>
+                            <p>{status?.reason || "Cannot archive"}</p>
+                          </TooltipContent>
+                        </Tooltip>
+                      )}
+                    </TableCell>
+                  </TableRow>
+                )
+              })}
+              {/* Add new teacher row */}
+              <TableRow>
+                <TableCell colSpan={5}>
+                  <form
+                    onSubmit={(e) => {
+                      e.preventDefault()
+                      createTeacher()
+                    }}
+                    className="flex items-center gap-2"
                   >
-                    <SelectTrigger className="h-8 w-[130px]">
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value={TEACHER_STATUS_FULL_TIME}>Full-time</SelectItem>
-                      <SelectItem value={TEACHER_STATUS_PART_TIME}>Part-time</SelectItem>
-                    </SelectContent>
-                  </Select>
-                </TableCell>
-                <TableCell>
-                  <Checkbox
-                    checked={teacher.can_supervise_study_hall === true}
-                    onCheckedChange={(checked) =>
-                      updateTeacher(
-                        teacher.id,
-                        "can_supervise_study_hall",
-                        checked  // checked = excluded = true
-                      )
-                    }
-                  />
-                </TableCell>
-                <TableCell>
-                  <EditableText
-                    value={teacher.notes || ""}
-                    onSave={(value) =>
-                      updateTeacher(teacher.id, "notes", value || null)
-                    }
-                    saving={savingId === teacher.id}
-                    placeholder="Add notes..."
-                  />
-                </TableCell>
-                <TableCell>
-                  <AlertDialog>
-                    <AlertDialogTrigger asChild>
-                      <Button variant="ghost" size="icon" className="h-8 w-8">
-                        <Trash2 className="h-4 w-4 text-muted-foreground hover:text-destructive" />
+                    <Input
+                      ref={newTeacherRef}
+                      value={newTeacherName}
+                      onChange={(e) => setNewTeacherName(e.target.value)}
+                      placeholder="Add new teacher..."
+                      className="max-w-[250px] h-8"
+                    />
+                    {newTeacherName.trim() && (
+                      <Button type="submit" size="sm" variant="secondary">
+                        Add
                       </Button>
-                    </AlertDialogTrigger>
-                    <AlertDialogContent>
-                      <AlertDialogHeader>
-                        <AlertDialogTitle>Delete teacher?</AlertDialogTitle>
-                        <AlertDialogDescription>
-                          This will permanently delete {teacher.name} and all
-                          their associated classes.
-                        </AlertDialogDescription>
-                      </AlertDialogHeader>
-                      <AlertDialogFooter>
-                        <AlertDialogCancel>Cancel</AlertDialogCancel>
-                        <AlertDialogAction
-                          onClick={() => deleteTeacher(teacher.id)}
-                          className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
-                        >
-                          Delete
-                        </AlertDialogAction>
-                      </AlertDialogFooter>
-                    </AlertDialogContent>
-                  </AlertDialog>
+                    )}
+                  </form>
                 </TableCell>
               </TableRow>
-            ))}
-            {/* Add new teacher row */}
-            <TableRow>
-              <TableCell colSpan={5}>
-                <form
-                  onSubmit={(e) => {
-                    e.preventDefault()
-                    createTeacher()
-                  }}
-                  className="flex items-center gap-2"
-                >
-                  <Input
-                    ref={newTeacherRef}
-                    value={newTeacherName}
-                    onChange={(e) => setNewTeacherName(e.target.value)}
-                    placeholder="Add new teacher..."
-                    className="max-w-[250px] h-8"
-                  />
-                  {newTeacherName.trim() && (
-                    <Button type="submit" size="sm" variant="secondary">
-                      Add
-                    </Button>
-                  )}
-                </form>
-              </TableCell>
-            </TableRow>
-          </TableBody>
-        </Table>
+            </TableBody>
+          </Table>
+        </div>
+
+        {/* Archived Teachers Section */}
+        {archivedTeachers.length > 0 && (
+          <Collapsible
+            open={archivedOpen}
+            onOpenChange={setArchivedOpen}
+            className="mt-6"
+          >
+            <CollapsibleTrigger asChild>
+              <Button variant="ghost" className="flex items-center gap-2 text-muted-foreground hover:text-foreground">
+                <Archive className="h-4 w-4" />
+                <span>Archived Teachers ({archivedTeachers.length})</span>
+                <ChevronDown className={`h-4 w-4 transition-transform ${archivedOpen ? "rotate-180" : ""}`} />
+              </Button>
+            </CollapsibleTrigger>
+            <CollapsibleContent className="mt-2">
+              <div className="border rounded-lg">
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead>Name</TableHead>
+                      <TableHead className="w-[200px]">Archived</TableHead>
+                      <TableHead className="w-[100px]"></TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {archivedTeachers.map((teacher) => (
+                      <TableRow key={teacher.id}>
+                        <TableCell className="text-muted-foreground">
+                          {teacher.name}
+                        </TableCell>
+                        <TableCell className="text-muted-foreground text-sm">
+                          {new Date(teacher.deleted_at).toLocaleDateString()}
+                        </TableCell>
+                        <TableCell>
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            onClick={() => restoreTeacher(teacher.id)}
+                            disabled={restoringId === teacher.id}
+                            className="flex items-center gap-1"
+                          >
+                            {restoringId === teacher.id ? (
+                              <Loader2 className="h-4 w-4 animate-spin" />
+                            ) : (
+                              <RotateCcw className="h-4 w-4" />
+                            )}
+                            Restore
+                          </Button>
+                        </TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              </div>
+            </CollapsibleContent>
+          </Collapsible>
+        )}
       </div>
-    </div>
+    </TooltipProvider>
   )
 }
 

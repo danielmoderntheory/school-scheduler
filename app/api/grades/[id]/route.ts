@@ -37,12 +37,16 @@ export async function DELETE(
 
   if (classes && classes.length > 0) {
     return NextResponse.json(
-      { error: "Cannot delete grade that is used in classes" },
+      { error: "Cannot archive grade that is used in classes" },
       { status: 400 }
     )
   }
 
-  const { error } = await supabase.from("grades").delete().eq("id", id)
+  // Soft delete: set deleted_at instead of actually deleting
+  const { error } = await supabase
+    .from("grades")
+    .update({ deleted_at: new Date().toISOString() })
+    .eq("id", id)
 
   if (error) {
     return NextResponse.json({ error: error.message }, { status: 500 })

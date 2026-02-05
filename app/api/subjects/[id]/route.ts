@@ -37,12 +37,16 @@ export async function DELETE(
 
   if (classes && classes.length > 0) {
     return NextResponse.json(
-      { error: "Cannot delete subject that is used in classes" },
+      { error: "Cannot archive subject that is used in classes" },
       { status: 400 }
     )
   }
 
-  const { error } = await supabase.from("subjects").delete().eq("id", id)
+  // Soft delete: set deleted_at instead of actually deleting
+  const { error } = await supabase
+    .from("subjects")
+    .update({ deleted_at: new Date().toISOString() })
+    .eq("id", id)
 
   if (error) {
     return NextResponse.json({ error: error.message }, { status: 500 })

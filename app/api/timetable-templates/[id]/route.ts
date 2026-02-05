@@ -47,9 +47,10 @@ export async function DELETE(
 ) {
   const { id } = await params
 
+  // Soft delete: set deleted_at instead of actually deleting
   const { error } = await supabase
     .from("timetable_templates")
-    .delete()
+    .update({ deleted_at: new Date().toISOString() })
     .eq("id", id)
 
   if (error) {

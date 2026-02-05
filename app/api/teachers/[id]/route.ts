@@ -43,7 +43,11 @@ export async function DELETE(
 ) {
   const { id } = await params
 
-  const { error } = await supabase.from("teachers").delete().eq("id", id)
+  // Soft delete: set deleted_at instead of actually deleting
+  const { error } = await supabase
+    .from("teachers")
+    .update({ deleted_at: new Date().toISOString() })
+    .eq("id", id)
 
   if (error) {
     return NextResponse.json({ error: error.message }, { status: 500 })

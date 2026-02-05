@@ -5,6 +5,7 @@ export async function GET() {
   const { data, error } = await supabase
     .from("subjects")
     .select("*")
+    .is("deleted_at", null)
     .order("name")
 
   if (error) {
