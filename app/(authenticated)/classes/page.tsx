@@ -1872,9 +1872,12 @@ Maria\t6th-11th Elective\tSpanish 101\t1\tMon Block 5`}
       <div className="relative border rounded-lg overflow-hidden bg-white shadow-sm">
         {showLastRunNotice && tableLocked && (
           <div className="absolute inset-0 z-20 bg-white/40 flex items-center justify-center">
-            <div className="flex flex-col items-center gap-3 bg-white/90 rounded-xl px-8 py-6 shadow-sm">
+            <div className="flex flex-col items-center gap-3 bg-white/90 rounded-xl px-8 py-6 shadow-sm max-w-sm text-center">
               <Lock className="h-8 w-8 text-slate-400" />
               <p className="text-sm font-medium text-slate-600">Classes are locked</p>
+              <p className="text-xs text-slate-500">
+                A schedule has been generated with these classes. Editing classes may require regenerating the schedule.
+              </p>
               <Button variant="outline" size="sm" onClick={() => setTableLocked(false)}>
                 Unlock
               </Button>
