@@ -7,7 +7,8 @@
     "build": "next build",
     "start": "next start",
     "lint": "next lint",
-    "solver": "cd backend && ./run-local.sh"
+    "solver": "cd backend && ./run-local.sh",
+    "deploy-solver": "cd backend && ./deploy.sh"
   },
   "dependencies": {
     "@radix-ui/react-alert-dialog": "^1.0.5",

@@ -5,6 +5,7 @@ export async function GET(request: NextRequest) {
   const searchParams = request.nextUrl.searchParams
   const quarterId = searchParams.get("quarter_id")
   const starredOnly = searchParams.get("starred_only") === "true"
+  const mostRecent = searchParams.get("most_recent") === "true"
   const limit = searchParams.get("limit")
 
   let query = supabase
@@ -19,9 +20,15 @@ export async function GET(request: NextRequest) {
       options,
       quarter:quarters(id, name)
     `)
-    // Order by starred first, then by date
-    .order("is_starred", { ascending: false })
-    .order("generated_at", { ascending: false })
+
+  // Order: most_recent flag skips starred priority, otherwise starred first
+  if (mostRecent) {
+    query = query.order("generated_at", { ascending: false })
+  } else {
+    query = query
+      .order("is_starred", { ascending: false })
+      .order("generated_at", { ascending: false })
+  }
 
   if (quarterId) {
     query = query.eq("quarter_id", quarterId)

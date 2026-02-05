@@ -187,36 +187,44 @@ export default function ClassesPage() {
         })
         setClasses(sorted)
 
-        // Fetch last saved generation: prefer starred, fall back to most recent
+        // Fetch schedule generations: starred for display, most recent for locking
         try {
-          let lastGen = null
-          // Try starred first
+          let displayGen = null
+          let mostRecentGen = null
+
+          // Fetch most recent (needed for lock comparison)
+          const historyRes = await fetch(`/api/history?quarter_id=${active.id}&limit=1&most_recent=true`)
+          if (historyRes.ok) {
+            const historyData = await historyRes.json()
+            if (historyData.length > 0) mostRecentGen = historyData[0]
+          }
+
+          // Try starred for display preference
           const starredRes = await fetch(`/api/history?quarter_id=${active.id}&limit=1&starred_only=true`)
           if (starredRes.ok) {
             const starredData = await starredRes.json()
-            if (starredData.length > 0) lastGen = starredData[0]
+            if (starredData.length > 0) displayGen = starredData[0]
           }
-          // Fall back to most recent
-          if (!lastGen) {
-            const historyRes = await fetch(`/api/history?quarter_id=${active.id}&limit=1`)
-            if (historyRes.ok) {
-              const historyData = await historyRes.json()
-              if (historyData.length > 0) lastGen = historyData[0]
-            }
-          }
-          if (lastGen) {
-            const bestOption = lastGen.options?.[0]
+
+          // Fall back to most recent for display
+          if (!displayGen) displayGen = mostRecentGen
+
+          if (displayGen) {
+            const bestOption = displayGen.options?.[0]
             setLastRun({
-              historyId: lastGen.id,
-              timestamp: lastGen.generated_at,
+              historyId: displayGen.id,
+              timestamp: displayGen.generated_at,
               quarterId: active.id,
               quarterName: active.name,
               studyHallsPlaced: bestOption?.studyHallsPlaced ?? 0,
               backToBackIssues: bestOption?.backToBackIssues ?? 0,
-              starred: lastGen.is_starred ?? false,
+              starred: displayGen.is_starred ?? false,
             })
-            // Lock table only if no classes were modified after the schedule was generated
-            const generatedAt = new Date(lastGen.generated_at).getTime()
+          }
+
+          // Lock table based on most recent generation (not starred)
+          if (mostRecentGen) {
+            const generatedAt = new Date(mostRecentGen.generated_at).getTime()
             const maxUpdatedAt = classesData.reduce((max: number, c: { updated_at?: string; created_at?: string }) => {
               const t = new Date(c.updated_at || c.created_at || 0).getTime()
               return t > max ? t : max

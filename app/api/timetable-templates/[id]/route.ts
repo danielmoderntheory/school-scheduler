@@ -29,7 +29,7 @@ export async function PUT(
 
   const { data, error } = await supabase
     .from("timetable_templates")
-    .update({ ...body, updated_at: new Date().toISOString() })
+    .update(body)
     .eq("id", id)
     .select()
     .single()

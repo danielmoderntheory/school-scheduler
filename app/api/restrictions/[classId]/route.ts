@@ -46,7 +46,7 @@ export async function PUT(
     }
   }
 
-  // Touch the parent class's updated_at
+  // Touch the parent class to update its updated_at (trigger sets the actual value)
   await supabase.from("classes").update({ updated_at: new Date().toISOString() }).eq("id", classId)
 
   // Return updated restrictions
