@@ -439,7 +439,7 @@ export default function HistoryDetailPage() {
     isOpen: boolean
     checks: Array<{ name: string; status: 'pending' | 'checking' | 'passed' | 'failed' | 'skipped'; errorCount?: number; errors?: string[] }>
     onComplete?: () => void
-    mode: 'save' | 'review'  // 'save' auto-closes on success, 'review' stays open
+    mode: 'save' | 'review' | 'saveAnyway'  // 'save' auto-closes on success, 'review' stays open, 'saveAnyway' shows results with save option
     expandedChecks: Set<number>  // Which check indices are expanded
   } | null>(null)
   const [workingSchedules, setWorkingSchedules] = useState<{
@@ -1593,9 +1593,14 @@ export default function HistoryDetailPage() {
       if (sessionErrors.length > 0) {
       }
 
-      if (allErrors.length > 0) {
-        setValidationErrors(allErrors)
-        const { hard, soft } = splitValidationErrors(allErrors)
+      // Filter out study_hall_coverage errors if user chose to skip study halls
+      const filteredErrors = skipStudyHalls
+        ? allErrors.filter(e => e.type !== 'study_hall_coverage')
+        : allErrors
+
+      if (filteredErrors.length > 0) {
+        setValidationErrors(filteredErrors)
+        const { hard, soft } = splitValidationErrors(filteredErrors)
 
         if (hard.length > 0) {
           toast.error(`${hard.length} validation issue${hard.length !== 1 ? 's' : ''} detected - review before applying`, { icon: errorIcon })
@@ -1996,9 +2001,11 @@ export default function HistoryDetailPage() {
 
     // Run validation with visual modal on the MERGED option, then save if passed
     // Use statsForValidation which has updated class snapshots when using current classes
-    // Skip study hall check if user chose to skip study halls during regen
-    runValidationWithModal(optionToSave, statsForValidation, doSave, 'save', {
-      skipStudyHallCheck: skipStudyHalls
+    // Study Hall mode: show validation but allow save anyway (pre-existing conflicts are OK)
+    // Regen mode: skip study hall check if user chose to skip study halls
+    const validationMode = previewType === 'study-hall' ? 'saveAnyway' : 'save'
+    runValidationWithModal(optionToSave, statsForValidation, doSave, validationMode, {
+      skipStudyHallCheck: previewType === 'regen' && skipStudyHalls
     })
 
     } catch (error) {
@@ -2690,7 +2697,8 @@ export default function HistoryDetailPage() {
 
   /**
    * Run validation with a visual modal showing each check as it runs.
-   * @param mode - 'save' auto-closes on success and calls onComplete, 'review' stays open to show results
+   * @param mode - 'save' auto-closes on success and calls onComplete, 'review' stays open to show results,
+   *               'saveAnyway' shows results with option to save regardless of errors
    * @param options.skipStudyHallCheck - Skip study hall coverage validation (for stripped study halls mode)
    * Returns true if validation passed (only soft warnings), false if hard errors.
    */
@@ -2698,7 +2706,7 @@ export default function HistoryDetailPage() {
     option: ScheduleOption,
     stats: GenerationStats | undefined,
     onComplete: () => void,
-    mode: 'save' | 'review' = 'save',
+    mode: 'save' | 'review' | 'saveAnyway' = 'save',
     options?: { skipStudyHallCheck?: boolean }
   ): Promise<boolean> {
     const DAYS = ["Mon", "Tues", "Wed", "Thurs", "Fri"]
@@ -2784,8 +2792,22 @@ export default function HistoryDetailPage() {
       return !hasHardErrors
     }
 
+    // In saveAnyway mode: if errors exist, show option to save anyway; if no errors, proceed normally
+    if (mode === 'saveAnyway') {
+      if (allErrors.length > 0) {
+        setValidationErrors(allErrors)
+        // Modal stays open, user can click "Save Anyway" or "Cancel"
+        return !hasHardErrors
+      }
+      // No errors - close modal and proceed
+      setValidationModal(null)
+      onComplete()
+      return true
+    }
+
     if (hasHardErrors) {
-      // Keep modal open, set errors
+      // Keep modal open, user can click items to expand
+      setValidationModal(prev => prev ? { ...prev, mode: 'review' } : null)
       setValidationErrors(allErrors)
       return false
     }
@@ -7414,9 +7436,9 @@ export default function HistoryDetailPage() {
                             Clear Study Halls
                           </span>
                           {studyHallsStripped ? (
-                            <span className="text-indigo-500 font-medium">({strippedStudyHalls.length} cleared)</span>
+                            <span className="text-indigo-500 font-medium">(reassign manually after save)</span>
                           ) : (
-                            <span className="text-slate-400 group-hover:text-slate-500">(easier editing)</span>
+                            <span className="text-slate-400 group-hover:text-slate-500">(fewer constraints)</span>
                           )}
                         </label>
                       )}
@@ -8157,9 +8179,9 @@ export default function HistoryDetailPage() {
                               Skip Study Halls
                             </span>
                             {skipStudyHalls ? (
-                              <span className="text-sky-500 font-medium">(reassign after)</span>
+                              <span className="text-sky-500 font-medium">(reassign manually after save)</span>
                             ) : (
-                              <span className="text-slate-400 group-hover:text-slate-500">(faster results)</span>
+                              <span className="text-slate-400 group-hover:text-slate-500">(fewer constraints)</span>
                             )}
                           </label>
                         </div>
@@ -8628,7 +8650,7 @@ export default function HistoryDetailPage() {
                 setPendingModeEntry(null)
               }}
             >
-              Keep Unchanged
+              Ignore
             </AlertDialogCancel>
             <AlertDialogAction
               onClick={() => {
@@ -8670,21 +8692,46 @@ export default function HistoryDetailPage() {
                     ? <AlertTriangle className="h-5 w-5 text-amber-500" />
                     : <Check className="h-5 w-5 text-green-600" />
               }
-              {validationModal?.mode === 'review' ? 'Schedule Validation' : 'Validating Schedule'}
+              {validationModal?.checks.every(c => c.status === 'passed' || c.status === 'failed' || c.status === 'skipped')
+                ? 'Validation Complete'
+                : 'Validating Schedule'}
             </DialogTitle>
             <DialogDescription>
-              {validationModal?.checks.every(c => c.status === 'passed' || c.status === 'failed' || c.status === 'skipped')
-                ? validationModal?.mode === 'review'
-                  ? 'Validation complete. See results below.'
-                  : 'Validation complete.'
-                : 'Checking schedule for conflicts and issues...'}
+              {(() => {
+                const isComplete = validationModal?.checks.every(c => c.status === 'passed' || c.status === 'failed' || c.status === 'skipped')
+                if (!isComplete) {
+                  return <span className="text-muted-foreground">Checking schedule for conflicts and issues...</span>
+                }
+                const totalIssues = validationModal?.checks.reduce((sum, c) => sum + (c.errorCount || 0), 0) || 0
+                const hardErrors = validationModal?.checks
+                  .filter(c => c.status === 'failed' && c.name !== 'Back-to-back blocks' && c.name !== 'Study hall coverage')
+                  .reduce((sum, c) => sum + (c.errorCount || 0), 0) || 0
+                const warnings = totalIssues - hardErrors
+
+                if (totalIssues === 0) {
+                  return <span className="text-green-600">All checks passed. Schedule is valid.</span>
+                } else if (hardErrors > 0) {
+                  return (
+                    <span className="text-red-600">
+                      {hardErrors} error{hardErrors !== 1 ? 's' : ''} found
+                      {warnings > 0 ? `, ${warnings} warning${warnings !== 1 ? 's' : ''}` : ''}.
+                    </span>
+                  )
+                } else {
+                  return (
+                    <span className="text-amber-600">
+                      {warnings} warning{warnings !== 1 ? 's' : ''} (suboptimal but valid).
+                    </span>
+                  )
+                }
+              })()}
             </DialogDescription>
           </DialogHeader>
-          <div className="pt-4 pb-2 space-y-1 max-h-[60vh] overflow-y-auto">
+          <div className="py-2 space-y-1 max-h-[60vh] overflow-y-auto">
             {validationModal?.checks.map((check, idx) => {
               const isExpanded = validationModal?.expandedChecks.has(idx)
               const hasErrors = check.status === 'failed' && check.errors && check.errors.length > 0
-              const isClickable = validationModal?.mode === 'review' && hasErrors
+              const isClickable = (validationModal?.mode === 'review' || validationModal?.mode === 'saveAnyway') && hasErrors
 
               return (
                 <div key={idx}>
@@ -8753,8 +8800,8 @@ export default function HistoryDetailPage() {
                       <ChevronDown className={`h-4 w-4 text-slate-400 flex-shrink-0 transition-transform ${isExpanded ? 'rotate-180' : ''}`} />
                     )}
                   </div>
-                  {/* Show error details when expanded in review mode */}
-                  {validationModal?.mode === 'review' && isExpanded && hasErrors && (
+                  {/* Show error details when expanded */}
+                  {(validationModal?.mode === 'review' || validationModal?.mode === 'saveAnyway') && isExpanded && hasErrors && (
                     <div className="ml-8 mb-2 mt-1 space-y-1 max-h-32 overflow-y-auto">
                       {check.errors!.map((error, errIdx) => (
                         <p key={errIdx} className="text-xs text-slate-600 pl-2 border-l-2 border-slate-200">
@@ -8769,56 +8816,42 @@ export default function HistoryDetailPage() {
           </div>
           {/* Footer - shown when checks complete */}
           {validationModal?.checks.every(c => c.status === 'passed' || c.status === 'failed' || c.status === 'skipped') && (
-            <DialogFooter className="flex-col sm:flex-col gap-2 pt-2 border-t">
+            <DialogFooter className="flex-col sm:flex-col gap-3 pt-2">
               {/* Summary message */}
               {(() => {
                 const totalIssues = validationModal?.checks.reduce((sum, c) => sum + (c.errorCount || 0), 0) || 0
-                const hardErrors = validationModal?.checks
-                  .filter(c => c.status === 'failed' && c.name !== 'Back-to-back blocks' && c.name !== 'Study hall coverage')
-                  .reduce((sum, c) => sum + (c.errorCount || 0), 0) || 0
-                const warnings = totalIssues - hardErrors
-
-                if (totalIssues === 0) {
+                // Show "Save Anyway" / "Cancel" only if saveAnyway mode AND there are actual issues
+                if (validationModal?.mode === 'saveAnyway' && totalIssues > 0) {
                   return (
-                    <p className="text-sm text-green-600 text-center w-full">
-                      All checks passed. Schedule is valid.
-                    </p>
-                  )
-                } else if (hardErrors > 0) {
-                  return (
-                    <p className="text-sm text-red-600 text-center w-full">
-                      {hardErrors} error{hardErrors !== 1 ? 's' : ''} must be fixed
-                      {warnings > 0 ? `, ${warnings} warning${warnings !== 1 ? 's' : ''}` : ''}.
-                    </p>
-                  )
-                } else {
-                  return (
-                    <p className="text-sm text-amber-600 text-center w-full">
-                      {warnings} warning{warnings !== 1 ? 's' : ''} (suboptimal but valid).
-                    </p>
+                    <div className="flex gap-2 justify-center w-full">
+                      <Button
+                        variant="outline"
+                        onClick={() => setValidationModal(null)}
+                      >
+                        Cancel
+                      </Button>
+                      <Button
+                        variant="default"
+                        onClick={() => {
+                          setValidationModal(null)
+                          validationModal?.onComplete?.()
+                        }}
+                      >
+                        Save Anyway
+                      </Button>
+                    </div>
                   )
                 }
+                return (
+                  <Button
+                    variant="default"
+                    onClick={() => setValidationModal(null)}
+                    className="w-full sm:w-auto"
+                  >
+                    Close
+                  </Button>
+                )
               })()}
-              <Button
-                variant={validationModal?.mode === 'review' ? 'default' : 'outline'}
-                onClick={() => {
-                  if (validationModal?.mode === 'review') {
-                    setValidationModal(null)
-                  } else {
-                    // Switch to review mode and expand all failed checks
-                    const failedIndices = new Set<number>()
-                    validationModal?.checks.forEach((check, idx) => {
-                      if (check.status === 'failed' && check.errors && check.errors.length > 0) {
-                        failedIndices.add(idx)
-                      }
-                    })
-                    setValidationModal(prev => prev ? { ...prev, mode: 'review', expandedChecks: failedIndices } : null)
-                  }
-                }}
-                className="w-full sm:w-auto"
-              >
-                {validationModal?.mode === 'review' ? 'Close' : 'Review Errors'}
-              </Button>
             </DialogFooter>
           )}
         </DialogContent>

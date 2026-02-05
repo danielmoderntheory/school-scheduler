@@ -104,6 +104,7 @@ export default function ClassesPage() {
   const [loading, setLoading] = useState(true)
   const [lastRun, setLastRun] = useState<LastRun | null>(null)
   const [tableLocked, setTableLocked] = useState(true)
+  const [lockReason, setLockReason] = useState<'generation' | 'import' | null>(null)
   const [showImportDialog, setShowImportDialog] = useState(false)
   const [showExportDialog, setShowExportDialog] = useState(false)
   const [showImportFromHistoryDialog, setShowImportFromHistoryDialog] = useState(false)
@@ -118,8 +119,22 @@ export default function ClassesPage() {
   const [loadingHistory, setLoadingHistory] = useState(false)
   const [importText, setImportText] = useState("")
   const [importing, setImporting] = useState(false)
-  const [replaceAll, setReplaceAll] = useState(false)
+  const [replaceAll, setReplaceAll] = useState(true)
   const [undoImportData, setUndoImportData] = useState<ClassEntry[] | null>(null)
+  const [importStep, setImportStep] = useState<'input' | 'confirm'>('input')
+  const [pendingImport, setPendingImport] = useState<Array<{
+    line: number
+    teacherName: string
+    gradeStr: string
+    subjectName: string
+    daysPerWeek: number
+    restrictionStr: string
+    gradeIds: string[]
+    isElective: boolean
+    detectedElective: boolean
+    isCotaught: boolean
+  }>>([])
+  const [importCotaughtGroups, setImportCotaughtGroups] = useState<Map<string, number[]>>(new Map())
   const [showCotaughtDetails, setShowCotaughtDetails] = useState(false)
   const [importWarnings, setImportWarnings] = useState<string[]>([])
   const undoToastId = useRef<string | null>(null)
@@ -229,7 +244,9 @@ export default function ClassesPage() {
               const t = new Date(c.updated_at || c.created_at || 0).getTime()
               return t > max ? t : max
             }, 0)
-            setTableLocked(maxUpdatedAt <= generatedAt)
+            const shouldLock = maxUpdatedAt <= generatedAt
+            setTableLocked(shouldLock)
+            if (shouldLock) setLockReason('generation')
           }
         } catch (e) {
           // Ignore history fetch errors
@@ -661,10 +678,9 @@ export default function ClassesPage() {
     return parts.join(', ')
   }
 
-  async function handleImport() {
+  function handleImport() {
     if (!importText.trim() || !activeQuarter) return
 
-    setImporting(true)
     const lines = importText.trim().split('\n')
     let startIndex = 0
 
@@ -675,7 +691,7 @@ export default function ClassesPage() {
     }
 
     // Parse all rows first for validation
-    interface ParsedRow {
+    const parsedRows: Array<{
       line: number
       teacherName: string
       gradeStr: string
@@ -684,9 +700,9 @@ export default function ClassesPage() {
       restrictionStr: string
       gradeIds: string[]
       isElective: boolean
-    }
-
-    const parsedRows: ParsedRow[] = []
+      detectedElective: boolean
+      isCotaught: boolean
+    }> = []
     const validationErrors: string[] = []
 
     for (let i = startIndex; i < lines.length; i++) {
@@ -707,7 +723,7 @@ export default function ClassesPage() {
       const isElective = gradeStr.toLowerCase().includes('elective')
 
       // Strip "Elective" and "Grades" suffixes for parsing
-      let gradeClean = gradeStr
+      const gradeClean = gradeStr
         .replace(/\s*elective\s*/gi, '')
         .replace(/\s*grades\s*/gi, '')
         .replace(/\s*grade\s*/gi, '')
@@ -782,19 +798,55 @@ export default function ClassesPage() {
         restrictionStr: restrictionStr || '',
         gradeIds,
         isElective,
+        detectedElective: isElective,
+        isCotaught: false, // Will be set below
       })
     }
 
     // If there are validation errors, stop and show them
     if (validationErrors.length > 0) {
-      setImporting(false)
       toast.error(`Validation failed with ${validationErrors.length} errors:\n${validationErrors.slice(0, 5).join('\n')}${validationErrors.length > 5 ? `\n...and ${validationErrors.length - 5} more` : ''}`)
       return
     }
 
-    // Validation passed - close modal and show progress toast
+    // Detect co-taught classes: same grade+subject with different teachers
+    const gradeSubjectMap = new Map<string, number[]>()
+    parsedRows.forEach((row, index) => {
+      const key = `${row.gradeIds.sort().join(',')}|${row.subjectName.toLowerCase()}`
+      const existing = gradeSubjectMap.get(key) || []
+      existing.push(index)
+      gradeSubjectMap.set(key, existing)
+    })
+
+    // Mark classes as co-taught if multiple teachers teach same grade+subject
+    const detectedCotaughtGroups = new Map<string, number[]>()
+    gradeSubjectMap.forEach((indices, key) => {
+      if (indices.length > 1) {
+        // Check if they have different teachers
+        const teacherNames = new Set(indices.map(i => parsedRows[i].teacherName.toLowerCase()))
+        if (teacherNames.size > 1) {
+          indices.forEach(i => {
+            parsedRows[i].isCotaught = true
+          })
+          detectedCotaughtGroups.set(key, indices)
+        }
+      }
+    })
+
+    // Store parsed data and show confirmation step
+    setPendingImport(parsedRows)
+    setImportCotaughtGroups(detectedCotaughtGroups)
+    setImportStep('confirm')
+  }
+
+  async function handleConfirmImport() {
+    if (!activeQuarter || pendingImport.length === 0) return
+
+    setImporting(true)
+    setTableLocked(true)
+    setLockReason('import')
     setShowImportDialog(false)
-    const loadingToastId = toast.loading(`Importing ${parsedRows.length} classes...`)
+    const loadingToastId = toast.loading(`Importing ${pendingImport.length} classes...`)
 
     // If replaceAll is checked, delete all existing classes first
     if (replaceAll && classes.length > 0) {
@@ -818,14 +870,14 @@ export default function ClassesPage() {
     // Now import all validated rows
     let created = 0
     let errors = 0
-    const total = parsedRows.length
+    const total = pendingImport.length
 
     // Track created teachers/subjects to avoid duplicates within import
     const createdTeachers = new Map<string, Teacher>()
     const createdSubjects = new Map<string, Subject>()
 
-    for (let i = 0; i < parsedRows.length; i++) {
-      const row = parsedRows[i]
+    for (let i = 0; i < pendingImport.length; i++) {
+      const row = pendingImport[i]
       toast.loading(`Importing classes... ${i + 1}/${total}`, { id: loadingToastId })
       // Find or create teacher
       let teacher: Teacher | null | undefined = teachers.find(t => t.name.toLowerCase() === row.teacherName.toLowerCase())
@@ -862,6 +914,7 @@ export default function ClassesPage() {
         subject_id: subject.id,
         days_per_week: row.daysPerWeek,
         is_elective: row.isElective,
+        is_cotaught: row.isCotaught,
       }
 
       try {
@@ -904,9 +957,18 @@ export default function ClassesPage() {
 
     setImporting(false)
     setImportText("")
-    setReplaceAll(false)
+    setReplaceAll(true)
+    setImportStep('input')
+    setPendingImport([])
+
+    // Unlock table after import
+    if (lockReason === 'import') {
+      setTableLocked(false)
+      setLockReason(null)
+    }
 
     if (created > 0) {
+
       // Dismiss any previous undo toast
       if (undoToastId.current) {
         toast.dismiss(undoToastId.current)
@@ -1064,6 +1126,7 @@ export default function ClassesPage() {
       subject_name?: string
       days_per_week: number
       is_elective?: boolean
+      is_cotaught?: boolean
       restrictions?: Array<{ restriction_type: string; value: unknown }>
     }>
 
@@ -1192,6 +1255,7 @@ export default function ClassesPage() {
             quarter_id: activeQuarter?.id,
             days_per_week: cls.days_per_week,
             is_elective: cls.is_elective || false,
+            is_cotaught: cls.is_cotaught || false,
             restrictions: cls.restrictions || []
           })
         })
@@ -1692,61 +1756,233 @@ export default function ClassesPage() {
       </Dialog>
 
       {/* Import Dialog */}
-      <Dialog open={showImportDialog} onOpenChange={setShowImportDialog}>
-        <DialogContent className="max-w-2xl">
+      <Dialog open={showImportDialog} onOpenChange={(open) => {
+        setShowImportDialog(open)
+        if (!open) {
+          setImportStep('input')
+          setPendingImport([])
+        }
+      }}>
+        <DialogContent className="max-w-2xl max-h-[85vh] flex flex-col">
           <DialogHeader>
-            <DialogTitle>Import Classes</DialogTitle>
+            <DialogTitle>
+              {importStep === 'input' ? 'Import Classes' : 'Confirm Import'}
+            </DialogTitle>
             <DialogDescription>
-              Paste tab-delimited data from Google Sheets. Format: Teacher, Grade, Subject, Days per Week, Restrictions (optional)
+              {importStep === 'input'
+                ? 'Paste tab-delimited data from Google Sheets. Format: Teacher, Grade, Subject, Days per Week, Restrictions (optional)'
+                : `Review ${pendingImport.length} classes before importing. Adjust elective and co-taught flags as needed.`
+              }
             </DialogDescription>
           </DialogHeader>
-          <div className="space-y-4">
-            <textarea
-              className="w-full h-64 p-3 text-sm font-mono border rounded-lg resize-none focus:outline-none focus:ring-2 focus:ring-sky-500"
-              placeholder={`Teacher\tGrade\tSubject\tDays per Week\tRestrictions
+
+          {importStep === 'input' ? (
+            <>
+              <div className="space-y-4">
+                <textarea
+                  className="w-full h-64 p-3 text-sm font-mono border rounded-lg resize-none focus:outline-none focus:ring-2 focus:ring-sky-500"
+                  placeholder={`Teacher\tGrade\tSubject\tDays per Week\tRestrictions
 New Teacher\tKindergarten\tEnglish\t4\t
 Carolina\t1st Grade\tMath\t4\t
 Phil\t6th-8th\tScience\t3\t
 Maria\t6th-11th Elective\tSpanish 101\t1\tMon Block 5`}
-              value={importText}
-              onChange={(e) => setImportText(e.target.value)}
-            />
-            <div className="flex items-center gap-2">
-              <input
-                type="checkbox"
-                id="replaceAll"
-                checked={replaceAll}
-                onChange={(e) => setReplaceAll(e.target.checked)}
-                className="h-4 w-4 rounded border-slate-300 text-emerald-600 focus:ring-emerald-500"
-              />
-              <label htmlFor="replaceAll" className="text-sm text-slate-700">
-                Replace all existing classes (deletes current {classes.length} classes)
-              </label>
-            </div>
-            <p className="text-xs text-muted-foreground">
-              Headers are optional. New teachers and subjects will be created automatically.
-              Data will be validated before any changes are made.
-            </p>
-          </div>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setShowImportDialog(false)}>
-              Cancel
-            </Button>
-            <Button
-              onClick={handleImport}
-              disabled={importing || !importText.trim()}
-              className="bg-emerald-500 hover:bg-emerald-600 text-white"
-            >
-              {importing ? (
-                <>
-                  <Loader2 className="h-4 w-4 animate-spin mr-2" />
-                  Importing...
-                </>
-              ) : (
-                'Import Classes'
-              )}
-            </Button>
-          </DialogFooter>
+                  value={importText}
+                  onChange={(e) => setImportText(e.target.value)}
+                />
+                <div className="flex items-center gap-2">
+                  <input
+                    type="checkbox"
+                    id="replaceAll"
+                    checked={replaceAll}
+                    onChange={(e) => setReplaceAll(e.target.checked)}
+                    className="h-4 w-4 rounded border-slate-300 text-emerald-600 focus:ring-emerald-500"
+                  />
+                  <label htmlFor="replaceAll" className="text-sm text-slate-700">
+                    Replace all existing classes (deletes current {classes.length} classes)
+                  </label>
+                </div>
+                <p className="text-xs text-muted-foreground">
+                  Headers are optional. New teachers and subjects will be created automatically.
+                </p>
+              </div>
+              <DialogFooter>
+                <Button variant="outline" onClick={() => setShowImportDialog(false)}>
+                  Cancel
+                </Button>
+                <Button
+                  onClick={handleImport}
+                  disabled={!importText.trim()}
+                  className="bg-emerald-500 hover:bg-emerald-600 text-white"
+                >
+                  Continue
+                </Button>
+              </DialogFooter>
+            </>
+          ) : (
+            <>
+              <div className="flex-1 overflow-y-auto space-y-4 min-h-0">
+                {/* Validation warnings */}
+                {(() => {
+                  const warnings: string[] = []
+                  const newTeachers = new Set<string>()
+                  const newSubjects = new Set<string>()
+
+                  pendingImport.forEach(row => {
+                    if (!teachers.find(t => t.name.toLowerCase() === row.teacherName.toLowerCase())) {
+                      newTeachers.add(row.teacherName)
+                    }
+                    if (!subjects.find(s => s.name.toLowerCase() === row.subjectName.toLowerCase())) {
+                      newSubjects.add(row.subjectName)
+                    }
+                  })
+
+                  if (newTeachers.size > 0) {
+                    warnings.push(`New teachers will be created: ${Array.from(newTeachers).join(', ')}`)
+                  }
+                  if (newSubjects.size > 0) {
+                    warnings.push(`New subjects will be created: ${Array.from(newSubjects).join(', ')}`)
+                  }
+
+                  // Check for duplicates within import
+                  const seen = new Map<string, number>()
+                  const duplicates: string[] = []
+                  pendingImport.forEach((row, idx) => {
+                    const key = `${row.teacherName.toLowerCase()}|${row.gradeIds.sort().join(',')}|${row.subjectName.toLowerCase()}`
+                    if (seen.has(key)) {
+                      duplicates.push(`${row.teacherName} - ${row.gradeStr} - ${row.subjectName}`)
+                    }
+                    seen.set(key, idx)
+                  })
+                  if (duplicates.length > 0) {
+                    warnings.push(`Duplicate entries: ${duplicates.slice(0, 3).join('; ')}${duplicates.length > 3 ? ` (+${duplicates.length - 3} more)` : ''}`)
+                  }
+
+                  // Check for conflicts with existing classes (only if not replacing all)
+                  if (!replaceAll && classes.length > 0) {
+                    const conflicts: string[] = []
+                    pendingImport.forEach(row => {
+                      const teacher = teachers.find(t => t.name.toLowerCase() === row.teacherName.toLowerCase())
+                      const subject = subjects.find(s => s.name.toLowerCase() === row.subjectName.toLowerCase())
+                      if (teacher && subject) {
+                        const existing = classes.find(c =>
+                          c.teacher_id === teacher.id &&
+                          c.subject_id === subject.id &&
+                          row.gradeIds.includes(c.grade_id)
+                        )
+                        if (existing) {
+                          conflicts.push(`${row.teacherName} - ${row.gradeStr} - ${row.subjectName}`)
+                        }
+                      }
+                    })
+                    if (conflicts.length > 0) {
+                      warnings.push(`Already exists: ${conflicts.slice(0, 3).join('; ')}${conflicts.length > 3 ? ` (+${conflicts.length - 3} more)` : ''}`)
+                    }
+                  }
+
+                  return (
+                    <div className="space-y-2">
+                      {warnings.length > 0 && (
+                        <div className="bg-amber-50 border border-amber-200 rounded-lg p-3 text-sm text-amber-800">
+                          <p className="font-medium mb-1">Heads up:</p>
+                          <ul className="list-disc list-inside space-y-0.5">
+                            {warnings.map((w, i) => <li key={i}>{w}</li>)}
+                          </ul>
+                        </div>
+                      )}
+                      <div className="bg-emerald-50 border border-emerald-200 rounded-lg p-3 text-sm text-emerald-800">
+                        {pendingImport.length} classes ready to import
+                      </div>
+                    </div>
+                  )
+                })()}
+
+                {/* Electives section */}
+                {pendingImport.some(r => r.detectedElective) && (
+                  <div className="border rounded-lg p-3">
+                    <p className="text-sm font-medium mb-1">Electives ({pendingImport.filter(r => r.isElective).length} selected)</p>
+                    <p className="text-xs text-slate-500 mb-2">Electives can share the same block with other electives, allowing students to choose between concurrent options.</p>
+                    <div className="space-y-1.5">
+                      {pendingImport.map((row, idx) => row.detectedElective && (
+                        <label key={idx} className="flex items-center gap-2 text-sm">
+                          <input
+                            type="checkbox"
+                            checked={row.isElective}
+                            onChange={(e) => {
+                              setPendingImport(prev => prev.map((r, i) =>
+                                i === idx ? { ...r, isElective: e.target.checked } : r
+                              ))
+                            }}
+                            className="h-4 w-4 rounded border-slate-300 text-violet-600 focus:ring-violet-500"
+                          />
+                          <span className="text-slate-600">{row.teacherName}</span>
+                          <span className="text-slate-400">·</span>
+                          <span>{row.gradeStr}</span>
+                          <span className="text-slate-400">·</span>
+                          <span className="font-medium">{row.subjectName}</span>
+                        </label>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {/* Co-taught section */}
+                {importCotaughtGroups.size > 0 && (
+                  <div className="border rounded-lg p-3">
+                    <p className="text-sm font-medium mb-1">Co-taught ({pendingImport.filter(r => r.isCotaught).length} classes in {importCotaughtGroups.size} groups)</p>
+                    <p className="text-xs text-slate-500 mb-2">Co-taught classes are scheduled in the same block so multiple teachers can teach together.</p>
+                    <div className="space-y-3">
+                      {Array.from(importCotaughtGroups.entries()).map(([key, indices]) => (
+                        <div key={key} className="bg-slate-50 rounded p-2 space-y-1.5">
+                          {indices.map(idx => {
+                            const row = pendingImport[idx]
+                            return (
+                              <label key={idx} className="flex items-center gap-2 text-sm">
+                                <input
+                                  type="checkbox"
+                                  checked={row.isCotaught}
+                                  onChange={(e) => {
+                                    setPendingImport(prev => prev.map((r, i) =>
+                                      i === idx ? { ...r, isCotaught: e.target.checked } : r
+                                    ))
+                                  }}
+                                  className="h-4 w-4 rounded border-slate-300 text-sky-600 focus:ring-sky-500"
+                                />
+                                <span className="text-slate-600">{row.teacherName}</span>
+                                <span className="text-slate-400">·</span>
+                                <span>{row.gradeStr}</span>
+                                <span className="text-slate-400">·</span>
+                                <span className="font-medium">{row.subjectName}</span>
+                              </label>
+                            )
+                          })}
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+              </div>
+              <DialogFooter>
+                <Button variant="outline" onClick={() => setImportStep('input')}>
+                  Back
+                </Button>
+                <Button
+                  onClick={handleConfirmImport}
+                  disabled={importing}
+                  className="bg-emerald-500 hover:bg-emerald-600 text-white"
+                >
+                  {importing ? (
+                    <>
+                      <Loader2 className="h-4 w-4 animate-spin mr-2" />
+                      Importing...
+                    </>
+                  ) : (
+                    `Import ${pendingImport.length} Classes`
+                  )}
+                </Button>
+              </DialogFooter>
+            </>
+          )}
         </DialogContent>
       </Dialog>
 
@@ -1870,13 +2106,15 @@ Maria\t6th-11th Elective\tSpanish 101\t1\tMon Block 5`}
       )}
 
       <div className="relative border rounded-lg overflow-hidden bg-white shadow-sm">
-        {showLastRunNotice && tableLocked && (
+        {tableLocked && (
           <div className="absolute inset-0 z-20 bg-white/40 flex items-center justify-center">
             <div className="flex flex-col items-center gap-3 bg-white/90 rounded-xl px-8 py-6 shadow-sm max-w-sm text-center">
               <Lock className="h-8 w-8 text-slate-400" />
               <p className="text-sm font-medium text-slate-600">Classes are locked</p>
               <p className="text-xs text-slate-500">
-                A schedule has been generated with these classes. Editing classes may require regenerating the schedule.
+                {lockReason === 'import'
+                  ? 'Please wait.. Import is currently in progress.'
+                  : 'A schedule has been generated with these classes. Editing may require regenerating the schedule.'}
               </p>
               <Button variant="outline" size="sm" onClick={() => setTableLocked(false)}>
                 Unlock

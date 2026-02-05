@@ -287,6 +287,10 @@ npx supabase start   # Local Supabase
 npx supabase db push # Push migrations
 ```
 
+### Type Checking
+
+Prefer `npx tsc --noEmit` for validating changes—it's fast and won't disrupt a running dev server. Only run a full `npm run build` when necessary (new pages, API routes, server component changes) and confirm with the user first, as it replaces the `.next` directory.
+
 ## Deployment
 
 ### Frontend (Vercel)
