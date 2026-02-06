@@ -621,7 +621,6 @@ def suggest_teachers_to_unlock(
     # If no single teacher made it feasible, try pairs of top candidates
     single_feasible = any(s['feasible'] for s in suggestions)
     if not single_feasible and len(affecting) >= 2:
-        print(f"[Solver] No single teacher helps. Trying pairs of top {min(3, len(affecting))} candidates...")
         # Only try pairs of top 3 candidates (to limit trials)
         top_candidates = affecting[:3]
         for i, teacher1 in enumerate(top_candidates):
@@ -652,7 +651,6 @@ def suggest_teachers_to_unlock(
                         'is_pair': True,
                         'teachers': [teacher1, teacher2],
                     })
-                    print(f"[Solver] Pair {teacher1} + {teacher2} makes it feasible!")
                     break
             # Stop if we found a feasible pair
             if any(s.get('is_pair') and s['feasible'] for s in suggestions):
@@ -764,7 +762,6 @@ def solve_with_cpsat(sessions: list[Session], seed: int = 0, time_limit: float =
         if len(s.valid_slots) == 0:
             # No valid slots - session can't be placed (slots all blocked by locked teachers)
             # Skip this session entirely - constraints will work without it
-            print(f"Session {s.id} ({s.teacher}/{s.subject}) has no valid slots - skipping")
             continue
         elif len(s.valid_slots) == 1:
             # Fixed slot - create constant
@@ -793,11 +790,6 @@ def solve_with_cpsat(sessions: list[Session], seed: int = 0, time_limit: float =
 
     # Filter sessions to only those with variables (excludes sessions with no valid slots)
     active_sessions = [s for s in sessions if s.id in slot_vars]
-    skipped_sessions = [s for s in sessions if s.id not in slot_vars]
-
-    print(f"[Solver Debug] Total sessions: {len(sessions)}, Active: {len(active_sessions)}, Skipped (no valid slots): {len(skipped_sessions)}")
-    if skipped_sessions:
-        print(f"[Solver Debug] Skipped sessions: {[(s.teacher, s.subject, s.grades) for s in skipped_sessions]}")
 
     # Hard Constraint 1: No teacher conflicts (teacher can't be in two places at once)
     teachers = list(set(s.teacher for s in active_sessions))
@@ -972,9 +964,7 @@ def solve_with_cpsat(sessions: list[Session], seed: int = 0, time_limit: float =
     solver.parameters.enumerate_all_solutions = True  # Enable solution enumeration
 
     collector = SolutionCollector(slot_vars, max_solutions=max_solutions)
-    print(f"[Solver Debug] Starting CP-SAT solve with {len(active_sessions)} active sessions...")
     status = solver.Solve(model, collector)
-    print(f"[Solver Debug] Solve complete. Status: {status}, Wall time: {solver.WallTime():.2f}s")
 
     status_names = {0: 'UNKNOWN', 1: 'MODEL_INVALID', 2: 'FEASIBLE', 3: 'INFEASIBLE', 4: 'OPTIMAL'}
     if diagnostics is not None:
@@ -2008,7 +1998,6 @@ def generate_schedules(
             elapsed = time.time() - start_time
             remaining = max_time_seconds - elapsed - 10  # Leave buffer
             if remaining > 5:  # Only if we have time
-                print(f"[Solver] Infeasible with {len(locked_teacher_names)} locked teachers. Checking which to unlock...")
                 unlock_suggestions = suggest_teachers_to_unlock(
                     teachers=teachers,
                     classes=classes,
@@ -2019,9 +2008,6 @@ def generate_schedules(
                     trial_timeout=min(5.0, remaining / len(locked_teacher_names)) if locked_teacher_names else 5.0,
                 )
                 if unlock_suggestions:
-                    feasible_teachers = [s['teacher'] for s in unlock_suggestions if s['feasible']]
-                    if feasible_teachers:
-                        print(f"[Solver] Unlocking these teachers would help: {feasible_teachers}")
                     diagnostics['unlockSuggestions'] = unlock_suggestions
 
         message = f'No feasible schedule found after {seeds_completed} attempts.'

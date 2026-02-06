@@ -1282,12 +1282,6 @@ export default function HistoryDetailPage() {
         classes = parseClassesFromSnapshot(generation.stats!.classes_snapshot!)
         // Parse grades from snapshot (grades_snapshot contains display_name)
         grades = (generation.stats!.grades_snapshot || []).map((g: { display_name: string }) => g.display_name)
-        // Debug: Log raw snapshot data for Phonics/Carolina/Daniela S
-        const snapshotPhonics = (generation.stats!.classes_snapshot || []).filter(
-          (c: { teacher_name: string | null; subject_name: string | null }) =>
-            c.subject_name === 'Phonics' || c.teacher_name === 'Carolina' || c.teacher_name === 'Daniela S'
-        )
-        console.log('[Regen Debug] Raw snapshot Phonics/Carolina/Daniela S classes:', snapshotPhonics)
       }
 
       // Get the ACTUAL original schedule from generation.options (NOT selectedResult which could be a preview)
@@ -1365,40 +1359,14 @@ export default function HistoryDetailPage() {
       let firstUnlockSuggestions: Array<{ teacher: string; shared_sessions: number; feasible: boolean; options_found: number; impact: 'high' | 'medium' | 'low'; is_pair?: boolean; teachers?: string[] }> | undefined = undefined
 
       // Helper to check if we have a valid, non-duplicate result
-      const isValidResult = (r: { status: string; options: ScheduleOption[]; message?: string; diagnostics?: unknown } | null, stepName: string): boolean => {
-        if (!r) {
-          console.log(`[Regen ${stepName}] No result returned`)
-          return false
-        }
-        if (r.status !== 'success') {
-          console.log(`[Regen ${stepName}] Status: ${r.status}, Message: ${r.message}`, r.diagnostics ? { diagnostics: r.diagnostics } : '')
-          return false
-        }
-        if (r.options.length === 0) {
-          console.log(`[Regen ${stepName}] No options returned`)
-          return false
-        }
+      const isValidResult = (r: { status: string; options: ScheduleOption[]; message?: string; diagnostics?: unknown } | null, _stepName: string): boolean => {
+        if (!r) return false
+        if (r.status !== 'success') return false
+        if (r.options.length === 0) return false
         const { matchesOriginal, matchesPreview } = checkForMatches(r.options[0].teacherSchedules)
-        if (matchesOriginal) {
-          console.log(`[Regen ${stepName}] Result matches original schedule, trying next strategy`)
-          return false
-        }
-        if (matchesPreview) {
-          console.log(`[Regen ${stepName}] Result matches preview, trying next strategy`)
-          return false
-        }
-        console.log(`[Regen ${stepName}] Valid result found!`)
+        if (matchesOriginal || matchesPreview) return false
         return true
       }
-
-      // Debug: Log classes being sent to solver
-      console.log('[Regen Debug] useCurrentClasses:', useCurrentClasses, '| snapshotNeedsUpdate:', classChanges?.hasChanges || false)
-      const cotaughtClasses = classes.filter(c => c.isCotaught)
-      console.log('[Regen Debug] Total classes:', classes.length)
-      console.log('[Regen Debug] Co-taught classes:', cotaughtClasses.length, cotaughtClasses.map(c => ({ teacher: c.teacher, subject: c.subject, grades: c.grades, isCotaught: c.isCotaught })))
-      // Log Carolina and Daniela S classes specifically
-      const phonicsClasses = classes.filter(c => c.subject === 'Phonics' || c.teacher === 'Carolina' || c.teacher === 'Daniela S')
-      console.log('[Regen Debug] Carolina/Daniela S/Phonics classes:', phonicsClasses)
 
       // Step 1: OR-Tools normal - more seeds, less time each
       setGenerationProgress({ current: 0, total: 100, message: "Starting OR-Tools solver..." })
@@ -1855,10 +1823,6 @@ export default function HistoryDetailPage() {
         // Pure alignment regens (DB already matches snapshot) keep existing version to avoid
         // cascading re-alignment of already-aligned revisions.
         const snapshotContentChanging = classChanges?.hasChanges || false
-        console.log('[Snapshot Debug] snapshotContentChanging:', snapshotContentChanging)
-        console.log('[Snapshot Debug] classChanges?.hasChanges:', classChanges?.hasChanges)
-        console.log('[Snapshot Debug] classChanges?.affectedTeachers:', classChanges?.affectedTeachers)
-        console.log('[Snapshot Debug] existing snapshotAffectedTeachers:', generation.stats?.snapshotAffectedTeachers)
         statsForValidation = {
           ...generation.stats,
           classes_snapshot: classesSnapshot,
@@ -1872,7 +1836,6 @@ export default function HistoryDetailPage() {
             : (generation.stats?.snapshotAffectedTeachers || []),
           // rules_snapshot intentionally NOT updated - stays from original generation
         }
-        console.log('[Snapshot Debug] new snapshotAffectedTeachers:', statsForValidation.snapshotAffectedTeachers)
       } catch (error) {
         console.error('Failed to build updated snapshots for validation:', error)
         // Continue with original stats
@@ -1942,12 +1905,6 @@ export default function HistoryDetailPage() {
       const updatedStats = statsForValidation
 
       const newOptionNumber = saveAsNew ? generation.options.length + 1 : null
-      const statsBeingSaved = updatedStats !== generation.stats ? updatedStats : null
-      console.log('[Save Debug] Saving stats?', !!statsBeingSaved)
-      if (statsBeingSaved) {
-        console.log('[Save Debug] snapshotVersion:', statsBeingSaved.snapshotVersion)
-        console.log('[Save Debug] snapshotAffectedTeachers:', statsBeingSaved.snapshotAffectedTeachers)
-      }
       const updateRes = await fetch(`/api/history/${id}`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
@@ -6811,7 +6768,7 @@ export default function HistoryDetailPage() {
             {viewMode === "timetable" ? "Grade Timetables" : viewMode === "teacher" ? "Teacher Schedules" : "Grade Schedules"}
           </h3>
           <div className="flex items-center gap-2 ml-auto">
-            {!regenMode && !swapMode && !studyHallMode && !freeformEdit && (
+            {!regenMode && !swapMode && !studyHallMode && !freeformMode && !repairMode && (
               <Button
                 variant="ghost"
                 size="sm"
@@ -8342,6 +8299,18 @@ export default function HistoryDetailPage() {
                                   Add all suggested
                                 </button>
                               )}
+                              {!skipStudyHalls && (
+                                <div className="text-xs mt-2 text-red-600">
+                                  You can also try{' '}
+                                  <button
+                                    onClick={() => setSkipStudyHalls(true)}
+                                    className="underline underline-offset-2 hover:text-red-800"
+                                  >
+                                    skipping study halls
+                                  </button>
+                                  {' '}to reduce constraints.
+                                </div>
+                              )}
                             </div>
                           </div>
                         </div>
@@ -8421,7 +8390,7 @@ export default function HistoryDetailPage() {
                     )}
                   </div>
                   <div className="flex flex-wrap items-center gap-2 sm:gap-3 ml-auto no-print">
-                    {!regenMode && !swapMode && !studyHallMode && !freeformEdit && (
+                    {!regenMode && !swapMode && !studyHallMode && !freeformMode && !repairMode && (
                       <Button
                         variant="ghost"
                         size="sm"
@@ -8805,13 +8774,9 @@ export default function HistoryDetailPage() {
                 // Pre-select affected teachers (if known) and enter regen mode
                 // For DB changes: use classChanges (snapshot vs DB) and rebuild snapshot from DB
                 // For alignment: use stored affected teachers and keep existing snapshot
-                console.log('[Alignment Debug] snapshotNeedsUpdate:', snapshotNeedsUpdate)
-                console.log('[Alignment Debug] classChanges?.affectedTeachers:', classChanges?.affectedTeachers)
-                console.log('[Alignment Debug] generation.stats.snapshotAffectedTeachers:', generation?.stats?.snapshotAffectedTeachers)
                 const teachersToSelect = snapshotNeedsUpdate
                   ? (classChanges?.affectedTeachers || [])
                   : (generation?.stats?.snapshotAffectedTeachers || [])
-                console.log('[Alignment Debug] teachersToSelect:', teachersToSelect)
                 setSelectedForRegen(new Set(teachersToSelect))
                 setUseCurrentClasses(snapshotNeedsUpdate) // Only rebuild from DB when DB has actually changed
                 setRegenMode(true)

@@ -191,10 +191,6 @@ export async function generateSchedulesRemote(
       grades,
     };
 
-    // Debug: Log co-taught classes being sent to solver
-    const cotaughtInRequest = requestBody.classes.filter(c => c.isCotaught)
-    console.log('[Solver Debug] Co-taught classes in request:', cotaughtInRequest.length, cotaughtInRequest.map(c => ({ teacher: c.teacher, subject: c.subject, grades: c.grades, isCotaught: c.isCotaught })))
-
     // Start simulated progress (since we can't get real progress from the API)
     let simulatedProgress = 1;
     let progressInterval: ReturnType<typeof setInterval> | null = null;
@@ -239,7 +235,6 @@ export async function generateSchedulesRemote(
     // Try direct Cloud Run first (bypasses Vercel's 10s timeout limit)
     if (DIRECT_SOLVER_URL) {
       try {
-        console.log('[Solver] Trying direct Cloud Run connection...');
         response = await fetch(`${DIRECT_SOLVER_URL}/solve`, {
           method: 'POST',
           headers: {
@@ -248,7 +243,6 @@ export async function generateSchedulesRemote(
           body: JSON.stringify(requestBody),
         });
         usedDirectConnection = true;
-        console.log('[Solver] Direct Cloud Run connection successful');
       } catch (directError) {
         console.warn('[Solver] Direct Cloud Run failed, falling back to Vercel proxy:', directError);
         // Fall through to Vercel proxy
