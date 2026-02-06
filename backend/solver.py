@@ -452,6 +452,248 @@ class SolutionCollector(cp_model.CpSolverSolutionCallback):
         return self._solutions
 
 
+# ============================================================================
+# Unlock Suggestions - Help diagnose which locked teachers block feasibility
+# ============================================================================
+
+def get_affecting_teachers(
+    selected_teachers: set[str],
+    locked_teachers: dict,
+    classes: list,
+) -> list[str]:
+    """
+    Find locked teachers who share grades with selected teachers.
+
+    Only these teachers can directly affect feasibility through grade conflicts.
+    Returns list of locked teacher names that have grade overlap.
+    """
+    if not locked_teachers:
+        return []
+
+    # Get all grades taught by selected teachers
+    selected_grades = set()
+    for cls in classes:
+        teacher = cls.get('teacher') or (cls.teacher if hasattr(cls, 'teacher') else '')
+        grades = cls.get('grades') or (cls.grades if hasattr(cls, 'grades') else [])
+        if not grades:
+            grade = cls.get('grade') or (cls.grade if hasattr(cls, 'grade') else '')
+            grades = [grade] if grade else []
+
+        if teacher in selected_teachers:
+            selected_grades.update(grades)
+
+    if not selected_grades:
+        return []
+
+    # Find locked teachers who teach any of those grades
+    affecting = []
+    for teacher_name in locked_teachers.keys():
+        teacher_grades = set()
+        for cls in classes:
+            cls_teacher = cls.get('teacher') or (cls.teacher if hasattr(cls, 'teacher') else '')
+            if cls_teacher == teacher_name:
+                grades = cls.get('grades') or (cls.grades if hasattr(cls, 'grades') else [])
+                if not grades:
+                    grade = cls.get('grade') or (cls.grade if hasattr(cls, 'grade') else '')
+                    grades = [grade] if grade else []
+                teacher_grades.update(grades)
+
+        # Check for grade overlap
+        if teacher_grades & selected_grades:
+            affecting.append(teacher_name)
+
+    return affecting
+
+
+def count_shared_sessions(
+    teacher_name: str,
+    selected_grades: set[str],
+    classes: list,
+) -> int:
+    """
+    Count how many class sessions a teacher has that overlap with selected grades.
+
+    Higher count = more potential impact on feasibility.
+    """
+    shared = 0
+    for cls in classes:
+        cls_teacher = cls.get('teacher') or (cls.teacher if hasattr(cls, 'teacher') else '')
+        if cls_teacher != teacher_name:
+            continue
+
+        grades = cls.get('grades') or (cls.grades if hasattr(cls, 'grades') else [])
+        if not grades:
+            grade = cls.get('grade') or (cls.grade if hasattr(cls, 'grade') else '')
+            grades = [grade] if grade else []
+
+        days_per_week = cls.get('daysPerWeek') or cls.get('days_per_week') or (cls.days_per_week if hasattr(cls, 'days_per_week') else 1)
+
+        # Check if any of this class's grades overlap with selected grades
+        if set(grades) & selected_grades:
+            shared += days_per_week
+
+    return shared
+
+
+def suggest_teachers_to_unlock(
+    teachers: list[dict],
+    classes: list[dict],
+    rules: list[dict],
+    locked_teachers: dict,
+    grades: list[str],
+    max_suggestions: int = 3,
+    trial_timeout: float = 5.0,
+) -> list[dict]:
+    """
+    When solver returns infeasible, try unlocking each affecting teacher
+    to see which ones would make the problem feasible.
+
+    Returns ranked list of suggestions with impact info.
+    Only checks teachers who share grades with selected (unlocked) teachers.
+    """
+    if not locked_teachers:
+        return []
+
+    # Determine selected (unlocked) teachers
+    all_teachers = {t['name'] for t in teachers}
+    locked_names = set(locked_teachers.keys())
+    selected_teachers = all_teachers - locked_names
+
+    if not selected_teachers:
+        return []
+
+    # Get grades taught by selected teachers for ranking
+    selected_grades = set()
+    for cls in classes:
+        if cls.get('teacher') in selected_teachers:
+            cls_grades = cls.get('grades') or [cls.get('grade', '')]
+            selected_grades.update(g for g in cls_grades if g)
+
+    # Get only teachers who affect our selected teachers (share grades)
+    affecting = get_affecting_teachers(selected_teachers, locked_teachers, classes)
+
+    if not affecting:
+        return []
+
+    # Pre-calculate shared sessions for ranking
+    teacher_shared = {}
+    for teacher_name in affecting:
+        teacher_shared[teacher_name] = count_shared_sessions(teacher_name, selected_grades, classes)
+
+    # Sort by shared sessions (most impact first) for trial order
+    affecting.sort(key=lambda t: -teacher_shared.get(t, 0))
+
+    suggestions = []
+
+    for teacher_name in affecting:
+        # Create a copy of locked_teachers without this one
+        trial_locked = {k: v for k, v in locked_teachers.items() if k != teacher_name}
+
+        # Run quick feasibility check (minimal settings)
+        # Import here to avoid circular dependency issues
+        trial_result = _quick_feasibility_check(
+            teachers=teachers,
+            classes=classes,
+            rules=rules,
+            locked_teachers=trial_locked,
+            grades=grades,
+            timeout=trial_timeout,
+        )
+
+        is_feasible = trial_result.get('status') == 'success' and len(trial_result.get('options', [])) > 0
+        options_found = len(trial_result.get('options', []))
+
+        shared = teacher_shared.get(teacher_name, 0)
+
+        suggestions.append({
+            'teacher': teacher_name,
+            'shared_sessions': shared,
+            'feasible': is_feasible,
+            'options_found': options_found,
+            'impact': 'high' if is_feasible else ('medium' if shared >= 4 else 'low'),
+        })
+
+        # Stop early if we found enough suggestions that make it feasible
+        feasible_count = sum(1 for s in suggestions if s['feasible'])
+        if feasible_count >= max_suggestions:
+            break
+
+    # If no single teacher made it feasible, try pairs of top candidates
+    single_feasible = any(s['feasible'] for s in suggestions)
+    if not single_feasible and len(affecting) >= 2:
+        print(f"[Solver] No single teacher helps. Trying pairs of top {min(3, len(affecting))} candidates...")
+        # Only try pairs of top 3 candidates (to limit trials)
+        top_candidates = affecting[:3]
+        for i, teacher1 in enumerate(top_candidates):
+            for teacher2 in top_candidates[i+1:]:
+                # Create a copy without both teachers
+                trial_locked = {k: v for k, v in locked_teachers.items()
+                               if k != teacher1 and k != teacher2}
+
+                trial_result = _quick_feasibility_check(
+                    teachers=teachers,
+                    classes=classes,
+                    rules=rules,
+                    locked_teachers=trial_locked,
+                    grades=grades,
+                    timeout=trial_timeout,
+                )
+
+                is_feasible = trial_result.get('status') == 'success' and len(trial_result.get('options', [])) > 0
+
+                if is_feasible:
+                    combined_shared = teacher_shared.get(teacher1, 0) + teacher_shared.get(teacher2, 0)
+                    suggestions.append({
+                        'teacher': f"{teacher1} + {teacher2}",
+                        'shared_sessions': combined_shared,
+                        'feasible': True,
+                        'options_found': len(trial_result.get('options', [])),
+                        'impact': 'high',
+                        'is_pair': True,
+                        'teachers': [teacher1, teacher2],
+                    })
+                    print(f"[Solver] Pair {teacher1} + {teacher2} makes it feasible!")
+                    break
+            # Stop if we found a feasible pair
+            if any(s.get('is_pair') and s['feasible'] for s in suggestions):
+                break
+
+    # Sort: feasible first, then by shared sessions
+    suggestions.sort(key=lambda x: (-x['feasible'], -x['shared_sessions']))
+
+    return suggestions[:max_suggestions]
+
+
+def _quick_feasibility_check(
+    teachers: list[dict],
+    classes: list[dict],
+    rules: list[dict],
+    locked_teachers: dict,
+    grades: list[str],
+    timeout: float = 5.0,
+) -> dict:
+    """
+    Run a quick solver check to test feasibility.
+
+    Uses short timeout - we just need to know if ANY solution exists.
+    """
+    # Use generate_schedules with minimal settings
+    # This is a forward reference - will be resolved at runtime
+    return generate_schedules(
+        teachers=teachers,
+        classes=classes,
+        rules=rules,
+        num_options=1,
+        num_attempts=3,  # Just a few seeds to check feasibility
+        max_time_seconds=timeout,
+        locked_teachers=locked_teachers,
+        skip_study_halls=True,  # Skip study halls for speed
+        grades=grades,
+        # Don't recurse into suggestions for trial runs
+        _skip_unlock_suggestions=True,
+    )
+
+
 def solve_with_cpsat(sessions: list[Session], seed: int = 0, time_limit: float = 10.0, max_solutions: int = 5, diagnostics: dict = None, rules: list[dict] = None, active_grades: list[str] = None) -> list[dict]:
     """
     Solve the scheduling problem using CP-SAT.
@@ -522,7 +764,7 @@ def solve_with_cpsat(sessions: list[Session], seed: int = 0, time_limit: float =
         if len(s.valid_slots) == 0:
             # No valid slots - session can't be placed (slots all blocked by locked teachers)
             # Skip this session entirely - constraints will work without it
-            logger.warning(f"Session {s.id} ({s.teacher}/{s.subject}) has no valid slots - skipping")
+            print(f"Session {s.id} ({s.teacher}/{s.subject}) has no valid slots - skipping")
             continue
         elif len(s.valid_slots) == 1:
             # Fixed slot - create constant
@@ -551,6 +793,11 @@ def solve_with_cpsat(sessions: list[Session], seed: int = 0, time_limit: float =
 
     # Filter sessions to only those with variables (excludes sessions with no valid slots)
     active_sessions = [s for s in sessions if s.id in slot_vars]
+    skipped_sessions = [s for s in sessions if s.id not in slot_vars]
+
+    print(f"[Solver Debug] Total sessions: {len(sessions)}, Active: {len(active_sessions)}, Skipped (no valid slots): {len(skipped_sessions)}")
+    if skipped_sessions:
+        print(f"[Solver Debug] Skipped sessions: {[(s.teacher, s.subject, s.grades) for s in skipped_sessions]}")
 
     # Hard Constraint 1: No teacher conflicts (teacher can't be in two places at once)
     teachers = list(set(s.teacher for s in active_sessions))
@@ -566,15 +813,40 @@ def solve_with_cpsat(sessions: list[Session], seed: int = 0, time_limit: float =
     # - Elective vs Elective (same grades): NO conflict - they're concurrent "pick one" choices
     # - Elective vs Regular (same grades): CONFLICT - elective period blocks regular classes
     # - Regular vs Regular (same grades): CONFLICT - standard grade blocking
+    # - Co-taught vs Co-taught (same grade+subject): NO conflict - they're the same class with multiple teachers
     #
     for grade in active_grades:
         regular_sessions = [s for s in active_sessions if grade in s.grades and not s.is_elective]
         elective_sessions = [s for s in active_sessions if grade in s.grades and s.is_elective]
 
         # Regular vs Regular: all must be at different times
+        # EXCEPT: co-taught classes (same grade+subject, different teachers) CAN be at same time
         if len(regular_sessions) > 1:
-            regular_vars = [slot_vars[s.id] for s in regular_sessions]
-            model.AddAllDifferent(regular_vars)
+            # Group co-taught sessions by (subject, teacher) - we need one teacher's sessions per subject
+            from collections import defaultdict
+            cotaught_by_subject_teacher = defaultdict(list)
+            non_cotaught = []
+            for s in regular_sessions:
+                if s.is_cotaught:
+                    cotaught_by_subject_teacher[(s.subject, s.teacher)].append(s)
+                else:
+                    non_cotaught.append(s)
+
+            # Non-cotaught sessions must all be different from each other
+            unique_slots = [slot_vars[s.id] for s in non_cotaught]
+
+            # For co-taught: add ALL sessions from ONE teacher per subject
+            # (the other teachers' sessions are constrained to same slots by co-taught constraint)
+            seen_subjects = set()
+            for (subject, teacher), sessions in cotaught_by_subject_teacher.items():
+                if subject not in seen_subjects:
+                    seen_subjects.add(subject)
+                    # Add all sessions from this teacher for this subject
+                    for s in sessions:
+                        unique_slots.append(slot_vars[s.id])
+
+            if len(unique_slots) > 1:
+                model.AddAllDifferent(unique_slots)
 
         # Regular vs Elective: each regular class must not overlap with any elective
         # (electives block the grade from having regular classes at that time)
@@ -586,6 +858,8 @@ def solve_with_cpsat(sessions: list[Session], seed: int = 0, time_limit: float =
 
     # Hard Constraint 3: No duplicate subjects per day per grade
     # Note: Also skip electives for this constraint
+    # Note: Co-taught sessions (same subject, different teachers) are allowed on same day
+    #       because they're constrained to be at the SAME time slot
     # This constraint can be toggled via the 'no_duplicate_subjects' rule
     if is_rule_enabled(rules, 'no_duplicate_subjects'):
         for grade in active_grades:
@@ -603,8 +877,13 @@ def solve_with_cpsat(sessions: list[Session], seed: int = 0, time_limit: float =
 
                 if len(gs_sessions) > 1:
                     # For each pair, ensure they're on different days
+                    # EXCEPT: co-taught sessions from different teachers can be on same day
+                    # (they're actually constrained to be at the exact same time)
                     for i, s1 in enumerate(gs_sessions):
                         for s2 in gs_sessions[i+1:]:
+                            # Skip if both are co-taught (they'll be at same slot anyway)
+                            if s1.is_cotaught and s2.is_cotaught and s1.teacher != s2.teacher:
+                                continue
                             # day = slot // 5, so different days means slot1//5 != slot2//5
                             day1 = model.NewIntVar(0, 4, f'd1_{s1.id}_{s2.id}')
                             day2 = model.NewIntVar(0, 4, f'd2_{s1.id}_{s2.id}')
@@ -693,7 +972,9 @@ def solve_with_cpsat(sessions: list[Session], seed: int = 0, time_limit: float =
     solver.parameters.enumerate_all_solutions = True  # Enable solution enumeration
 
     collector = SolutionCollector(slot_vars, max_solutions=max_solutions)
+    print(f"[Solver Debug] Starting CP-SAT solve with {len(active_sessions)} active sessions...")
     status = solver.Solve(model, collector)
+    print(f"[Solver Debug] Solve complete. Status: {status}, Wall time: {solver.WallTime():.2f}s")
 
     status_names = {0: 'UNKNOWN', 1: 'MODEL_INVALID', 2: 'FEASIBLE', 3: 'INFEASIBLE', 4: 'OPTIMAL'}
     if diagnostics is not None:
@@ -1295,7 +1576,8 @@ def generate_schedules(
     skip_top_solutions: int = 0,  # Skip the top N solutions and return next best (for variety)
     randomize_scoring: bool = False,  # Add noise to scoring to pick suboptimal but valid solutions
     skip_study_halls: bool = False,  # If True, skip study hall assignment entirely (reassign after saving)
-    grades: list[str] = None  # All grade names from database - used for grade schedule initialization
+    grades: list[str] = None,  # All grade names from database - used for grade schedule initialization
+    _skip_unlock_suggestions: bool = False,  # Internal: skip unlock suggestions to prevent recursion
 ) -> dict:
     """
     Main entry point for schedule generation.
@@ -1490,6 +1772,7 @@ def generate_schedules(
         active_grades,
         locked_grade_subject_days if is_partial_regen else None
     )
+
 
     if on_progress:
         on_progress(0, num_attempts, 'Initializing CP-SAT solver...')
@@ -1719,10 +2002,43 @@ def generate_schedules(
 
     # Check if we got any solutions
     if not candidates:
+        # For partial regens, try to suggest which locked teachers to unlock
+        unlock_suggestions = []
+        if is_partial_regen and not _skip_unlock_suggestions:
+            elapsed = time.time() - start_time
+            remaining = max_time_seconds - elapsed - 10  # Leave buffer
+            if remaining > 5:  # Only if we have time
+                print(f"[Solver] Infeasible with {len(locked_teacher_names)} locked teachers. Checking which to unlock...")
+                unlock_suggestions = suggest_teachers_to_unlock(
+                    teachers=teachers,
+                    classes=classes,
+                    rules=rules,
+                    locked_teachers=locked_teachers,
+                    grades=active_grades,
+                    max_suggestions=3,
+                    trial_timeout=min(5.0, remaining / len(locked_teacher_names)) if locked_teacher_names else 5.0,
+                )
+                if unlock_suggestions:
+                    feasible_teachers = [s['teacher'] for s in unlock_suggestions if s['feasible']]
+                    if feasible_teachers:
+                        print(f"[Solver] Unlocking these teachers would help: {feasible_teachers}")
+                    diagnostics['unlockSuggestions'] = unlock_suggestions
+
+        message = f'No feasible schedule found after {seeds_completed} attempts.'
+        if unlock_suggestions:
+            feasible = [s for s in unlock_suggestions if s['feasible']]
+            if feasible:
+                names = ', '.join(s['teacher'] for s in feasible[:2])
+                message += f' Try also selecting: {names}'
+            else:
+                message += ' Check constraints.'
+        else:
+            message += ' Check constraints.'
+
         return {
             'status': 'infeasible',
             'options': [],
-            'message': f'No feasible schedule found after {seeds_completed} attempts. Check constraints.',
+            'message': message,
             'seeds_completed': seeds_completed,
             'infeasible_count': infeasible_count,
             'diagnostics': diagnostics,

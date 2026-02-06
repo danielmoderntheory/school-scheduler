@@ -42,7 +42,7 @@ import Link from "next/link"
 import type { ScheduleOption, TeacherSchedule, GradeSchedule, Teacher, FloatingBlock, PendingPlacement, ValidationError, CellLocation, ClassEntry, OpenBlockLabels, PendingTransfer, TimetableTemplate } from "@/lib/types"
 import { resolveRowsForGrade } from "@/lib/timetable-utils"
 import { parseClassesFromSnapshot, parseTeachersFromSnapshot, parseRulesFromSnapshot, hasValidSnapshots, detectClassChanges, computeExpectedTeachingSessions, type GenerationStats, type ChangeDetectionResult, type CurrentClass, type ClassSnapshot, type TeacherSnapshot } from "@/lib/snapshot-utils"
-import { parseGradeDisplayToNumbers, parseGradeDisplayToNames, gradesOverlap, gradesEqual, gradeNumToDisplay, isClassElective, shouldIgnoreGradeConflict } from "@/lib/grade-utils"
+import { parseGradeDisplayToNumbers, parseGradeDisplayToNames, gradesOverlap, gradesEqual, gradeNumToDisplay, isClassElective, isClassCotaught, shouldIgnoreGradeConflict } from "@/lib/grade-utils"
 import { BLOCK_TYPE_OPEN, BLOCK_TYPE_STUDY_HALL, isOpenBlock, isStudyHall, isScheduledClass, isOccupiedBlock, entryIsOpen, entryIsOccupied, entryIsScheduledClass, isFullTime, setOpenBlockLabel, recalculateOptionStats, getFirstGradeEntry, isMultipleEntryCell } from "@/lib/schedule-utils"
 import toast, { successIcon, errorIcon, warningIcon } from "@/lib/toast"
 import { generateSchedules, reassignStudyHalls } from "@/lib/scheduler"
@@ -364,6 +364,15 @@ export default function HistoryDetailPage() {
   const [isGenerating, setIsGenerating] = useState(false)
   const [generationProgress, setGenerationProgress] = useState({ current: 0, total: 0, message: "" })
   const [regenSeed, setRegenSeed] = useState(0) // Increment to get different results on each regenerate
+  const [unlockSuggestions, setUnlockSuggestions] = useState<Array<{
+    teacher: string;
+    shared_sessions: number;
+    feasible: boolean;
+    options_found: number;
+    impact: 'high' | 'medium' | 'low';
+    is_pair?: boolean;
+    teachers?: string[];
+  }> | null>(null) // Suggestions from solver when infeasible
 
   // Preview state - holds unsaved regenerated option for review
   const [previewOption, setPreviewOption] = useState<ScheduleOption | null>(null)
@@ -1083,6 +1092,7 @@ export default function HistoryDetailPage() {
     setRegenMode(true)
     setSelectedForRegen(new Set())
     setRegenSeed(0) // Reset seed for fresh regeneration session
+    setUnlockSuggestions(null)
 
     // Run validation to show existing conflicts
     const existingErrors = validateFullSchedule(selectedResult, generation.stats)
@@ -1099,10 +1109,13 @@ export default function HistoryDetailPage() {
     setPreviewType(null)
     setUseCurrentClasses(false)
     setValidationErrors([])
+    setUnlockSuggestions(null)
     setForceCreateNew(null)
   }
 
   function toggleTeacherSelection(teacher: string) {
+    // Clear stale unlock suggestions when selection changes
+    setUnlockSuggestions(null)
     setSelectedForRegen(prev => {
       const next = new Set(prev)
       if (next.has(teacher)) {
@@ -1116,6 +1129,7 @@ export default function HistoryDetailPage() {
 
   function clearSelections() {
     setSelectedForRegen(new Set())
+    setUnlockSuggestions(null)
   }
 
   // Extract affected teachers from validation errors (for "select affected" feature)
@@ -1153,6 +1167,8 @@ export default function HistoryDetailPage() {
     }
 
     setIsGenerating(true)
+    setPreviewOption(null) // Clear previous results while regenerating
+    setGenerationProgress({ current: 0, total: 0, message: "" }) // Reset progress
 
     try {
       let teachers: Teacher[]
@@ -1266,6 +1282,12 @@ export default function HistoryDetailPage() {
         classes = parseClassesFromSnapshot(generation.stats!.classes_snapshot!)
         // Parse grades from snapshot (grades_snapshot contains display_name)
         grades = (generation.stats!.grades_snapshot || []).map((g: { display_name: string }) => g.display_name)
+        // Debug: Log raw snapshot data for Phonics/Carolina/Daniela S
+        const snapshotPhonics = (generation.stats!.classes_snapshot || []).filter(
+          (c: { teacher_name: string | null; subject_name: string | null }) =>
+            c.subject_name === 'Phonics' || c.teacher_name === 'Carolina' || c.teacher_name === 'Daniela S'
+        )
+        console.log('[Regen Debug] Raw snapshot Phonics/Carolina/Daniela S classes:', snapshotPhonics)
       }
 
       // Get the ACTUAL original schedule from generation.options (NOT selectedResult which could be a preview)
@@ -1327,59 +1349,91 @@ export default function HistoryDetailPage() {
         return { matchesOriginal, matchesPreview }
       }
 
-      // Strategy rotation based on attempt number:
-      // 1st press: OR-Tools normal (50 seeds) → JS fallback
-      // 2nd press: OR-Tools deep (15 seeds, more time each) → JS fallback
-      // 3rd press: Suboptimal → randomized fallback → JS fallback
-      // 4th press: Randomized → JS fallback
-      // 5th+ press: JS solver
-      const seedOffset = currentSeed % 2 === 1 ? 1 : 0
+      // Auto-escalation strategy: try progressively harder approaches until one works
+      // 1. OR-Tools normal (50 seeds, quick per seed)
+      // 2. OR-Tools deep (15 seeds, more time per seed)
+      // 3. JS solver (different algorithm - shuffling finds solutions OR-Tools misses)
+      // 4. OR-Tools suboptimal (skip top solutions)
+      // 5. OR-Tools randomized (randomize scoring)
+      // On subsequent presses, start from a different seed offset for variety
+      const seedOffset = currentSeed * 100
       let remoteResult: Awaited<ReturnType<typeof generateSchedulesRemote>> | null = null
-      let result: { status: string; options: ScheduleOption[]; message?: string } | null = null
+      let result: { status: string; options: ScheduleOption[]; message?: string; diagnostics?: { unlockSuggestions?: Array<{ teacher: string; shared_sessions: number; feasible: boolean; options_found: number; impact: 'high' | 'medium' | 'low' }> } } | null = null
       let usedJsFallback = false
-      let usedStrategy: "normal" | "deep" | "suboptimal" | "randomized" | "js" = "normal"
+      let usedStrategy: "normal" | "deep" | "js" | "suboptimal" | "randomized" = "normal"
+      // Preserve unlock suggestions from first OR-Tools attempt (they get lost in retry loop)
+      let firstUnlockSuggestions: Array<{ teacher: string; shared_sessions: number; feasible: boolean; options_found: number; impact: 'high' | 'medium' | 'low'; is_pair?: boolean; teachers?: string[] }> | undefined = undefined
 
-      // Determine starting strategy based on attempt number
-      const useNormalOrTools = currentSeed === 1
-      const useDeepOrTools = currentSeed === 2
-      const useSuboptimal = currentSeed === 3
-      const useRandomized = currentSeed === 4
-      const useJs = currentSeed >= 5
-
-      // Step 1: OR-Tools normal (1st press) - more seeds, less time each
-      // Use startSeed=0 for first press to get the same quality as initial generation
-      if (useNormalOrTools) {
-        setGenerationProgress({ current: 0, total: 100, message: "Starting OR-Tools solver..." })
-        remoteResult = await generateSchedulesRemote(teachers, classes, {
-          numOptions: 1,
-          numAttempts: 50, // More seeds, less time each
-          maxTimeSeconds: 120,
-          lockedTeachers: lockedSchedules,
-          teachersNeedingStudyHalls,
-          rules,
-          startSeed: 0, // Use 0 for optimal results on first press
-          skipStudyHalls,
-          grades,
-          onProgress: (current, total, message) => {
-            setGenerationProgress({ current, total, message: `[OR-Tools] ${message}` })
-          }
-        })
-        result = remoteResult
-        usedStrategy = "normal"
+      // Helper to check if we have a valid, non-duplicate result
+      const isValidResult = (r: { status: string; options: ScheduleOption[]; message?: string; diagnostics?: unknown } | null, stepName: string): boolean => {
+        if (!r) {
+          console.log(`[Regen ${stepName}] No result returned`)
+          return false
+        }
+        if (r.status !== 'success') {
+          console.log(`[Regen ${stepName}] Status: ${r.status}, Message: ${r.message}`, r.diagnostics ? { diagnostics: r.diagnostics } : '')
+          return false
+        }
+        if (r.options.length === 0) {
+          console.log(`[Regen ${stepName}] No options returned`)
+          return false
+        }
+        const { matchesOriginal, matchesPreview } = checkForMatches(r.options[0].teacherSchedules)
+        if (matchesOriginal) {
+          console.log(`[Regen ${stepName}] Result matches original schedule, trying next strategy`)
+          return false
+        }
+        if (matchesPreview) {
+          console.log(`[Regen ${stepName}] Result matches preview, trying next strategy`)
+          return false
+        }
+        console.log(`[Regen ${stepName}] Valid result found!`)
+        return true
       }
 
-      // Step 2: OR-Tools deep (2nd press) - fewer seeds, more time each for deeper exploration
-      if (useDeepOrTools) {
-                setGenerationProgress({ current: 0, total: 100, message: "Trying OR-Tools with deeper exploration..." })
+      // Debug: Log classes being sent to solver
+      console.log('[Regen Debug] useCurrentClasses:', useCurrentClasses, '| snapshotNeedsUpdate:', classChanges?.hasChanges || false)
+      const cotaughtClasses = classes.filter(c => c.isCotaught)
+      console.log('[Regen Debug] Total classes:', classes.length)
+      console.log('[Regen Debug] Co-taught classes:', cotaughtClasses.length, cotaughtClasses.map(c => ({ teacher: c.teacher, subject: c.subject, grades: c.grades, isCotaught: c.isCotaught })))
+      // Log Carolina and Daniela S classes specifically
+      const phonicsClasses = classes.filter(c => c.subject === 'Phonics' || c.teacher === 'Carolina' || c.teacher === 'Daniela S')
+      console.log('[Regen Debug] Carolina/Daniela S/Phonics classes:', phonicsClasses)
 
+      // Step 1: OR-Tools normal - more seeds, less time each
+      setGenerationProgress({ current: 0, total: 100, message: "Starting OR-Tools solver..." })
+      remoteResult = await generateSchedulesRemote(teachers, classes, {
+        numOptions: 1,
+        numAttempts: 50,
+        maxTimeSeconds: 120,
+        lockedTeachers: lockedSchedules,
+        teachersNeedingStudyHalls,
+        rules,
+        startSeed: seedOffset,
+        skipStudyHalls,
+        grades,
+        onProgress: (current, total, message) => {
+          setGenerationProgress({ current, total, message: `[OR-Tools] ${message}` })
+        }
+      })
+      result = remoteResult
+      usedStrategy = "normal"
+      // Save unlock suggestions from first attempt (before they get overwritten by retry loop)
+      if (remoteResult?.diagnostics?.unlockSuggestions) {
+        firstUnlockSuggestions = remoteResult.diagnostics.unlockSuggestions
+      }
+
+      // Step 2: If failed or duplicate, try OR-Tools deep (fewer seeds, more time each)
+      if (!isValidResult(result, 'OR-Tools Normal')) {
+        setGenerationProgress({ current: 0, total: 100, message: "Trying deeper exploration..." })
         remoteResult = await generateSchedulesRemote(teachers, classes, {
           numOptions: 1,
-          numAttempts: 15, // Fewer seeds = more time per seed
+          numAttempts: 15,
           maxTimeSeconds: 120,
           lockedTeachers: lockedSchedules,
           teachersNeedingStudyHalls,
           rules,
-          startSeed: currentSeed * 100 + seedOffset,
+          startSeed: seedOffset + 50,
           skipStudyHalls,
           grades,
           onProgress: (current, total, message) => {
@@ -1390,95 +1444,9 @@ export default function HistoryDetailPage() {
         usedStrategy = "deep"
       }
 
-      // Step 3: OR-Tools with suboptimal solutions (3rd press) → randomized fallback
-      if (useSuboptimal) {
-                setGenerationProgress({ current: 0, total: 100, message: "Trying OR-Tools with suboptimal solutions..." })
-
-        remoteResult = await generateSchedulesRemote(teachers, classes, {
-          numOptions: 1,
-          numAttempts: 15,
-          maxTimeSeconds: 120,
-          lockedTeachers: lockedSchedules,
-          teachersNeedingStudyHalls,
-          rules,
-          startSeed: currentSeed * 100 + seedOffset,
-          skipTopSolutions: 3,
-          skipStudyHalls,
-          grades,
-          onProgress: (current, total, message) => {
-            setGenerationProgress({ current, total, message: `[OR-Tools Suboptimal] ${message}` })
-          }
-        })
-        result = remoteResult
-        usedStrategy = "suboptimal"
-
-        // Fallback to randomized if still matches preview
-        if (remoteResult.status === 'success' && remoteResult.options.length > 0) {
-          const { matchesPreview } = checkForMatches(remoteResult.options[0].teacherSchedules)
-          if (matchesPreview) {
-                        setGenerationProgress({ current: 0, total: 100, message: "Trying OR-Tools with randomized scoring..." })
-
-            remoteResult = await generateSchedulesRemote(teachers, classes, {
-              numOptions: 1,
-              numAttempts: 15,
-              maxTimeSeconds: 45,
-              lockedTeachers: lockedSchedules,
-              teachersNeedingStudyHalls,
-              rules,
-              startSeed: currentSeed * 100 + seedOffset + 50,
-              randomizeScoring: true,
-              skipStudyHalls,
-              grades,
-              onProgress: (current, total, message) => {
-                setGenerationProgress({ current, total, message: `[OR-Tools Randomized] ${message}` })
-              }
-            })
-            result = remoteResult
-            usedStrategy = "randomized"
-          }
-        }
-      }
-
-      // Step 4: OR-Tools with randomized scoring (4th press)
-      if (useRandomized) {
-                setGenerationProgress({ current: 0, total: 100, message: "Trying OR-Tools with randomized scoring..." })
-
-        remoteResult = await generateSchedulesRemote(teachers, classes, {
-          numOptions: 1,
-          numAttempts: 15,
-          maxTimeSeconds: 120,
-          lockedTeachers: lockedSchedules,
-          teachersNeedingStudyHalls,
-          rules,
-          startSeed: currentSeed * 100 + seedOffset + 50,
-          randomizeScoring: true,
-          skipStudyHalls,
-          grades,
-          onProgress: (current, total, message) => {
-            setGenerationProgress({ current, total, message: `[OR-Tools Randomized] ${message}` })
-          }
-        })
-        result = remoteResult
-        usedStrategy = "randomized"
-      }
-
-      // Step 5: Check if we should fall back to JS solver
-      let shouldFallbackToJs = useJs || !remoteResult || remoteResult.status !== 'success' || remoteResult.options.length === 0
-
-      if (!shouldFallbackToJs && remoteResult && remoteResult.options.length > 0) {
-        const { matchesOriginal, matchesPreview } = checkForMatches(remoteResult.options[0].teacherSchedules)
-
-        if (matchesOriginal) {
-          shouldFallbackToJs = true
-        } else if (matchesPreview) {
-          shouldFallbackToJs = true
-        }
-      }
-
-      // Final: JS solver (start here on 5th+ press, or fallback)
-      if (shouldFallbackToJs) {
-        setGenerationProgress({ current: 0, total: 100, message: useJs ? "Using JS solver..." : "Trying JS solver for variety..." })
-
+      // Step 3: JS solver - different algorithm, shuffling can find solutions OR-Tools misses
+      if (!isValidResult(result, 'OR-Tools Deep')) {
+        setGenerationProgress({ current: 0, total: 100, message: "Trying JS solver (shuffling)..." })
         const jsResult = await generateSchedules(teachers, classes, {
           numOptions: 1,
           numAttempts: 100,
@@ -1497,11 +1465,73 @@ export default function HistoryDetailPage() {
         usedStrategy = "js"
       }
 
+      // Step 4: If still failed, try OR-Tools suboptimal solutions
+      if (!isValidResult(result, 'JS Solver')) {
+        setGenerationProgress({ current: 0, total: 100, message: "Trying suboptimal solutions..." })
+        remoteResult = await generateSchedulesRemote(teachers, classes, {
+          numOptions: 1,
+          numAttempts: 15,
+          maxTimeSeconds: 120,
+          lockedTeachers: lockedSchedules,
+          teachersNeedingStudyHalls,
+          rules,
+          startSeed: seedOffset + 100,
+          skipTopSolutions: 3,
+          skipStudyHalls,
+          grades,
+          onProgress: (current, total, message) => {
+            setGenerationProgress({ current, total, message: `[OR-Tools Suboptimal] ${message}` })
+          }
+        })
+        result = remoteResult
+        usedStrategy = "suboptimal"
+      }
+
+      // Step 5: Final attempt - OR-Tools with randomized scoring
+      if (!isValidResult(result, 'OR-Tools Suboptimal')) {
+        setGenerationProgress({ current: 0, total: 100, message: "Trying randomized scoring..." })
+        remoteResult = await generateSchedulesRemote(teachers, classes, {
+          numOptions: 1,
+          numAttempts: 15,
+          maxTimeSeconds: 120,
+          lockedTeachers: lockedSchedules,
+          teachersNeedingStudyHalls,
+          rules,
+          startSeed: seedOffset + 150,
+          randomizeScoring: true,
+          skipStudyHalls,
+          grades,
+          onProgress: (current, total, message) => {
+            setGenerationProgress({ current, total, message: `[OR-Tools Randomized] ${message}` })
+          }
+        })
+        result = remoteResult
+        usedStrategy = "randomized"
+      }
+
       if (!result || result.status !== 'success' || result.options.length === 0) {
-        toast.error(result?.message || "Could not generate a valid schedule with these constraints", { icon: errorIcon })
+        // Check for unlock suggestions - prefer first attempt's suggestions (most relevant)
+        const suggestions = firstUnlockSuggestions || result?.diagnostics?.unlockSuggestions
+        if (suggestions && suggestions.length > 0) {
+          // Store suggestions in state for display in the regen UI
+          setUnlockSuggestions(suggestions)
+          const feasible = suggestions.filter((s: { feasible: boolean }) => s.feasible)
+          if (feasible.length > 0) {
+            const names = feasible.map((s: { teacher: string }) => s.teacher).join(', ')
+            toast.error(`Schedule not possible. Try also selecting: ${names}`, { icon: warningIcon, duration: 6000 })
+          } else {
+            toast.error("Could not find a valid schedule with current selection", { icon: errorIcon })
+          }
+        } else {
+          setUnlockSuggestions(null)
+          toast.error(result?.message || "Could not generate a valid schedule with these constraints", { icon: errorIcon })
+        }
         setIsGenerating(false)
         return
       }
+
+      // Clear suggestions on successful generation
+      setUnlockSuggestions(null)
 
       // Set as preview (not saved yet)
       const newOption = {
@@ -1825,6 +1855,10 @@ export default function HistoryDetailPage() {
         // Pure alignment regens (DB already matches snapshot) keep existing version to avoid
         // cascading re-alignment of already-aligned revisions.
         const snapshotContentChanging = classChanges?.hasChanges || false
+        console.log('[Snapshot Debug] snapshotContentChanging:', snapshotContentChanging)
+        console.log('[Snapshot Debug] classChanges?.hasChanges:', classChanges?.hasChanges)
+        console.log('[Snapshot Debug] classChanges?.affectedTeachers:', classChanges?.affectedTeachers)
+        console.log('[Snapshot Debug] existing snapshotAffectedTeachers:', generation.stats?.snapshotAffectedTeachers)
         statsForValidation = {
           ...generation.stats,
           classes_snapshot: classesSnapshot,
@@ -1838,6 +1872,7 @@ export default function HistoryDetailPage() {
             : (generation.stats?.snapshotAffectedTeachers || []),
           // rules_snapshot intentionally NOT updated - stays from original generation
         }
+        console.log('[Snapshot Debug] new snapshotAffectedTeachers:', statsForValidation.snapshotAffectedTeachers)
       } catch (error) {
         console.error('Failed to build updated snapshots for validation:', error)
         // Continue with original stats
@@ -1907,6 +1942,12 @@ export default function HistoryDetailPage() {
       const updatedStats = statsForValidation
 
       const newOptionNumber = saveAsNew ? generation.options.length + 1 : null
+      const statsBeingSaved = updatedStats !== generation.stats ? updatedStats : null
+      console.log('[Save Debug] Saving stats?', !!statsBeingSaved)
+      if (statsBeingSaved) {
+        console.log('[Save Debug] snapshotVersion:', statsBeingSaved.snapshotVersion)
+        console.log('[Save Debug] snapshotAffectedTeachers:', statsBeingSaved.snapshotAffectedTeachers)
+      }
       const updateRes = await fetch(`/api/history/${id}`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
@@ -1934,6 +1975,7 @@ export default function HistoryDetailPage() {
         setRegenMode(false)
         setSelectedForRegen(new Set())
         setUseCurrentClasses(false)
+        setUnlockSuggestions(null)
         // Remove from dismissed set since changes were actually applied
         if (useCurrentClasses) {
           setDismissedForOptions(prev => {
@@ -2021,6 +2063,7 @@ export default function HistoryDetailPage() {
     setRegenMode(false)
     setSelectedForRegen(new Set())
     setUseCurrentClasses(false)
+    setUnlockSuggestions(null)
     toast("Preview discarded", { icon: <Trash2 className="h-4 w-4 text-gray-500" /> })
   }
 
@@ -4802,19 +4845,13 @@ export default function HistoryDetailPage() {
   ): GradeConflict[] {
     const conflicts: GradeConflict[] = []
 
-    if (classesAtSlot.length > 1) {
-    }
-
     // Build a map of individual grade number -> classes at this slot
-    const gradeTeachers = new Map<number, Array<{ teacher: string; subject: string; gradeDisplay: string; isElective: boolean }>>()
+    const gradeTeachers = new Map<number, Array<{ teacher: string; subject: string; gradeDisplay: string; isElective: boolean; isCotaught: boolean }>>()
 
     for (const cls of classesAtSlot) {
       const isElective = cls.isElective ?? isClassElective(cls.teacher, cls.subject, classesSnapshot)
+      const isCotaught = isClassCotaught(cls.teacher, cls.subject, classesSnapshot)
       const gradeNums = parseGradeDisplayToNumbers(cls.gradeDisplay)
-
-      if (classesAtSlot.length > 1) {
-        const snapshotMatch = classesSnapshot?.find(c => c.teacher_name === cls.teacher && c.subject_name === cls.subject)
-      }
 
       for (const gradeNum of gradeNums) {
         if (!gradeTeachers.has(gradeNum)) {
@@ -4824,7 +4861,8 @@ export default function HistoryDetailPage() {
           teacher: cls.teacher,
           subject: cls.subject,
           gradeDisplay: cls.gradeDisplay,
-          isElective
+          isElective,
+          isCotaught
         })
       }
     }
@@ -4834,6 +4872,16 @@ export default function HistoryDetailPage() {
       const electives = teachers.filter(t => t.isElective)
 
       if (nonElectives.length > 1) {
+        // Check if all non-electives are co-taught classes with the same subject
+        // Co-taught classes with the same subject are SUPPOSED to be at the same time
+        const allCotaught = nonElectives.every(t => t.isCotaught)
+        const allSameSubject = nonElectives.every(t => t.subject === nonElectives[0].subject)
+
+        if (allCotaught && allSameSubject) {
+          // This is valid - co-taught classes sharing a slot
+          continue
+        }
+
         conflicts.push({
           gradeNum,
           gradeName: gradeNumToDisplay(gradeNum),
@@ -6763,21 +6811,23 @@ export default function HistoryDetailPage() {
             {viewMode === "timetable" ? "Grade Timetables" : viewMode === "teacher" ? "Teacher Schedules" : "Grade Schedules"}
           </h3>
           <div className="flex items-center gap-2 ml-auto">
-            <Button
-              variant="ghost"
-              size="sm"
-              className="gap-1 text-muted-foreground"
-              onClick={() => {
-                const url = `${window.location.origin}/history/${id}${viewMode !== "teacher" ? `?view=${viewMode}` : ""}`
-                navigator.clipboard.writeText(url)
-                const viewLabel = viewMode === "timetable" ? "Timetable" : viewMode === "teacher" ? "Teacher" : "Grade"
-                toast.success(`${viewLabel} view link copied — shows published version`)
-              }}
-            >
-              <Copy className="h-3.5 w-3.5" />
-              <span className="hidden sm:inline">Share {viewMode === "timetable" ? "Timetable" : viewMode === "teacher" ? "Teacher" : "Grade"} View</span>
-              <span className="sm:hidden">Share</span>
-            </Button>
+            {!regenMode && !swapMode && !studyHallMode && !freeformEdit && (
+              <Button
+                variant="ghost"
+                size="sm"
+                className="gap-1 text-muted-foreground"
+                onClick={() => {
+                  const url = `${window.location.origin}/history/${id}${viewMode !== "teacher" ? `?view=${viewMode}` : ""}`
+                  navigator.clipboard.writeText(url)
+                  const viewLabel = viewMode === "timetable" ? "Timetable" : viewMode === "teacher" ? "Teacher" : "Grade"
+                  toast.success(`${viewLabel} view link copied — shows published version`)
+                }}
+              >
+                <Copy className="h-3.5 w-3.5" />
+                <span className="hidden sm:inline">Share {viewMode === "timetable" ? "Timetable" : viewMode === "teacher" ? "Teacher" : "Grade"} View</span>
+                <span className="sm:hidden">Share</span>
+              </Button>
+            )}
             <div className="flex items-center gap-1 border rounded-md p-0.5">
               <Button
                 variant={viewMode === "teacher" ? "secondary" : "ghost"}
@@ -8168,6 +8218,38 @@ export default function HistoryDetailPage() {
                               </button>
                             )
                           })()}
+                          {/* Show "select suggested" when solver returned suggestions */}
+                          {!previewOption && unlockSuggestions && unlockSuggestions.length > 0 && (() => {
+                            // Select top one + any with at least 40% of top's shared sessions
+                            const topShared = unlockSuggestions[0]?.shared_sessions || 0
+                            const threshold = topShared * 0.4
+                            const suggestedTeachers: string[] = []
+                            for (const s of unlockSuggestions.slice(0, 3)) {
+                              // Always include top one, plus any ≥40% threshold
+                              if (suggestedTeachers.length === 0 || s.shared_sessions >= threshold) {
+                                if (s.teachers) {
+                                  suggestedTeachers.push(...s.teachers)
+                                } else {
+                                  suggestedTeachers.push(s.teacher)
+                                }
+                              }
+                            }
+                            const allSelected = suggestedTeachers.every(t => selectedForRegen.has(t))
+                            if (allSelected) return null
+                            return (
+                              <button
+                                onClick={() => {
+                                  const newSelection = new Set(selectedForRegen)
+                                  suggestedTeachers.forEach(t => newSelection.add(t))
+                                  setSelectedForRegen(newSelection)
+                                  setUnlockSuggestions(null)
+                                }}
+                                className="text-red-500 hover:text-red-700 hover:underline"
+                              >
+                                select suggested ({suggestedTeachers.length})
+                              </button>
+                            )
+                          })()}
                           <label className="border-l border-sky-300 pl-3 ml-1 flex items-center gap-1.5 cursor-pointer group" title="When enabled, study halls are not assigned during regeneration. You can reassign them manually after saving.">
                             <input
                               type="checkbox"
@@ -8193,6 +8275,77 @@ export default function HistoryDetailPage() {
                           {shouldCreateNew ? 'Save as new version' : 'Update ' + ((generation.selected_option || 1) === parseInt(viewingOption) ? 'Published' : 'Version ' + (generation.options[parseInt(viewingOption) - 1]?.label || viewingOption))}
                         </button>
                       </div>
+                      {/* Unlock suggestions when solver returns infeasible */}
+                      {unlockSuggestions && unlockSuggestions.length > 0 && !previewOption && (
+                        <div className="mt-3 pt-3 border-t border-sky-200">
+                          <div className="flex items-start gap-2 text-red-700 bg-red-50 border border-red-200 rounded-lg px-3 py-2">
+                            <AlertTriangle className="h-4 w-4 mt-0.5 flex-shrink-0" />
+                            <div className="flex-1">
+                              <div className="text-sm font-medium">Schedule not possible with current selection</div>
+                              <div className="text-xs mt-1">
+                                {unlockSuggestions.some(s => s.feasible) ? (
+                                  <>
+                                    <span>Try also selecting: </span>
+                                    {unlockSuggestions.filter(s => s.feasible).map((s, i) => (
+                                      <span key={s.teacher}>
+                                        {i > 0 && ', '}
+                                        <button
+                                          onClick={() => {
+                                            const newSelection = new Set(selectedForRegen)
+                                            // Handle pairs (teachers array) or single teacher
+                                            if (s.teachers && s.teachers.length > 0) {
+                                              s.teachers.forEach(t => newSelection.add(t))
+                                            } else {
+                                              newSelection.add(s.teacher)
+                                            }
+                                            setSelectedForRegen(newSelection)
+                                            setUnlockSuggestions(prev => prev?.filter(x => x.teacher !== s.teacher) || null)
+                                          }}
+                                          className="font-medium text-red-800 hover:text-red-900 underline underline-offset-2"
+                                        >
+                                          {s.teacher}
+                                        </button>
+                                        <span className="text-red-600"> ({s.shared_sessions} shared)</span>
+                                      </span>
+                                    ))}
+                                  </>
+                                ) : (
+                                  <>
+                                    <span>Teachers with most schedule overlap: </span>
+                                    {unlockSuggestions.slice(0, 3).map((s, i) => (
+                                      <span key={s.teacher}>
+                                        {i > 0 && ', '}
+                                        <span className="font-medium">{s.teacher}</span>
+                                        <span className="text-red-600"> ({s.shared_sessions} shared)</span>
+                                      </span>
+                                    ))}
+                                  </>
+                                )}
+                              </div>
+                              {unlockSuggestions.some(s => s.feasible) && (
+                                <button
+                                  onClick={() => {
+                                    const newSelection = new Set(selectedForRegen)
+                                    unlockSuggestions.filter(s => s.feasible).forEach(s => {
+                                      // Handle pairs (teachers array) or single teacher
+                                      if (s.teachers && s.teachers.length > 0) {
+                                        s.teachers.forEach(t => newSelection.add(t))
+                                      } else {
+                                        newSelection.add(s.teacher)
+                                      }
+                                    })
+                                    setSelectedForRegen(newSelection)
+                                    setUnlockSuggestions(null)
+                                  }}
+                                  className="mt-2 px-2 py-1 text-xs bg-red-600 text-white rounded hover:bg-red-700"
+                                >
+                                  Add all suggested
+                                </button>
+                              )}
+                            </div>
+                          </div>
+                        </div>
+                      )}
                       {/* Validation errors and soft warnings */}
                       {(() => {
                         // Filter out study_hall_coverage errors when showing preview (already shown in amber warning)
@@ -8268,21 +8421,23 @@ export default function HistoryDetailPage() {
                     )}
                   </div>
                   <div className="flex flex-wrap items-center gap-2 sm:gap-3 ml-auto no-print">
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      className="gap-1 text-muted-foreground"
-                      onClick={() => {
-                        const url = `${window.location.origin}/history/${id}${viewMode !== "teacher" ? `?view=${viewMode}` : ""}`
-                        navigator.clipboard.writeText(url)
-                        const viewLabel = viewMode === "timetable" ? "Timetable" : viewMode === "teacher" ? "Teacher" : "Grade"
-                        toast.success(`${viewLabel} view link copied — shows published version`)
-                      }}
-                    >
-                      <Copy className="h-3.5 w-3.5" />
-                      <span className="hidden sm:inline">Share {viewMode === "timetable" ? "Timetable" : viewMode === "teacher" ? "Teacher" : "Grade"} View</span>
-                      <span className="sm:hidden">Share</span>
-                    </Button>
+                    {!regenMode && !swapMode && !studyHallMode && !freeformEdit && (
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className="gap-1 text-muted-foreground"
+                        onClick={() => {
+                          const url = `${window.location.origin}/history/${id}${viewMode !== "teacher" ? `?view=${viewMode}` : ""}`
+                          navigator.clipboard.writeText(url)
+                          const viewLabel = viewMode === "timetable" ? "Timetable" : viewMode === "teacher" ? "Teacher" : "Grade"
+                          toast.success(`${viewLabel} view link copied — shows published version`)
+                        }}
+                      >
+                        <Copy className="h-3.5 w-3.5" />
+                        <span className="hidden sm:inline">Share {viewMode === "timetable" ? "Timetable" : viewMode === "teacher" ? "Teacher" : "Grade"} View</span>
+                        <span className="sm:hidden">Share</span>
+                      </Button>
+                    )}
                     <div className="flex items-center gap-1 border rounded-md p-0.5">
                       <Button
                         variant={viewMode === "teacher" ? "secondary" : "ghost"}
@@ -8333,7 +8488,6 @@ export default function HistoryDetailPage() {
                   const placedSH = previewOption.studyHallsPlaced || 0
                   const missingSH = expectedSH - placedSH
                   const btbIssues = previewOption.backToBackIssues || 0
-                  const isSuboptimal = missingSH > 0 || btbIssues > 0 || previewStrategy === "suboptimal" || previewStrategy === "randomized" || previewStrategy === "js"
 
                   const strategyNote = previewStrategy === "js"
                     ? "JS fallback"
@@ -8347,25 +8501,17 @@ export default function HistoryDetailPage() {
                   if (missingSH > 0) issues.push(`only ${placedSH}/${expectedSH} study halls placed`)
                   if (btbIssues > 0) issues.push(`${btbIssues} back-to-back issue${btbIssues !== 1 ? 's' : ''}`)
 
+                  // Success message - green for both optimal and suboptimal (we found a schedule!)
                   return (
-                    <>
-                      <div className={`col-span-full ${isSuboptimal ? 'mb-2' : 'mb-4'} text-sm bg-sky-50 border border-sky-200 rounded-lg px-3 py-2`}>
-                        <span className="text-sky-600">
-                          Comparing {previewTeachers.size} regenerated teacher{previewTeachers.size !== 1 ? 's' : ''}. Toggle between Original and Preview to compare.
-                        </span>
-                      </div>
-                      {isSuboptimal && (
-                        <div className="col-span-full mb-4 flex items-center gap-2 text-amber-600 text-sm bg-amber-50 border border-amber-200 rounded-lg px-3 py-1.5">
-                          <AlertTriangle className="h-4 w-4 flex-shrink-0" />
-                          <span>
-                            {issues.length > 0
-                              ? `Results: ${issues.join(', ')}${strategyNote ? ` (${strategyNote})` : ''}.`
-                              : `Used ${strategyNote} — results may not be optimal.`}
-                            {' '}Press Regenerate to try again.
-                          </span>
-                        </div>
-                      )}
-                    </>
+                    <div className="col-span-full mb-4 text-sm bg-green-50 border border-green-200 rounded-lg px-3 py-2 flex items-center gap-2">
+                      <Check className="h-4 w-4 text-green-600 flex-shrink-0" />
+                      <span className="text-green-700">
+                        Found schedule for {previewTeachers.size} teacher{previewTeachers.size !== 1 ? 's' : ''}
+                        {issues.length > 0 && <span className="text-green-600"> ({issues.join(', ')})</span>}
+                        {strategyNote && <span className="text-green-600"> — {strategyNote}</span>}.
+                        {' '}Toggle between Original and Preview to compare.
+                      </span>
+                    </div>
                   )
                 })()}
                 {viewMode === "timetable" && timetableTemplate ? (
@@ -8659,9 +8805,13 @@ export default function HistoryDetailPage() {
                 // Pre-select affected teachers (if known) and enter regen mode
                 // For DB changes: use classChanges (snapshot vs DB) and rebuild snapshot from DB
                 // For alignment: use stored affected teachers and keep existing snapshot
+                console.log('[Alignment Debug] snapshotNeedsUpdate:', snapshotNeedsUpdate)
+                console.log('[Alignment Debug] classChanges?.affectedTeachers:', classChanges?.affectedTeachers)
+                console.log('[Alignment Debug] generation.stats.snapshotAffectedTeachers:', generation?.stats?.snapshotAffectedTeachers)
                 const teachersToSelect = snapshotNeedsUpdate
                   ? (classChanges?.affectedTeachers || [])
                   : (generation?.stats?.snapshotAffectedTeachers || [])
+                console.log('[Alignment Debug] teachersToSelect:', teachersToSelect)
                 setSelectedForRegen(new Set(teachersToSelect))
                 setUseCurrentClasses(snapshotNeedsUpdate) // Only rebuild from DB when DB has actually changed
                 setRegenMode(true)

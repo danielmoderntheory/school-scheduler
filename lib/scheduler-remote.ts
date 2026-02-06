@@ -65,6 +65,15 @@ export interface ScheduleDiagnostics {
     teacher2: string;
     sessions2: number;
   }>;
+  unlockSuggestions?: Array<{
+    teacher: string;
+    shared_sessions: number;
+    feasible: boolean;
+    options_found: number;
+    impact: 'high' | 'medium' | 'low';
+    is_pair?: boolean;
+    teachers?: string[];  // For pair suggestions
+  }>;
 }
 
 export interface RemoteGeneratorResult {
@@ -91,10 +100,16 @@ export interface RemoteGeneratorResult {
   diagnostics?: ScheduleDiagnostics;
 }
 
+// Direct Cloud Run URL - bypasses Vercel's 10s timeout limit
+// Set via NEXT_PUBLIC_SOLVER_URL environment variable
+const DIRECT_SOLVER_URL = typeof window !== 'undefined'
+  ? (process.env.NEXT_PUBLIC_SOLVER_URL || '')
+  : '';
+
 /**
  * Generate schedules using the remote OR-Tools solver.
  *
- * Calls the /api/solve-remote endpoint which proxies to Cloud Run.
+ * Tries direct Cloud Run first (no Vercel timeout), falls back to Vercel proxy.
  */
 export async function generateSchedulesRemote(
   teachers: Teacher[],
@@ -120,9 +135,14 @@ export async function generateSchedulesRemote(
   await new Promise(resolve => setTimeout(resolve, 0));
   onProgress?.(0, numAttempts, 'Warming up solver...');
 
+  // Determine which endpoint to use for warmup
+  const warmupUrl = DIRECT_SOLVER_URL
+    ? `${DIRECT_SOLVER_URL}/health`
+    : '/api/solve-remote/health';
+
   // Warmup: ping health endpoint to wake up Cloud Run container before heavy request
   try {
-    const warmupResponse = await fetch('/api/solve-remote/health', { method: 'GET' });
+    const warmupResponse = await fetch(warmupUrl, { method: 'GET' });
     if (!warmupResponse.ok) {
       console.warn('Solver warmup failed, proceeding anyway:', warmupResponse.status);
     }
@@ -171,11 +191,20 @@ export async function generateSchedulesRemote(
       grades,
     };
 
+    // Debug: Log co-taught classes being sent to solver
+    const cotaughtInRequest = requestBody.classes.filter(c => c.isCotaught)
+    console.log('[Solver Debug] Co-taught classes in request:', cotaughtInRequest.length, cotaughtInRequest.map(c => ({ teacher: c.teacher, subject: c.subject, grades: c.grades, isCotaught: c.isCotaught })))
+
     // Start simulated progress (since we can't get real progress from the API)
     let simulatedProgress = 1;
     let progressInterval: ReturnType<typeof setInterval> | null = null;
     let completed = false;
     let reachedEnd = false;
+
+    const stopProgress = () => {
+      completed = true;
+      if (progressInterval) clearInterval(progressInterval);
+    };
 
     const startProgressSimulation = () => {
       progressInterval = setInterval(() => {
@@ -204,24 +233,69 @@ export async function generateSchedulesRemote(
     onProgress?.(1, numAttempts, 'Solving with OR-Tools CP-SAT...');
     startProgressSimulation();
 
-    const response = await fetch('/api/solve-remote', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify(requestBody),
-    });
+    let response: Response;
+    let usedDirectConnection = false;
+
+    // Try direct Cloud Run first (bypasses Vercel's 10s timeout limit)
+    if (DIRECT_SOLVER_URL) {
+      try {
+        console.log('[Solver] Trying direct Cloud Run connection...');
+        response = await fetch(`${DIRECT_SOLVER_URL}/solve`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify(requestBody),
+        });
+        usedDirectConnection = true;
+        console.log('[Solver] Direct Cloud Run connection successful');
+      } catch (directError) {
+        console.warn('[Solver] Direct Cloud Run failed, falling back to Vercel proxy:', directError);
+        // Fall through to Vercel proxy
+        response = await fetch('/api/solve-remote', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify(requestBody),
+        });
+      }
+    } else {
+      // No direct URL configured, use Vercel proxy
+      response = await fetch('/api/solve-remote', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(requestBody),
+      });
+    }
 
     // Stop progress simulation
-    completed = true;
-    if (progressInterval) clearInterval(progressInterval);
+    stopProgress();
 
     if (!response.ok) {
       const errorData = await response.json().catch(() => ({ message: 'Unknown error' }));
+
+      // Detect Vercel timeout (504 or specific timeout message)
+      const isTimeout = response.status === 504 ||
+        errorData.message?.includes('FUNCTION_INVOCATION_TIMEOUT') ||
+        errorData.message?.includes('Task timed out');
+
+      if (isTimeout) {
+        console.error('[Vercel Timeout] Solver request exceeded time limit:', {
+          status: response.status,
+          message: errorData.message,
+          hint: 'Consider reducing numAttempts or maxTimeSeconds, or upgrading Vercel plan'
+        });
+      }
+
       return {
         status: 'error',
         options: [],
-        message: errorData.message || `Server returned ${response.status}`,
+        message: isTimeout
+          ? 'Solver timed out - trying next strategy...'
+          : (errorData.message || `Server returned ${response.status}`),
       };
     }
 
@@ -241,11 +315,26 @@ export async function generateSchedulesRemote(
     };
 
   } catch (error) {
-    console.error('Remote solver error:', error);
+    const errorMessage = error instanceof Error ? error.message : 'Failed to connect to solver';
+
+    // Detect timeout-related errors at the network level
+    const isTimeout = errorMessage.includes('timeout') ||
+      errorMessage.includes('TIMEOUT') ||
+      errorMessage.includes('aborted');
+
+    if (isTimeout) {
+      console.error('[Vercel/Network Timeout] Solver request failed:', {
+        error: errorMessage,
+        hint: 'Request may have exceeded Vercel function timeout limit'
+      });
+    } else {
+      console.error('Remote solver error:', error);
+    }
+
     return {
       status: 'error',
       options: [],
-      message: error instanceof Error ? error.message : 'Failed to connect to solver',
+      message: isTimeout ? 'Solver timed out - trying next strategy...' : errorMessage,
     };
   }
 }

@@ -32,13 +32,11 @@ app = FastAPI(
     version="1.0.0"
 )
 
-# CORS configuration - allow Vercel frontend
-# In production, replace with your actual Vercel domain
+# CORS configuration - allow Vercel frontend (direct browser calls)
+# Supports localhost, Vercel preview deployments, and production domain
 ALLOWED_ORIGINS = [
     "http://localhost:3000",
     "http://localhost:3001",
-    "https://*.vercel.app",
-    "https://school-scheduler.vercel.app",  # Update with your actual domain
 ]
 
 # Also allow origin from environment variable
@@ -48,6 +46,7 @@ if os.environ.get("FRONTEND_URL"):
 app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS,
+    allow_origin_regex=r"https://.*\.vercel\.app",  # Allow all Vercel preview deployments
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -68,6 +67,7 @@ class ClassEntry(BaseModel):
     subject: str
     daysPerWeek: int = 1
     isElective: bool = False  # Electives skip grade conflicts
+    isCotaught: bool = False  # Co-taught classes must be scheduled together
     availableDays: Optional[list[str]] = None
     availableBlocks: Optional[list[int]] = None
     fixedSlots: Optional[list[list]] = None  # [[day, block], ...]

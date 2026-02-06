@@ -350,6 +350,7 @@ export function isClassCotaught(
  *
  * Rules:
  * - Two electives CAN share a slot (students choose which to attend)
+ * - Two co-taught classes with the SAME subject CAN share a slot (both teachers teach together)
  * - A non-elective and an elective CANNOT share (students must attend the required class)
  * - Two non-electives CANNOT share (obvious conflict)
  *
@@ -370,8 +371,17 @@ export function canClassesShareSlot(
   const isElectiveA = isClassElective(teacherA, subjectA, classesSnapshot)
   const isElectiveB = isClassElective(teacherB, subjectB, classesSnapshot)
 
-  // Both must be electives to share a slot
-  return isElectiveA && isElectiveB
+  // Both electives can share a slot
+  if (isElectiveA && isElectiveB) return true
+
+  // Co-taught classes with the same subject can share a slot (both teachers teach together)
+  if (subjectA === subjectB) {
+    const isCotaughtA = isClassCotaught(teacherA, subjectA, classesSnapshot)
+    const isCotaughtB = isClassCotaught(teacherB, subjectB, classesSnapshot)
+    if (isCotaughtA && isCotaughtB) return true
+  }
+
+  return false
 }
 
 /**
