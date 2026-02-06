@@ -373,6 +373,7 @@ export default function HistoryDetailPage() {
     is_pair?: boolean;
     teachers?: string[];
   }> | null>(null) // Suggestions from solver when infeasible
+  const [solverFailed, setSolverFailed] = useState(false) // Track when solver returned infeasible (for skip study halls hint)
 
   // Preview state - holds unsaved regenerated option for review
   const [previewOption, setPreviewOption] = useState<ScheduleOption | null>(null)
@@ -1093,6 +1094,7 @@ export default function HistoryDetailPage() {
     setSelectedForRegen(new Set())
     setRegenSeed(0) // Reset seed for fresh regeneration session
     setUnlockSuggestions(null)
+    setSolverFailed(false)
 
     // Run validation to show existing conflicts
     const existingErrors = validateFullSchedule(selectedResult, generation.stats)
@@ -1110,12 +1112,14 @@ export default function HistoryDetailPage() {
     setUseCurrentClasses(false)
     setValidationErrors([])
     setUnlockSuggestions(null)
+    setSolverFailed(false)
     setForceCreateNew(null)
   }
 
   function toggleTeacherSelection(teacher: string) {
-    // Clear stale unlock suggestions when selection changes
+    // Clear stale unlock suggestions and failure state when selection changes
     setUnlockSuggestions(null)
+    setSolverFailed(false)
     setSelectedForRegen(prev => {
       const next = new Set(prev)
       if (next.has(teacher)) {
@@ -1169,6 +1173,7 @@ export default function HistoryDetailPage() {
     setIsGenerating(true)
     setPreviewOption(null) // Clear previous results while regenerating
     setGenerationProgress({ current: 0, total: 0, message: "" }) // Reset progress
+    setSolverFailed(false) // Reset failure state
 
     try {
       let teachers: Teacher[]
@@ -1480,6 +1485,7 @@ export default function HistoryDetailPage() {
       if (!result || result.status !== 'success' || result.options.length === 0) {
         // Check for unlock suggestions - prefer first attempt's suggestions (most relevant)
         const suggestions = firstUnlockSuggestions || result?.diagnostics?.unlockSuggestions
+        setSolverFailed(true) // Track that solver failed (for skip study halls hint)
         if (suggestions && suggestions.length > 0) {
           // Store suggestions in state for display in the regen UI
           setUnlockSuggestions(suggestions)
@@ -1498,8 +1504,9 @@ export default function HistoryDetailPage() {
         return
       }
 
-      // Clear suggestions on successful generation
+      // Clear suggestions and failure state on successful generation
       setUnlockSuggestions(null)
+      setSolverFailed(false)
 
       // Set as preview (not saved yet)
       const newOption = {
@@ -8311,6 +8318,27 @@ export default function HistoryDetailPage() {
                                   {' '}to reduce constraints.
                                 </div>
                               )}
+                            </div>
+                          </div>
+                        </div>
+                      )}
+                      {/* Show skip study halls hint when solver failed but no suggestions */}
+                      {solverFailed && !skipStudyHalls && !previewOption && (!unlockSuggestions || unlockSuggestions.length === 0) && (
+                        <div className="mt-3 pt-3 border-t border-sky-200">
+                          <div className="flex items-start gap-2 text-red-700 bg-red-50 border border-red-200 rounded-lg px-3 py-2">
+                            <AlertTriangle className="h-4 w-4 mt-0.5 flex-shrink-0" />
+                            <div className="flex-1">
+                              <div className="text-sm font-medium">Schedule not possible with current selection</div>
+                              <div className="text-xs mt-1 text-red-600">
+                                Try{' '}
+                                <button
+                                  onClick={() => setSkipStudyHalls(true)}
+                                  className="underline underline-offset-2 hover:text-red-800"
+                                >
+                                  skipping study halls
+                                </button>
+                                {' '}to reduce constraints, or select additional teachers.
+                              </div>
                             </div>
                           </div>
                         </div>
