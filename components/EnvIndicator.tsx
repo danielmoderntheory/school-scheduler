@@ -8,12 +8,11 @@ export function EnvIndicator() {
   const [expanded, setExpanded] = useState(false)
   const pathname = usePathname()
 
-  // Don't show on public pages (login, not-found, etc.)
-  const publicPaths = ["/login", "/not-found", "/error"]
+  // Don't show on public pages (middleware enforces auth on other pages)
+  const publicPaths = ["/login", "/not-found", "/error", "/no-access"]
   const isPublicPage = publicPaths.some(p => pathname?.startsWith(p)) || pathname === "/"
 
-  // Also hide if not authenticated (no pathname means we're on a public route)
-  if (isPublicPage && !pathname?.includes("/history") && !pathname?.includes("/teachers") && !pathname?.includes("/classes") && !pathname?.includes("/generate") && !pathname?.includes("/rules") && !pathname?.includes("/quarters")) {
+  if (isPublicPage) {
     return null
   }
 
@@ -81,9 +80,9 @@ export function EnvIndicator() {
     : "bg-white/80"
 
   return (
-    <div className="fixed top-0 left-0 z-50 no-print">
+    <div className="fixed bottom-0 left-0 z-50 no-print">
       <div
-        className={`${bgColor} border-b border-r ${borderColor} rounded-br-md overflow-hidden transition-all duration-200 ${expanded ? 'w-44' : 'w-auto'}`}
+        className={`${bgColor} border-t border-r ${borderColor} rounded-tr-md overflow-hidden transition-all duration-200 ${expanded ? 'w-44' : 'w-auto'}`}
       >
         <button
           onClick={() => setExpanded(!expanded)}
@@ -98,7 +97,7 @@ export function EnvIndicator() {
             className={`text-[10px] font-medium ${isLocalWithProdDb ? 'text-red-600' : 'text-muted-foreground'} ${expanded ? '' : 'writing-mode-vertical'}`}
             style={expanded ? undefined : { writingMode: 'vertical-lr', textOrientation: 'mixed', letterSpacing: '0.05em' }}
           >
-            {envLabel}
+            {isLocalWithProdDb && !expanded ? 'prod db' : envLabel}
           </span>
         </button>
 

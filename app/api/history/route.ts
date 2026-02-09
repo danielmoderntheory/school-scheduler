@@ -7,6 +7,28 @@ export async function GET(request: NextRequest) {
   const starredOnly = searchParams.get("starred_only") === "true"
   const mostRecent = searchParams.get("most_recent") === "true"
   const limit = searchParams.get("limit")
+  const snapshotVersionOnly = searchParams.get("snapshot_version_only") === "true"
+
+  // Lightweight query for just snapshot versions (used for class locking)
+  if (snapshotVersionOnly && quarterId) {
+    const { data, error } = await supabase
+      .from("schedule_generations")
+      .select("generated_at, stats->snapshotVersion")
+      .eq("quarter_id", quarterId)
+
+    if (error) {
+      return NextResponse.json({ error: error.message }, { status: 500 })
+    }
+
+    // Find max snapshot version
+    let maxVersion = 0
+    for (const row of data || []) {
+      const version = (row as { snapshotVersion?: number }).snapshotVersion || new Date(row.generated_at).getTime()
+      if (version > maxVersion) maxVersion = version
+    }
+
+    return NextResponse.json({ maxSnapshotVersion: maxVersion })
+  }
 
   let query = supabase
     .from("schedule_generations")

@@ -36,6 +36,7 @@ export function GradeSelector({
 }: GradeSelectorProps) {
   const [open, setOpen] = useState(false)
   const [multiSelect, setMultiSelect] = useState(selectedIds.length > 1)
+  const [dropUp, setDropUp] = useState(false)
   const containerRef = useRef<HTMLDivElement>(null)
 
   // Filter to only individual grades (K-11)
@@ -47,11 +48,25 @@ export function GradeSelector({
     function handleClickOutside(e: MouseEvent) {
       if (containerRef.current && !containerRef.current.contains(e.target as Node)) {
         setOpen(false)
+        // If multi-select mode but only one grade selected, switch to single mode
+        if (multiSelect && selectedIds.length === 1) {
+          setMultiSelect(false)
+        }
       }
     }
     document.addEventListener("mousedown", handleClickOutside)
     return () => document.removeEventListener("mousedown", handleClickOutside)
-  }, [])
+  }, [multiSelect, selectedIds.length])
+
+  // Check if dropdown should appear above (when near bottom of viewport)
+  useEffect(() => {
+    if (open && containerRef.current) {
+      const rect = containerRef.current.getBoundingClientRect()
+      const spaceBelow = window.innerHeight - rect.bottom
+      const dropdownHeight = 350 // approx height of the grade selector dropdown
+      setDropUp(spaceBelow < dropdownHeight)
+    }
+  }, [open])
 
   // Sync multiSelect state with selectedIds
   useEffect(() => {
@@ -150,7 +165,10 @@ export function GradeSelector({
       </button>
 
       {open && (
-        <div className="absolute z-50 top-full left-0 mt-1 bg-popover border rounded-md shadow-lg p-3 min-w-[280px]">
+        <div className={cn(
+          "absolute z-50 left-0 bg-popover border rounded-md shadow-lg p-3 min-w-[280px]",
+          dropUp ? "bottom-full mb-1" : "top-full mt-1"
+        )}>
           {/* Grade Selection Mode */}
           <div className="space-y-3">
             {/* Single Grade */}
@@ -170,6 +188,9 @@ export function GradeSelector({
                     onChange={(e) => handleSingleGradeChange(e.target.value)}
                     className="mt-1 w-full text-sm border rounded px-2 py-1"
                   >
+                    {!selectedIds[0] && (
+                      <option value="" disabled>Select grade...</option>
+                    )}
                     {individualGrades.map(g => (
                       <option key={g.id} value={g.id}>
                         {g.display_name}

@@ -237,16 +237,27 @@ export default function ClassesPage() {
             })
           }
 
-          // Lock table based on most recent generation (not starred)
-          if (mostRecentGen) {
-            const generatedAt = new Date(mostRecentGen.generated_at).getTime()
-            const maxUpdatedAt = classesData.reduce((max: number, c: { updated_at?: string; created_at?: string }) => {
-              const t = new Date(c.updated_at || c.created_at || 0).getTime()
-              return t > max ? t : max
-            }, 0)
-            const shouldLock = maxUpdatedAt <= generatedAt
-            setTableLocked(shouldLock)
-            if (shouldLock) setLockReason('generation')
+          // Lock table based on when any classes snapshot was last saved
+          // Use lightweight endpoint to get max snapshotVersion across all generations
+          try {
+            const snapshotRes = await fetch(`/api/history?quarter_id=${active.id}&snapshot_version_only=true`)
+            if (snapshotRes.ok) {
+              const { maxSnapshotVersion } = await snapshotRes.json()
+
+              if (maxSnapshotVersion > 0) {
+                const maxClassUpdatedAt = classesData.reduce((max: number, c: { updated_at?: string; created_at?: string }) => {
+                  const t = new Date(c.updated_at || c.created_at || 0).getTime()
+                  return t > max ? t : max
+                }, 0)
+
+                // Lock if classes haven't been modified since any snapshot was saved
+                const shouldLock = maxClassUpdatedAt <= maxSnapshotVersion
+                setTableLocked(shouldLock)
+                if (shouldLock) setLockReason('generation')
+              }
+            }
+          } catch {
+            // Ignore - table will remain unlocked if query fails
           }
         } catch (e) {
           // Ignore history fetch errors
@@ -2400,7 +2411,19 @@ function NewClassRow({
           </Button>
         )}
       </td>
-      <td></td>
+      <td className="px-1 py-1">
+        {isActive && (
+          <button
+            onClick={() => {
+              setData({ teacher_id: "", grade_ids: [], is_elective: false, is_cotaught: false, subject_id: "", days_per_week: 1 })
+              setIsActive(false)
+            }}
+            className="p-1 hover:bg-destructive/10 rounded text-muted-foreground hover:text-destructive"
+          >
+            <X className="h-3 w-3" />
+          </button>
+        )}
+      </td>
     </tr>
   )
 }
@@ -2424,6 +2447,7 @@ function SelectCell({
 }: SelectCellProps) {
   const [open, setOpen] = useState(false)
   const [search, setSearch] = useState("")
+  const [dropUp, setDropUp] = useState(false)
   const containerRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLInputElement>(null)
 
@@ -2437,6 +2461,16 @@ function SelectCell({
     document.addEventListener("mousedown", handleClickOutside)
     return () => document.removeEventListener("mousedown", handleClickOutside)
   }, [])
+
+  // Check if dropdown should appear above (when near bottom of viewport)
+  useEffect(() => {
+    if (open && containerRef.current) {
+      const rect = containerRef.current.getBoundingClientRect()
+      const spaceBelow = window.innerHeight - rect.bottom
+      const dropdownHeight = 200 // approx max-h-48 = 192px
+      setDropUp(spaceBelow < dropdownHeight)
+    }
+  }, [open])
 
   const filtered = options.filter((o) =>
     o.label.toLowerCase().includes(search.toLowerCase())
@@ -2482,7 +2516,10 @@ function SelectCell({
         </div>
       )}
       {open && (
-        <div className="absolute z-50 top-full left-0 right-0 mt-1 bg-popover border rounded-md shadow-lg max-h-48 overflow-auto min-w-[180px]">
+        <div className={cn(
+          "absolute z-50 left-0 right-0 bg-popover border rounded-md shadow-lg max-h-48 overflow-auto min-w-[180px]",
+          dropUp ? "bottom-full mb-1" : "top-full mt-1"
+        )}>
           {filtered.map((opt) => (
             <div
               key={opt.id}
