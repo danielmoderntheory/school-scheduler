@@ -7,7 +7,7 @@ import { Checkbox } from "@/components/ui/checkbox"
 import { ScheduleGrid } from "@/components/ScheduleGrid"
 import { ScheduleStats } from "@/components/ScheduleStats"
 import { GradeTimetable } from "@/components/GradeTimetable"
-import { Loader2, Download, ArrowLeft, Check, RefreshCw, Shuffle, Trash2, Star, MoreVertical, Users, GraduationCap, Printer, ArrowLeftRight, X, Hand, Pencil, Copy, ChevronDown, ChevronUp, AlertTriangle, Minus, Info, Crosshair, Clock, ImageDown, Globe } from "lucide-react"
+import { Loader2, Download, ArrowLeft, Check, RefreshCw, Shuffle, Trash2, Star, MoreVertical, Users, GraduationCap, Printer, ArrowLeftRight, X, Hand, Pencil, Copy, ChevronDown, ChevronUp, AlertTriangle, Minus, Info, Crosshair, Clock, ImageDown, Globe, Undo2 } from "lucide-react"
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -42,7 +42,7 @@ import Link from "next/link"
 import type { ScheduleOption, TeacherSchedule, GradeSchedule, Teacher, FloatingBlock, PendingPlacement, ValidationError, CellLocation, ClassEntry, OpenBlockLabels, PendingTransfer, TimetableTemplate } from "@/lib/types"
 import { resolveRowsForGrade } from "@/lib/timetable-utils"
 import { parseClassesFromSnapshot, parseTeachersFromSnapshot, parseRulesFromSnapshot, hasValidSnapshots, detectClassChanges, computeExpectedTeachingSessions, type GenerationStats, type ChangeDetectionResult, type CurrentClass, type ClassSnapshot, type TeacherSnapshot } from "@/lib/snapshot-utils"
-import { parseGradeDisplayToNumbers, parseGradeDisplayToNames, gradesOverlap, gradesEqual, gradeNumToDisplay, isClassElective, isClassCotaught, shouldIgnoreGradeConflict } from "@/lib/grade-utils"
+import { parseGradeDisplayToNumbers, parseGradeDisplayToNames, gradesOverlap, gradesEqual, gradeNumToDisplay, isClassElective, isClassCotaught, shouldIgnoreGradeConflict, formatGradeDisplayCompact } from "@/lib/grade-utils"
 import { BLOCK_TYPE_OPEN, BLOCK_TYPE_STUDY_HALL, isOpenBlock, isStudyHall, isScheduledClass, isOccupiedBlock, entryIsOpen, entryIsOccupied, entryIsScheduledClass, isFullTime, setOpenBlockLabel, recalculateOptionStats, getFirstGradeEntry, isMultipleEntryCell } from "@/lib/schedule-utils"
 import toast, { successIcon, errorIcon, warningIcon } from "@/lib/toast"
 import { generateSchedules, reassignStudyHalls } from "@/lib/scheduler"
@@ -502,6 +502,16 @@ export default function HistoryDetailPage() {
     attemptIndex: number
   } | null>(null)
 
+  // Auto-fix undo state - captures state before any auto-fix was applied
+  // This allows undoing back to the "last manual drop" even after multiple auto-fixes
+  const [preAutoFixState, setPreAutoFixState] = useState<{
+    schedules: {
+      teacherSchedules: Record<string, TeacherSchedule>
+      gradeSchedules: Record<string, GradeSchedule>
+    }
+    fixCount: number  // How many auto-fixes have been applied since capture
+  } | null>(null)
+
   // Star dialog state
   const [showStarDialog, setShowStarDialog] = useState(false)
   const [starNote, setStarNote] = useState("")
@@ -583,6 +593,7 @@ export default function HistoryDetailPage() {
   }, [generation?.stats?.classes_snapshot])
 
   // Compute which placements have conflicts and detailed info for validation errors
+  // Uses the same core validation logic as validatePlacements() to ensure consistency
   const placementConflicts = useMemo(() => {
     if (!workingSchedules || pendingPlacements.length === 0 || conflictResolution) return []
 
@@ -596,66 +607,78 @@ export default function HistoryDetailPage() {
       conflictingEntry: [string, string]
     }> = []
 
-    // Check each placed block for conflicts
+    const classesSnapshot = generation?.stats?.classes_snapshot
+
+    // Use core validation functions and map results to include placement details
+    const gradeErrors = checkGradeConflictsCore(workingSchedules.teacherSchedules, classesSnapshot)
+    const subjectErrors = checkSubjectConflictsCore(workingSchedules.teacherSchedules)
+
+    // Map errors back to placements - only include conflicts involving pending placements
     for (const placement of pendingPlacements) {
       const block = floatingBlocks.find(b => b.id === placement.blockId)
       if (!block) continue
 
-      const { day, block: blockNum } = placement
-
-      // Check grade conflict - is this grade scheduled elsewhere at the same time?
-      // Use gradesOverlap() to handle multi-grade classes like "6th-11th Grade"
-      // In freeform mode, Study Halls are legitimate blocks that cannot be ignored
-      // Exception: Two electives CAN share the same slot (students choose which to attend)
-      const classesSnapshot = generation?.stats?.classes_snapshot
-      for (const [teacher, sched] of Object.entries(workingSchedules.teacherSchedules)) {
-        if (teacher === placement.teacher) continue
-        const entry = (sched as TeacherSchedule)[day]?.[blockNum]
-        if (entry && gradesOverlap(entry[0], block.grade) && isOccupiedBlock(entry[1])) {
-          // Skip conflict if both classes are electives (they can share the slot)
-          if (shouldIgnoreGradeConflict(teacher, entry[1], block.sourceTeacher || placement.teacher, block.subject, classesSnapshot)) {
-            continue
-          }
-          conflicts.push({
-            blockId: block.id,
-            placement,
-            block,
-            reason: `Placed ${block.grade} ${block.subject} → ${placement.teacher} ${day} B${blockNum} conflicts with ${entry[1]} (${teacher} ${day} B${blockNum}) — same grade, same time`,
-            conflictingTeacher: teacher,
-            conflictingBlock: blockNum,
-            conflictingEntry: entry
-          })
-          break
-        }
-      }
-
-      // Check subject conflict - same subject on same day for same grade
-      // Use gradesOverlap() to handle multi-grade classes
-      for (const [teacher, sched] of Object.entries(workingSchedules.teacherSchedules)) {
-        for (let b = 1; b <= 5; b++) {
-          if (teacher === placement.teacher && b === blockNum) continue
-          const entry = (sched as TeacherSchedule)[day]?.[b]
-          if (entry && gradesOverlap(entry[0], block.grade) && entry[1] === block.subject) {
-            // Only add if not already added for grade conflict
-            if (!conflicts.some(c => c.blockId === block.id)) {
+      // Check if any grade conflict involves this placement
+      for (const error of gradeErrors) {
+        const matchingCell = error.cells.find(c =>
+          c.teacher === placement.teacher && c.day === placement.day && c.block === placement.block
+        )
+        if (matchingCell) {
+          // Find the conflicting cell (not our placement)
+          const conflictingCell = error.cells.find(c =>
+            !(c.teacher === placement.teacher && c.day === placement.day && c.block === placement.block)
+          )
+          if (conflictingCell) {
+            const conflictingEntry = workingSchedules.teacherSchedules[conflictingCell.teacher]?.[conflictingCell.day]?.[conflictingCell.block]
+            if (conflictingEntry) {
               conflicts.push({
                 blockId: block.id,
                 placement,
                 block,
-                reason: `Placed ${block.grade} ${block.subject} → ${placement.teacher} ${day} B${blockNum} conflicts with ${block.subject} (${teacher} ${day} B${b}) — same subject, same day`,
-                conflictingTeacher: teacher,
-                conflictingBlock: b,
-                conflictingEntry: entry
+                reason: `Placed ${formatGradeDisplayCompact(block.grade, true)} ${block.subject} → ${placement.teacher} ${placement.day} B${placement.block} conflicts with ${conflictingEntry[1]} (${conflictingCell.teacher} ${conflictingCell.day} B${conflictingCell.block}) — same grade, same time`,
+                conflictingTeacher: conflictingCell.teacher,
+                conflictingBlock: conflictingCell.block,
+                conflictingEntry: conflictingEntry
               })
+              break
             }
-            break
+          }
+        }
+      }
+
+      // Check if any subject conflict involves this placement (only if not already flagged)
+      if (!conflicts.some(c => c.blockId === block.id)) {
+        for (const error of subjectErrors) {
+          const matchingCell = error.cells.find(c =>
+            c.teacher === placement.teacher && c.day === placement.day && c.block === placement.block
+          )
+          if (matchingCell) {
+            // Find the conflicting cell (not our placement)
+            const conflictingCell = error.cells.find(c =>
+              !(c.teacher === placement.teacher && c.day === placement.day && c.block === placement.block)
+            )
+            if (conflictingCell) {
+              const conflictingEntry = workingSchedules.teacherSchedules[conflictingCell.teacher]?.[conflictingCell.day]?.[conflictingCell.block]
+              if (conflictingEntry) {
+                conflicts.push({
+                  blockId: block.id,
+                  placement,
+                  block,
+                  reason: `Placed ${formatGradeDisplayCompact(block.grade, true)} ${block.subject} → ${placement.teacher} ${placement.day} B${placement.block} conflicts with ${block.subject} (${conflictingCell.teacher} ${conflictingCell.day} B${conflictingCell.block}) — same subject, same day`,
+                  conflictingTeacher: conflictingCell.teacher,
+                  conflictingBlock: conflictingCell.block,
+                  conflictingEntry: conflictingEntry
+                })
+                break
+              }
+            }
           }
         }
       }
     }
 
     return conflicts
-  }, [workingSchedules, pendingPlacements, floatingBlocks, conflictResolution])
+  }, [workingSchedules, pendingPlacements, floatingBlocks, conflictResolution, generation?.stats?.classes_snapshot])
 
   // Extract just the IDs for highlighting
   const conflictingBlockIds = useMemo(() =>
@@ -761,14 +784,23 @@ export default function HistoryDetailPage() {
   }, [generation?.options, generation?.stats])
 
   // Set validation errors when conflicts are detected
+  // Deduplicate by message to avoid showing same conflict multiple times (e.g., for co-taught linked blocks)
   useEffect(() => {
     if (placementConflicts.length > 0 && !conflictResolution) {
-      setValidationErrors(placementConflicts.map(c => ({
-        type: 'grade_conflict' as const,
-        message: c.reason,
-        cells: [{ teacher: c.placement.teacher, day: c.placement.day, block: c.placement.block }],
-        blockId: c.blockId
-      })))
+      const seenMessages = new Set<string>()
+      const dedupedErrors: ValidationError[] = []
+      for (const c of placementConflicts) {
+        if (!seenMessages.has(c.reason)) {
+          seenMessages.add(c.reason)
+          dedupedErrors.push({
+            type: 'grade_conflict' as const,
+            message: c.reason,
+            cells: [{ teacher: c.placement.teacher, day: c.placement.day, block: c.placement.block }],
+            blockId: c.blockId
+          })
+        }
+      }
+      setValidationErrors(dedupedErrors)
     } else if (placementConflicts.length === 0 && !conflictResolution) {
       // Only clear errors that came from placement conflicts (have a blockId)
       // Preserve initial validation errors (no blockId) set when entering freeform mode
@@ -2500,7 +2532,7 @@ export default function HistoryDetailPage() {
         const entry = schedule[day][Number(b)]
         if (Number(b) === block && entry && entry[1] && isScheduledClass(entry[1])) {
           if (gradesOverlap(entry[0], grade)) {
-            toast.error(`${grade} already has a class at this time`)
+            toast.error(`${formatGradeDisplayCompact(grade, true)} already has a class at this time`)
             return
           }
         }
@@ -2514,7 +2546,7 @@ export default function HistoryDetailPage() {
       for (const b of Object.keys(daySchedule)) {
         const cell = daySchedule[Number(b)]
         if (cell && isStudyHall(cell[1]) && gradesOverlap(cell[0], grade)) {
-          toast.error(`${grade} already has a study hall on ${day}`)
+          toast.error(`${formatGradeDisplayCompact(grade, true)} already has a study hall on ${day}`)
           return
         }
       }
@@ -2565,7 +2597,7 @@ export default function HistoryDetailPage() {
     if (remaining.length === 0) {
       toast("All study halls placed!", { icon: successIcon })
     } else {
-      toast(`${grade} study hall placed with ${teacher}`, { icon: successIcon })
+      toast(`${formatGradeDisplayCompact(grade, true)} study hall placed with ${teacher}`, { icon: successIcon })
     }
   }
 
@@ -2614,7 +2646,7 @@ export default function HistoryDetailPage() {
     setPreviewType("study-hall")
     setShowingPreview(true)
     setSelectedStudyHallGroup(null)
-    toast(`${grade} study hall removed from ${teacher}`, { icon: successIcon })
+    toast(`${formatGradeDisplayCompact(grade, true)} study hall removed from ${teacher}`, { icon: successIcon })
   }
 
   async function handleDeleteOption(optionIndex: number) {
@@ -3381,7 +3413,7 @@ export default function HistoryDetailPage() {
     })
     setSwapCount(prev => prev + 1)
 
-    toast(`Moved ${grade} ${subject}: ${source.day} B${source.block} → ${target.day} B${target.block}`, { icon: successIcon })
+    toast(`Moved ${formatGradeDisplayCompact(grade, true)} ${subject}: ${source.day} B${source.block} → ${target.day} B${target.block}`, { icon: successIcon })
 
     // Highlight the destination cell
     highlightCells([
@@ -3445,7 +3477,7 @@ export default function HistoryDetailPage() {
       }
       newGradeSchedules[grade][target.day][target.block] = sourceGradeEntry
 
-      successMessage = `Moved ${grade} ${sourceSubject}: ${source.day} B${source.block} → ${target.day} B${target.block}`
+      successMessage = `Moved ${formatGradeDisplayCompact(grade, true)} ${sourceSubject}: ${source.day} B${source.block} → ${target.day} B${target.block}`
       destinationCells = [
         { teacher: sourceTeacher, day: target.day, block: target.block, grade, subject: sourceSubject },
       ]
@@ -3774,6 +3806,7 @@ export default function HistoryDetailPage() {
     setFreeformClasses(null)
     setPendingTransfers([])
     setConflictResolution(null)
+    setPreAutoFixState(null)
     // Reset study hall stripping state
     setStudyHallsStripped(false)
     setStrippedStudyHalls([])
@@ -3862,6 +3895,19 @@ export default function HistoryDetailPage() {
     const entry = workingSchedules.teacherSchedules[location.teacher]?.[location.day]?.[location.block]
     if (!entry || isOpenBlock(entry[1])) return
 
+    // Block pickup for fixed slot classes - they cannot be moved
+    if (effectiveFreeformClasses && isScheduledClass(entry[1])) {
+      const classDef = effectiveFreeformClasses.find(cls =>
+        cls.teacher === location.teacher &&
+        cls.subject === entry[1] &&
+        gradesEqual(cls.gradeDisplay || cls.grade, entry[0])
+      )
+      if (classDef?.fixedSlots?.some(([day, block]) => day === location.day && block === location.block)) {
+        toast.error(`${entry[1]} has a fixed slot at ${location.day} B${location.block} and cannot be moved`)
+        return
+      }
+    }
+
     // Check if this cell has already been picked up
     const alreadyPickedUp = floatingBlocks.some(b =>
       b.sourceTeacher === location.teacher &&
@@ -3882,8 +3928,6 @@ export default function HistoryDetailPage() {
       isDisplaced: false  // Manually picked up = intentional
     }
 
-    setFloatingBlocks(prev => [...prev, block])
-
     // Update working schedules - set cell to OPEN
     const newTeacherSchedules = JSON.parse(JSON.stringify(workingSchedules.teacherSchedules))
     const newGradeSchedules = JSON.parse(JSON.stringify(workingSchedules.gradeSchedules))
@@ -3895,6 +3939,42 @@ export default function HistoryDetailPage() {
       newGradeSchedules[entry[0]][location.day][location.block] = null
     }
 
+    // Check for co-taught partners and pick them up too (they follow the primary block)
+    const classesSnapshot = generation?.stats?.classes_snapshot
+    const linkedPartnerBlocks: FloatingBlock[] = []
+
+    if (isClassCotaught(location.teacher, entry[1], classesSnapshot)) {
+      // Find partners: other teachers with same grade+subject at same day/block, also co-taught
+      for (const [teacher, sched] of Object.entries(workingSchedules.teacherSchedules)) {
+        if (teacher === location.teacher) continue
+        const partnerEntry = (sched as Record<string, Record<number, [string, string] | null>>)[location.day]?.[location.block]
+        if (partnerEntry && partnerEntry[0] === entry[0] && partnerEntry[1] === entry[1]
+            && isClassCotaught(teacher, partnerEntry[1], classesSnapshot)) {
+          // Create linked partner floating block
+          const partnerBlockId = `${teacher}-${location.day}-${location.block}-${Date.now()}`
+          const partnerBlock: FloatingBlock = {
+            id: partnerBlockId,
+            sourceTeacher: teacher,
+            sourceDay: location.day,
+            sourceBlock: location.block,
+            grade: partnerEntry[0],
+            subject: partnerEntry[1],
+            entry: partnerEntry,
+            isDisplaced: false,
+            linkedToBlockId: blockId  // Links to primary - won't render as floating chip
+          }
+          linkedPartnerBlocks.push(partnerBlock)
+
+          // Set partner slot to OPEN
+          newTeacherSchedules[teacher][location.day][location.block] = [partnerEntry[0], BLOCK_TYPE_OPEN]
+          if (newGradeSchedules[partnerEntry[0]]?.[location.day]?.[location.block]) {
+            newGradeSchedules[partnerEntry[0]][location.day][location.block] = null
+          }
+        }
+      }
+    }
+
+    setFloatingBlocks(prev => [...prev, block, ...linkedPartnerBlocks])
     setWorkingSchedules({ teacherSchedules: newTeacherSchedules, gradeSchedules: newGradeSchedules })
     setSelectedFloatingBlock(blockId)
 
@@ -3907,10 +3987,70 @@ export default function HistoryDetailPage() {
   function doPlaceBlock(block: FloatingBlock, location: CellLocation) {
     if (!workingSchedules) return
 
+    // Clear auto-fix undo state on new manual placement
+    // User is taking a new action, so previous auto-fix undo is no longer relevant
+    if (preAutoFixState) {
+      setPreAutoFixState(null)
+    }
+
     // Create a single copy of schedules for all modifications
     const newTeacherSchedules = JSON.parse(JSON.stringify(workingSchedules.teacherSchedules))
     const newGradeSchedules = JSON.parse(JSON.stringify(workingSchedules.gradeSchedules))
 
+    // Find linked co-taught partners for this block
+    const linkedPartners = floatingBlocks.filter(b => b.linkedToBlockId === block.id)
+    const isCotaught = linkedPartners.length > 0
+
+    // Co-taught blocks require strict validation - cannot place if any conflict exists
+    if (isCotaught) {
+      // Check primary target slot
+      const primaryTarget = newTeacherSchedules[location.teacher]?.[location.day]?.[location.block]
+      if (primaryTarget && isOccupiedBlock(primaryTarget[1])) {
+        toast.error(`Cannot place co-taught class: ${location.teacher} has a conflict at this slot`)
+        return
+      }
+
+      // Check all partner target slots
+      for (const partner of linkedPartners) {
+        const partnerSlot = newTeacherSchedules[partner.sourceTeacher]?.[location.day]?.[location.block]
+        if (partnerSlot && isOccupiedBlock(partnerSlot[1])) {
+          toast.error(`Cannot place co-taught class: ${partner.sourceTeacher} has a conflict at this slot`)
+          return
+        }
+      }
+
+      // All clear - place primary and all partners
+      newTeacherSchedules[location.teacher][location.day][location.block] = block.entry
+      for (const partner of linkedPartners) {
+        newTeacherSchedules[partner.sourceTeacher][location.day][location.block] = partner.entry
+      }
+
+      // Update state
+      setWorkingSchedules({ teacherSchedules: newTeacherSchedules, gradeSchedules: newGradeSchedules })
+
+      // Update placements for primary and partners
+      const newPlacements: PendingPlacement[] = [
+        { blockId: block.id, teacher: location.teacher, day: location.day, block: location.block, previousEntry: null },
+        ...linkedPartners.map(partner => ({
+          blockId: partner.id,
+          teacher: partner.sourceTeacher,
+          day: location.day,
+          block: location.block,
+          previousEntry: null
+        }))
+      ]
+      setPendingPlacements(prev => [
+        ...prev.filter(p => p.blockId !== block.id && !linkedPartners.some(lp => lp.id === p.blockId)),
+        ...newPlacements
+      ])
+
+      setSelectedFloatingBlock(null)
+      setValidationErrors([])
+      setConflictResolution(null)
+      return
+    }
+
+    // Non-co-taught block - existing logic with displacement handling
     // Check if the target location has a class/study hall that we need to pick up
     const targetEntry = newTeacherSchedules[location.teacher]?.[location.day]?.[location.block]
     let newFloatingBlock: FloatingBlock | null = null
@@ -4000,6 +4140,13 @@ export default function HistoryDetailPage() {
     // Check for cross-teacher class placement — always prompt for transfer
     // even if target teacher already has that class (their session count still needs updating)
     if (effectiveFreeformClasses && isScheduledClass(block.subject) && location.teacher !== block.sourceTeacher) {
+      // Co-taught classes cannot be transferred between teachers
+      const classesSnapshot = generation?.stats?.classes_snapshot
+      if (isClassCotaught(block.sourceTeacher, block.subject, classesSnapshot)) {
+        toast.error("Co-taught classes cannot be transferred between teachers")
+        return
+      }
+
       // Count total blocks the source teacher currently has for this class
       const classDef = effectiveFreeformClasses.find(cls =>
         cls.teacher === block.sourceTeacher && cls.subject === block.subject && gradesEqual(cls.gradeDisplay || cls.grade, block.grade)
@@ -4017,6 +4164,10 @@ export default function HistoryDetailPage() {
     const block = floatingBlocks.find(b => b.id === blockId)
     if (!block || !workingSchedules) return
 
+    // Find linked co-taught partners (blocks that follow this primary block)
+    const linkedPartners = floatingBlocks.filter(b => b.linkedToBlockId === blockId)
+    const allBlockIds = [blockId, ...linkedPartners.map(p => p.id)]
+
     // Check if this block was placed
     const placement = pendingPlacements.find(p => p.blockId === blockId)
 
@@ -4026,8 +4177,16 @@ export default function HistoryDetailPage() {
     // If it was placed, restore the cell to what was there before placement
     if (placement) {
       newTeacherSchedules[placement.teacher][placement.day][placement.block] = placement.previousEntry || [block.grade, BLOCK_TYPE_OPEN]
+      // Also restore partner placements
+      for (const partner of linkedPartners) {
+        const partnerPlacement = pendingPlacements.find(p => p.blockId === partner.id)
+        if (partnerPlacement) {
+          newTeacherSchedules[partnerPlacement.teacher][partnerPlacement.day][partnerPlacement.block] =
+            partnerPlacement.previousEntry || [partner.grade, BLOCK_TYPE_OPEN]
+        }
+      }
       // Skip gradeSchedules update - rebuilt on save
-      setPendingPlacements(prev => prev.filter(p => p.blockId !== blockId))
+      setPendingPlacements(prev => prev.filter(p => !allBlockIds.includes(p.blockId)))
     }
 
     // Check if the original location is now occupied by another placed block
@@ -4045,14 +4204,19 @@ export default function HistoryDetailPage() {
       }
     }
 
-    // Restore to original location (teacherSchedules only - gradeSchedules rebuilt on save)
+    // Restore primary to original location (teacherSchedules only - gradeSchedules rebuilt on save)
     newTeacherSchedules[block.sourceTeacher][block.sourceDay][block.sourceBlock] = block.entry
+
+    // Restore all linked partners to their original locations
+    for (const partner of linkedPartners) {
+      newTeacherSchedules[partner.sourceTeacher][partner.sourceDay][partner.sourceBlock] = partner.entry
+    }
     // Skip gradeSchedules update - this prevents creating phantom grade keys
 
     setWorkingSchedules({ teacherSchedules: newTeacherSchedules, gradeSchedules: newGradeSchedules })
 
-    // Remove the returned block from floating blocks (displaced block stays with its original source info)
-    setFloatingBlocks(prev => prev.filter(b => b.id !== blockId))
+    // Remove the returned block and all linked partners from floating blocks
+    setFloatingBlocks(prev => prev.filter(b => !allBlockIds.includes(b.id)))
 
     // Clear selection if we were selecting the returned block
     if (selectedFloatingBlock === blockId) {
@@ -4067,13 +4231,13 @@ export default function HistoryDetailPage() {
       if (transfer) {
         // Check if any other blocks of this class are still placed on the target teacher
         const otherPlacedOnTarget = pendingPlacements.filter(p => {
-          if (p.blockId === blockId) return false // exclude the one we just returned
+          if (allBlockIds.includes(p.blockId)) return false // exclude the ones we just returned
           const fb = floatingBlocks.find(b => b.id === p.blockId)
           return fb && fb.subject === block.subject && fb.grade === block.grade && p.teacher === transfer.toTeacher
         })
         // Also check for unplaced floating blocks transferred to the target teacher
         const otherFloatingToTarget = floatingBlocks.filter(b => {
-          if (b.id === blockId) return false // exclude the one we just returned
+          if (allBlockIds.includes(b.id)) return false // exclude the ones we just returned
           return b.subject === block.subject && b.grade === block.grade &&
             b.transferredTo === transfer.toTeacher &&
             !pendingPlacements.some(p => p.blockId === b.id)
@@ -4256,7 +4420,7 @@ export default function HistoryDetailPage() {
             blockers.push({
               blocker: { teacher, day, block: blockNum, grade: entry[0], subject: entry[1], entry },
               blockedPlacement: placement,
-              reason: `${entry[0]} ${entry[1]} conflicts with ${block.grade} at same time`
+              reason: `${formatGradeDisplayCompact(entry[0], true)} ${entry[1]} (${teacher}) conflicts with ${formatGradeDisplayCompact(block.grade, true)} ${block.subject} (${block.sourceTeacher}) at same time`
             })
           }
         }
@@ -4275,7 +4439,7 @@ export default function HistoryDetailPage() {
               blockers.push({
                 blocker: { teacher, day, block: b, grade: entry[0], subject: entry[1], entry },
                 blockedPlacement: placement,
-                reason: `${entry[0]} already has ${entry[1]} on ${day}`
+                reason: `${formatGradeDisplayCompact(entry[0], true)} already has ${entry[1]} (${teacher}) on ${day}`
               })
             }
           }
@@ -4479,6 +4643,14 @@ export default function HistoryDetailPage() {
   function handleCheckAndFix(singleConflictBlockId?: string) {
     if (!workingSchedules) return
 
+    // Capture pre-autofix state on first auto-fix (allows undo back to "last manual drop")
+    if (!preAutoFixState) {
+      setPreAutoFixState({
+        schedules: JSON.parse(JSON.stringify(workingSchedules)),
+        fixCount: 0
+      })
+    }
+
     // Get all placed floating blocks
     const placedBlocks = pendingPlacements.map(p => {
       const block = floatingBlocks.find(b => b.id === p.blockId)
@@ -4582,13 +4754,22 @@ export default function HistoryDetailPage() {
         : `Found ${blockers.length} blocking class${blockers.length !== 1 ? 'es' : ''} but couldn't find alternative positions (may have restrictions).`
       toast.error(msg)
       // Only update validation errors for unfixable ones
+      // Deduplicate by message to avoid showing same conflict multiple times
       if (!singleConflictBlockId) {
-        setValidationErrors(blockers.map(b => ({
-          type: 'grade_conflict' as const,
-          message: b.reason,
-          cells: [{ teacher: b.blocker.teacher, day: b.blocker.day, block: b.blocker.block }],
-          blockId: pendingPlacements.find(p => p === b.blockedPlacement)?.blockId
-        })))
+        const seenMessages = new Set<string>()
+        const dedupedErrors: ValidationError[] = []
+        for (const b of blockers) {
+          if (!seenMessages.has(b.reason)) {
+            seenMessages.add(b.reason)
+            dedupedErrors.push({
+              type: 'grade_conflict' as const,
+              message: b.reason,
+              cells: [{ teacher: b.blocker.teacher, day: b.blocker.day, block: b.blocker.block }],
+              blockId: pendingPlacements.find(p => p === b.blockedPlacement)?.blockId
+            })
+          }
+        }
+        setValidationErrors(dedupedErrors)
       }
       return
     }
@@ -4663,12 +4844,18 @@ export default function HistoryDetailPage() {
   function handleAcceptFix() {
     if (!conflictResolution || !workingSchedules) return
 
-    // Store previous state for undo
+    // Store previous state for undo via toast
     const previousSchedules = JSON.parse(JSON.stringify(workingSchedules))
+    const previousFixCount = preAutoFixState?.fixCount || 0
     const movedBlockers = conflictResolution.movedBlockers
 
     // Apply the new schedules with moved blockers
     setWorkingSchedules(conflictResolution.schedules)
+
+    // Increment fix count for undo tracking
+    if (preAutoFixState) {
+      setPreAutoFixState(prev => prev ? { ...prev, fixCount: prev.fixCount + 1 } : null)
+    }
 
     // pendingPlacements stay the same - we only moved other classes, not our placements
     setConflictResolution(null)
@@ -4676,7 +4863,7 @@ export default function HistoryDetailPage() {
 
     // Build description of what was moved
     const moveDescriptions = movedBlockers.map(m =>
-      `${m.grade} ${m.subject} → ${m.to.day} B${m.to.block}`
+      `${formatGradeDisplayCompact(m.grade, true)} ${m.subject} → ${m.to.day} B${m.to.block}`
     ).join(', ')
 
     // Dismiss any existing undo toast
@@ -4690,8 +4877,11 @@ export default function HistoryDetailPage() {
             onClick={() => {
               toast.dismiss(t.id)
               undoToastId.current = null
-              // Restore previous schedules
+              // Restore previous schedules and fix count
               setWorkingSchedules(previousSchedules)
+              if (preAutoFixState) {
+                setPreAutoFixState(prev => prev ? { ...prev, fixCount: previousFixCount } : null)
+              }
               toast("Fix undone", { icon: successIcon })
             }}
             className="px-2 py-1 text-sm font-medium text-amber-600 hover:text-amber-800 hover:bg-amber-50 rounded transition-colors"
@@ -4731,6 +4921,35 @@ export default function HistoryDetailPage() {
     setWorkingSchedules({ teacherSchedules: newTeacherSchedules, gradeSchedules: newGradeSchedules })
     setConflictResolution(null)
     toast("Undo complete - blocking classes restored to original positions", { icon: successIcon })
+  }
+
+  function handleUndoAllAutoFixes() {
+    // Dismiss any existing undo toast
+    if (undoToastId.current) {
+      toast.dismiss(undoToastId.current)
+      undoToastId.current = null
+    }
+
+    // If we have pre-autofix state, restore to it (undoes all applied fixes + cancels preview)
+    if (preAutoFixState) {
+      const fixCount = preAutoFixState.fixCount
+      setWorkingSchedules(JSON.parse(JSON.stringify(preAutoFixState.schedules)))
+      setPreAutoFixState(null)
+      setConflictResolution(null)
+      setValidationErrors([])
+      if (fixCount > 0) {
+        toast(`Undid ${fixCount} auto-fix${fixCount !== 1 ? 'es' : ''}`, { icon: successIcon })
+      } else {
+        toast("Fix cancelled", { icon: successIcon })
+      }
+      return
+    }
+
+    // Fallback: just cancel the current preview if no pre-autofix state
+    if (conflictResolution) {
+      setConflictResolution(null)
+      toast("Fix cancelled", { icon: successIcon })
+    }
   }
 
   // =============================================================================
@@ -4901,14 +5120,14 @@ export default function HistoryDetailPage() {
           if (conflict.conflictType === 'multiple_non_electives') {
             errors.push({
               type: 'grade_conflict',
-              message: `[Grade Conflict] ${conflict.gradeName} has ${conflict.nonElectives.length} classes at ${day} B${block}: ${conflict.nonElectives.map(t => `${t.teacher}/${t.subject}`).join(', ')}`,
+              message: `[Grade Conflict] ${conflict.gradeName} has ${conflict.nonElectives.length} classes at ${day} B${block}: ${conflict.nonElectives.map(t => `${t.subject} (${t.teacher})`).join(', ')}`,
               cells: conflict.nonElectives.map(t => ({ teacher: t.teacher, day, block, grade: conflict.gradeName }))
             })
           } else if (conflict.conflictType === 'non_elective_with_electives') {
             const allInConflict = [...conflict.nonElectives, ...conflict.electives]
             errors.push({
               type: 'grade_conflict',
-              message: `[Grade Conflict] ${conflict.gradeName} has required class (${conflict.nonElectives.map(t => `${t.teacher}/${t.subject}`).join(', ')}) conflicting with elective(s) (${conflict.electives.map(t => `${t.teacher}/${t.subject}`).join(', ')}) at ${day} B${block}`,
+              message: `[Grade Conflict] ${conflict.gradeName}: ${conflict.nonElectives.map(t => `${t.subject} (${t.teacher})`).join(', ')} conflicts with elective ${conflict.electives.map(t => `${t.subject} (${t.teacher})`).join(', ')} at ${day} B${block}`,
               cells: allInConflict.map(t => ({ teacher: t.teacher, day, block, grade: conflict.gradeName }))
             })
           }
@@ -4965,7 +5184,7 @@ export default function HistoryDetailPage() {
           if (uniqueBlocks.size > 1) {
             errors.push({
               type: 'subject_conflict',
-              message: `[Subject Conflict] ${grade} has ${subject} at ${uniqueBlocks.size} different times on ${day}: ${occurrences.map(o => `${o.teacher} B${o.block}`).join(', ')}`,
+              message: `[Subject Conflict] ${formatGradeDisplayCompact(grade, true)} has ${subject} at ${uniqueBlocks.size} different times on ${day}: ${occurrences.map(o => `${o.teacher} B${o.block}`).join(', ')}`,
               cells: occurrences.map(o => ({ teacher: o.teacher, day, block: o.block, grade, subject }))
             })
           }
@@ -5001,7 +5220,7 @@ export default function HistoryDetailPage() {
         if (entrySubject !== cls.subject) {
           errors.push({
             type: 'fixed_slot_violation',
-            message: `[Fixed Slot] ${cls.teacher}/${cls.subject} should be at ${day} B${block} but found ${entrySubject || 'empty'}`,
+            message: `[Fixed Slot] ${formatGradeDisplayCompact(cls.gradeDisplay || cls.grade, true)} ${cls.subject} (${cls.teacher}) should be at ${day} B${block} but found ${entrySubject || 'empty'}`,
             cells: [{ teacher: cls.teacher, day, block, grade: cls.grade, subject: cls.subject }]
           })
         }
@@ -5045,7 +5264,7 @@ export default function HistoryDetailPage() {
           if (hasRestrictedDays && !cls.availableDays!.includes(day)) {
             errors.push({
               type: 'availability_violation',
-              message: `[Availability] ${cls.teacher}/${cls.subject} at ${day} B${block} but only available on ${cls.availableDays!.join(', ')}`,
+              message: `[Availability] ${formatGradeDisplayCompact(cls.gradeDisplay || cls.grade, true)} ${cls.subject} (${cls.teacher}) at ${day} B${block} but only available on ${cls.availableDays!.join(', ')}`,
               cells: [{ teacher: cls.teacher, day, block, grade: cls.grade, subject: cls.subject }]
             })
           }
@@ -5053,7 +5272,7 @@ export default function HistoryDetailPage() {
           if (hasRestrictedBlocks && !cls.availableBlocks!.includes(block)) {
             errors.push({
               type: 'availability_violation',
-              message: `[Availability] ${cls.teacher}/${cls.subject} at ${day} B${block} but only available in blocks ${cls.availableBlocks!.join(', ')}`,
+              message: `[Availability] ${formatGradeDisplayCompact(cls.gradeDisplay || cls.grade, true)} ${cls.subject} (${cls.teacher}) at ${day} B${block} but only available in blocks ${cls.availableBlocks!.join(', ')}`,
               cells: [{ teacher: cls.teacher, day, block, grade: cls.grade, subject: cls.subject }]
             })
           }
@@ -5214,11 +5433,13 @@ export default function HistoryDetailPage() {
     // -------------------------------------------------------------------------
 
     // 1. Unplaced blocks - all floating blocks must be placed before saving
+    // Skip linked co-taught partners (they follow the primary block)
     for (const block of floatingBlocks) {
+      if (block.linkedToBlockId) continue // Partner follows primary, don't report separately
       if (!pendingPlacements.find(p => p.blockId === block.id)) {
         errors.push({
           type: 'unplaced',
-          message: `[Unplaced] ${block.grade} ${block.subject} must be placed`,
+          message: `[Unplaced] ${formatGradeDisplayCompact(block.grade, true)} ${block.subject} (${block.sourceTeacher}) must be placed`,
           blockId: block.id,
           cells: []
         })
@@ -5261,7 +5482,7 @@ export default function HistoryDetailPage() {
         if (!hasMatchingClass) {
           errors.push({
             type: 'teacher_conflict',
-            message: `[Wrong Teacher] ${placement.teacher} doesn't teach ${placedBlock.grade} ${placedBlock.subject} — only the assigned teacher's schedule can hold this class`,
+            message: `[Wrong Teacher] ${placement.teacher} doesn't teach ${formatGradeDisplayCompact(placedBlock.grade, true)} ${placedBlock.subject} (${placedBlock.sourceTeacher}) — only the assigned teacher's schedule can hold this class`,
             cells: [{ teacher: placement.teacher, day: placement.day, block: placement.block }]
           })
         }
@@ -5345,7 +5566,7 @@ export default function HistoryDetailPage() {
           const slots = relevantPlacements.map(p => `${p.teacher}: ${p.day} B${p.block}`).join(', ')
           errors.push({
             type: 'grade_conflict',
-            message: `[Co-Taught] ${grade} ${subject} teachers must be scheduled together (${slots})`,
+            message: `[Co-Taught] ${formatGradeDisplayCompact(grade, true)} ${subject} teachers must be scheduled together (${slots})`,
             cells: relevantPlacements.map(p => ({ teacher: p.teacher, day: p.day, block: p.block, grade, subject }))
           })
         }
@@ -5486,7 +5707,7 @@ export default function HistoryDetailPage() {
           if (sessionCount !== cls.daysPerWeek) {
             errors.push({
               type: 'session_count',
-              message: `[Session Count] ${cls.teacher}/${cls.gradeDisplay || cls.grade}/${cls.subject}: scheduled ${sessionCount}x but should be ${cls.daysPerWeek}x per week`,
+              message: `[Session Count] ${formatGradeDisplayCompact(cls.gradeDisplay || cls.grade, true)} ${cls.subject} (${cls.teacher}): scheduled ${sessionCount}x but should be ${cls.daysPerWeek}x per week`,
               cells: []
             })
           }
@@ -5513,7 +5734,7 @@ export default function HistoryDetailPage() {
             const locations = entries.map(e => `${e.day} B${e.block}`).join(', ')
             errors.push({
               type: 'unknown_class',
-              message: `[Unknown Class] ${teacher}/${grade}/${subject} (${entries.length}x at ${locations}) doesn't match any class in snapshot`,
+              message: `[Unknown Class] ${formatGradeDisplayCompact(grade, true)} ${subject} (${teacher}) (${entries.length}x at ${locations}) doesn't match any class in snapshot`,
               cells: entries.map(e => ({ teacher: e.teacher, day: e.day, block: e.block, grade: e.grade, subject: e.subject }))
             })
           }
@@ -5713,7 +5934,7 @@ export default function HistoryDetailPage() {
               block,
               gradeDisplay,
               subject,
-              description: `No matching class for ${teacher}/${gradeDisplay}/${subject} at ${day} B${block}`,
+              description: `No matching class for ${formatGradeDisplayCompact(gradeDisplay, true)} ${subject} (${teacher}) at ${day} B${block}`,
               canFix: false
             })
           }
@@ -5742,7 +5963,7 @@ export default function HistoryDetailPage() {
           gradeDisplay: cls.gradeDisplay || cls.grade,
           expected: `${cls.daysPerWeek} sessions`,
           found: `${foundCount} sessions`,
-          description: `${cls.teacher}/${cls.gradeDisplay || cls.grade}/${cls.subject}: expected ${cls.daysPerWeek}x/week but found ${foundCount}x`,
+          description: `${formatGradeDisplayCompact(cls.gradeDisplay || cls.grade, true)} ${cls.subject} (${cls.teacher}): expected ${cls.daysPerWeek}x/week but found ${foundCount}x`,
           canFix: false
         })
       } else if (foundCount > cls.daysPerWeek) {
@@ -5754,7 +5975,7 @@ export default function HistoryDetailPage() {
           gradeDisplay: cls.gradeDisplay || cls.grade,
           expected: `${cls.daysPerWeek} sessions`,
           found: `${foundCount} sessions`,
-          description: `${cls.teacher}/${cls.gradeDisplay || cls.grade}/${cls.subject}: expected ${cls.daysPerWeek}x/week but found ${foundCount}x (extra sessions)`,
+          description: `${formatGradeDisplayCompact(cls.gradeDisplay || cls.grade, true)} ${cls.subject} (${cls.teacher}): expected ${cls.daysPerWeek}x/week but found ${foundCount}x (extra sessions)`,
           canFix: false
         })
       }
@@ -6030,7 +6251,7 @@ export default function HistoryDetailPage() {
           block: conflict.block,
           gradeDisplay: conflict.grade,
           subject: conflict.subject,
-          description: `ELECTIVE CONFLICT: ${conflict.teacher}/${conflict.grade}/${conflict.subject} at ${conflict.day} B${conflict.block} conflicts with ${conflict.conflictingElectives.map(e => `${e.teacher}/${e.subject}`).join(', ')}`,
+          description: `ELECTIVE CONFLICT: ${formatGradeDisplayCompact(conflict.grade, true)} ${conflict.subject} (${conflict.teacher}) at ${conflict.day} B${conflict.block} conflicts with ${conflict.conflictingElectives.map(e => `${e.subject} (${e.teacher})`).join(', ')}`,
           canFix: false
         })
       }
@@ -7228,7 +7449,7 @@ export default function HistoryDetailPage() {
                                 ? `Selected Study Hall (${selectedCell.day} B${selectedCell.block}). Click another teacher's OPEN slot to reassign supervision.`
                                 : isOpenBlock(selectedCell.subject)
                                   ? `Selected OPEN block (${selectedCell.day} B${selectedCell.block}). Click another OPEN to exchange.`
-                                  : `Selected ${selectedCell.grade} ${selectedCell.subject} (${selectedCell.day} B${selectedCell.block}). Click a highlighted slot to exchange.`
+                                  : `Selected ${formatGradeDisplayCompact(selectedCell.grade || '', true)} ${selectedCell.subject} (${selectedCell.day} B${selectedCell.block}). Click a highlighted slot to exchange.`
                               : "Click a class to exchange a time slot. Or exchange a Study Hall with another teacher's OPEN slot."
                           ) : (
                             selectedCell
@@ -7311,7 +7532,7 @@ export default function HistoryDetailPage() {
                   {validationErrors.length > 0 && (
                     <div className="mt-3 pt-3 border-t border-amber-200">
                       <div className="text-xs font-medium text-red-600 mb-1">
-                        {swapCount === 0 ? 'Existing conflicts in schedule:' : 'Schedule conflicts:'}
+                        Validation errors:
                       </div>
                       <ul className="text-xs space-y-1 text-red-600">
                         {validationErrors.slice(0, 5).map((error, idx) => (
@@ -7472,7 +7693,7 @@ export default function HistoryDetailPage() {
                       {validationErrors.length > 0 ? (
                         <div className="min-w-0">
                           <div className={`text-xs font-medium mb-1 ${conflictingBlockIds.length > 0 ? 'text-amber-600' : 'text-red-600'}`}>
-                            {conflictingBlockIds.length > 0 ? 'Conflicts:' : 'Existing conflicts in schedule:'}
+                            {conflictingBlockIds.length > 0 ? 'Conflicts:' : 'Validation errors:'}
                           </div>
                           <ul className={`text-xs space-y-1 ${conflictingBlockIds.length > 0 ? 'text-amber-700' : 'text-red-600'}`}>
                             {validationErrors.map((error, idx) => (
@@ -7592,24 +7813,57 @@ export default function HistoryDetailPage() {
               {freeformMode && conflictResolution && (
                 <div className="flex justify-center mt-1 mb-2 no-print">
                   <div className="flex items-center gap-4 px-4 py-2 bg-amber-50 border border-amber-300 rounded-lg shadow-md">
+                    {/* Show count of previously applied auto-fixes */}
+                    {preAutoFixState && preAutoFixState.fixCount > 0 && (
+                      <div className="text-xs text-blue-700 border-r border-amber-300 pr-3 mr-1">
+                        <span className="font-medium">{preAutoFixState.fixCount}</span> applied
+                      </div>
+                    )}
                     <div className="text-xs text-amber-700">
-                      To place{' '}
-                      {conflictResolution.blockersList.map((b, i) => {
-                        const block = floatingBlocks.find(f => f.id === b.blockedPlacement.blockId)
+                      {(() => {
+                        // Deduplicate "to place" by grade+subject+teacher
+                        const toPlaceSet = new Set<string>()
+                        const toPlaceItems: Array<{grade: string, subject: string, teacher: string}> = []
+                        for (const b of conflictResolution.blockersList) {
+                          const block = floatingBlocks.find(f => f.id === b.blockedPlacement.blockId)
+                          if (!block || block.linkedToBlockId) continue
+                          const key = `${block.grade}|${block.subject}|${b.blockedPlacement.teacher}`
+                          if (!toPlaceSet.has(key)) {
+                            toPlaceSet.add(key)
+                            toPlaceItems.push({ grade: block.grade, subject: block.subject, teacher: b.blockedPlacement.teacher })
+                          }
+                        }
+
+                        // Deduplicate "moved" by grade+subject+teacher, collect destinations
+                        const movedMap = new Map<string, { grade: string, subject: string, teacher: string, destinations: string[] }>()
+                        for (const m of conflictResolution.movedBlockers) {
+                          const key = `${m.grade}|${m.subject}|${m.from.teacher}`
+                          if (!movedMap.has(key)) {
+                            movedMap.set(key, { grade: m.grade, subject: m.subject, teacher: m.from.teacher, destinations: [] })
+                          }
+                          movedMap.get(key)!.destinations.push(`${m.to.day} B${m.to.block}`)
+                        }
+                        const movedItems = Array.from(movedMap.values())
+
                         return (
-                          <span key={i}>
-                            {i > 0 && ', '}
-                            <span className="font-semibold text-amber-900">{b.blockedPlacement.teacher}</span>'s {block?.grade} {block?.subject}
-                          </span>
+                          <>
+                            To place{' '}
+                            {toPlaceItems.map((item, i) => (
+                              <span key={i}>
+                                {i > 0 && ', '}
+                                <span className="font-semibold text-amber-900">{formatGradeDisplayCompact(item.grade, true)} {item.subject}</span> ({item.teacher})
+                              </span>
+                            ))}
+                            , moved{' '}
+                            {movedItems.map((item, i) => (
+                              <span key={i}>
+                                {i > 0 && ', '}
+                                <span className="font-semibold text-amber-900">{formatGradeDisplayCompact(item.grade, true)} {item.subject}</span> ({item.teacher}) to {item.destinations.join(' & ')}
+                              </span>
+                            ))}
+                          </>
                         )
-                      })}
-                      , moved{' '}
-                      {conflictResolution.movedBlockers.map((m, i) => (
-                        <span key={i}>
-                          {i > 0 && ', '}
-                          <span className="font-semibold text-amber-900">{m.from.teacher}</span>'s {m.grade} {m.subject} to {m.to.day} B{m.to.block}
-                        </span>
-                      ))}
+                      })()}
                     </div>
                     <div className="flex items-center gap-2">
                       <Button
@@ -7624,11 +7878,11 @@ export default function HistoryDetailPage() {
                       <Button
                         variant="outline"
                         size="sm"
-                        onClick={handleUndoFix}
+                        onClick={handleUndoAllAutoFixes}
                         className="text-amber-700 border-amber-400 hover:bg-amber-100"
                       >
-                        <X className="h-4 w-4 mr-1" />
-                        Undo
+                        <Undo2 className="h-4 w-4 mr-1" />
+                        {preAutoFixState && preAutoFixState.fixCount > 0 ? 'Undo All' : 'Undo'}
                       </Button>
                       <Button
                         size="sm"
@@ -7636,7 +7890,7 @@ export default function HistoryDetailPage() {
                         className="bg-amber-500 hover:bg-amber-600 text-white"
                       >
                         <Check className="h-4 w-4 mr-1" />
-                        Accept Fix
+                        Accept
                       </Button>
                     </div>
                   </div>
@@ -8356,7 +8610,7 @@ export default function HistoryDetailPage() {
                             {hard.length > 0 && (
                               <div className="mt-3 pt-3 border-t border-sky-200">
                                 <div className="text-xs font-medium text-red-600 mb-1">
-                                  {previewOption ? 'Schedule conflicts:' : 'Existing conflicts in schedule:'}
+                                  {previewOption ? 'Schedule conflicts:' : 'Validation errors:'}
                                 </div>
                                 <ul className="text-xs space-y-1 text-red-600">
                                   {hard.slice(0, 5).map((error, idx) => (
@@ -8572,9 +8826,11 @@ export default function HistoryDetailPage() {
                         .map(([teacher, schedule]) => {
                           // Get unplaced floating blocks belonging to this teacher
                           // Transferred blocks show under the target teacher (transferredTo)
+                          // Linked co-taught partners are hidden (they follow the primary block)
                           const teacherFloatingBlocks = floatingBlocks.filter(b =>
                             (b.transferredTo || b.sourceTeacher) === teacher &&
-                            !pendingPlacements.some(p => p.blockId === b.id)
+                            !pendingPlacements.some(p => p.blockId === b.id) &&
+                            !b.linkedToBlockId
                           )
 
                           return (
@@ -8639,6 +8895,9 @@ export default function HistoryDetailPage() {
                                     const isSelected = selectedFloatingBlock === block.id
                                     const error = validationErrors.find(e => e.blockId === block.id)
                                     const blockIsStudyHall = isStudyHall(block.subject)
+                                    const blockIsRegularClass = isScheduledClass(block.subject) && !blockIsStudyHall
+                                    const blockIsElective = blockIsRegularClass && isClassElective(block.sourceTeacher, block.subject, generation?.stats?.classes_snapshot)
+                                    const blockIsCotaught = blockIsRegularClass && isClassCotaught(block.sourceTeacher, block.subject, generation?.stats?.classes_snapshot)
 
                                     const isTransferred = !!block.transferredTo
 
@@ -8662,11 +8921,13 @@ export default function HistoryDetailPage() {
                                         `}
                                       >
                                         {isTransferred && <ArrowLeftRight className="absolute top-0 left-0 h-2.5 w-2.5 text-teal-500 z-10" />}
-                                        <div className="font-medium text-xs leading-tight truncate">
-                                          {block.grade.replace(' Grade', '').replace('Kindergarten', 'K')}
+                                        <div className="font-medium text-xs leading-tight truncate flex items-center justify-center">
+                                          <span className="truncate">{block.grade.replace(' Grade', '').replace('Kindergarten', 'K')}</span>
+                                          {blockIsElective && <span className="text-purple-500 ml-0.5 text-[9px] flex-shrink-0">EL</span>}
                                         </div>
-                                        <div className="text-[10px] leading-tight text-muted-foreground truncate">
-                                          {block.subject}
+                                        <div className="text-[10px] leading-tight text-muted-foreground truncate flex items-center justify-center">
+                                          <span className="truncate">{block.subject}</span>
+                                          {blockIsCotaught && <span className="text-teal-500 ml-0.5 text-[9px] flex-shrink-0">CO</span>}
                                         </div>
                                         <button
                                           onClick={(e) => {

@@ -202,6 +202,7 @@ export interface FloatingBlock {
   entry: [string, string];
   isDisplaced?: boolean; // true if picked up via chain (blocking another placement)
   transferredTo?: string; // target teacher name when block is part of a cross-teacher transfer
+  linkedToBlockId?: string; // co-taught partner follows this block (won't render as floating chip)
 }
 
 export interface PendingPlacement {

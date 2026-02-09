@@ -532,14 +532,20 @@ export function ScheduleGrid({
                         // Show the placed block's content
                         const placedBlock = floatingBlocks.find(b => b.id === placement.blockId)
                         const isTransferredPlacement = placedBlock?.transferredTo || (placedBlock && placement.teacher !== placedBlock.sourceTeacher)
+                        // Use source teacher for elective/cotaught lookup (class properties don't change when moved)
+                        const sourceTeacher = placedBlock?.sourceTeacher || teacherName
+                        const placedIsElective = isRegularClass && isClassElective(sourceTeacher, subjectName, classesSnapshot)
+                        const placedIsCotaught = isRegularClass && isClassCotaught(sourceTeacher, subjectName, classesSnapshot)
                         return (
                           <div className="max-w-full overflow-visible relative">
                             {isTransferredPlacement && <ArrowLeftRight className="absolute top-0 left-0 h-2.5 w-2.5 text-teal-500 z-10" />}
-                            <div className="font-medium text-xs leading-tight truncate" title={displayPrimary}>
-                              {formatGradeDisplayCompact(displayPrimary)}
+                            <div className="font-medium text-xs leading-tight truncate flex items-center justify-center" title={displayPrimary}>
+                              <span className="truncate">{formatGradeDisplayCompact(displayPrimary)}</span>
+                              {placedIsElective && <span className="text-purple-500 ml-1 text-[10px] flex-shrink-0">EL</span>}
                             </div>
-                            <div className="text-[10px] leading-tight text-muted-foreground truncate" title={displaySecondary}>
-                              {displaySecondary}
+                            <div className="text-[10px] leading-tight text-muted-foreground truncate flex items-center justify-center" title={displaySecondary}>
+                              <span className="truncate">{displaySecondary}</span>
+                              {placedIsCotaught && <span className="text-teal-500 ml-1 flex-shrink-0">CO</span>}
                             </div>
                           </div>
                         )
