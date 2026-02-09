@@ -1,16 +1,26 @@
 "use client"
 
 import { useState } from "react"
+import { usePathname } from "next/navigation"
 import { ShieldAlert } from "lucide-react"
 
 export function EnvIndicator() {
   const [expanded, setExpanded] = useState(false)
+  const pathname = usePathname()
+
+  // Don't show on public pages (login, not-found, etc.)
+  const publicPaths = ["/login", "/not-found", "/error"]
+  const isPublicPage = publicPaths.some(p => pathname?.startsWith(p)) || pathname === "/"
+
+  // Also hide if not authenticated (no pathname means we're on a public route)
+  if (isPublicPage && !pathname?.includes("/history") && !pathname?.includes("/teachers") && !pathname?.includes("/classes") && !pathname?.includes("/generate") && !pathname?.includes("/rules") && !pathname?.includes("/quarters")) {
+    return null
+  }
 
   const vercelEnv = process.env.NEXT_PUBLIC_VERCEL_ENV
   const gitBranch = process.env.NEXT_PUBLIC_VERCEL_GIT_COMMIT_REF
   const gitSha = process.env.NEXT_PUBLIC_VERCEL_GIT_COMMIT_SHA
-  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL
-  const solverUrl = process.env.NEXT_PUBLIC_SCHEDULER_API_URL
+  const solverUrl = process.env.NEXT_PUBLIC_SCHEDULER_API_URL || process.env.NEXT_PUBLIC_SOLVER_URL
   // Optional: explicitly set database environment (e.g., "production", "staging", "local")
   const supabaseEnv = process.env.NEXT_PUBLIC_SUPABASE_ENV
 
@@ -69,18 +79,6 @@ export function EnvIndicator() {
   const bgColor = isLocalWithProdDb
     ? "bg-red-50/90"
     : "bg-white/80"
-
-  // Production: minimal indicator, just a small dot
-  if (isProduction) {
-    return (
-      <div className="fixed top-1 left-1 z-50 no-print">
-        <div className="flex items-center gap-1 px-1.5 py-0.5 bg-white/50 rounded text-[9px] text-muted-foreground/50 hover:bg-white/80 hover:text-muted-foreground transition-all">
-          <span className="w-1.5 h-1.5 rounded-full bg-green-500" />
-          <span>prod</span>
-        </div>
-      </div>
-    )
-  }
 
   return (
     <div className="fixed top-0 left-0 z-50 no-print">
