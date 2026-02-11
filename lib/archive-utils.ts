@@ -5,7 +5,7 @@
  * Schedules store snapshots, so archived entities won't affect historical schedule display.
  */
 
-import { supabase } from "./supabase"
+import { supabase } from "./supabase-admin"
 import type { GenerationStats } from "./snapshot-utils"
 
 export type ArchiveEntityType = "teacher" | "grade" | "subject"

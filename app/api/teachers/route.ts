@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server"
-import { supabase } from "@/lib/supabase"
+import { supabase } from "@/lib/supabase-admin"
 import { TEACHER_STATUS_FULL_TIME } from "@/lib/schedule-utils"
 
 export async function GET() {

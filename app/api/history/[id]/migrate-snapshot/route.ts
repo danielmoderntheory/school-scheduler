@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server"
-import { supabase } from "@/lib/supabase"
+import { supabase } from "@/lib/supabase-admin"
 
 /**
  * One-time migration endpoint to add snapshot data to an old schedule generation.
