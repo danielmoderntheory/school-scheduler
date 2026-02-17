@@ -15,9 +15,9 @@ A web application for generating optimized K-11th grade school schedules using c
 ## Tech Stack
 
 - **Frontend**: Next.js 14 + TypeScript + Tailwind CSS
-- **Backend**: Python FastAPI + OR-Tools
-- **Database**: Supabase (PostgreSQL)
-- **Hosting**: Vercel (frontend) + Railway (backend)
+- **Backend**: Python FastAPI + OR-Tools (Cloud Run)
+- **Database**: Neon (Serverless PostgreSQL)
+- **Hosting**: Vercel (frontend) + Google Cloud Run (solver)
 
 ## Quick Start
 
@@ -25,8 +25,7 @@ A web application for generating optimized K-11th grade school schedules using c
 
 - Node.js 18+
 - Python 3.11+
-- Supabase account (free tier)
-- Railway account (free tier)
+- Neon account (free tier)
 
 ### Local Development
 
@@ -38,36 +37,25 @@ A web application for generating optimized K-11th grade school schedules using c
 
 2. **Set up the database**
    ```bash
-   # Create a new Supabase project
-   # Run the migration in supabase/migrations/001_initial_schema.sql
+   # Create a Neon project at https://neon.tech
+   # Run schema.sql against your database
+   psql $NEON_DATABASE_URL -f schema.sql
    ```
 
-3. **Start the backend**
+3. **Start the backend** (optional - for local solver)
    ```bash
    cd backend
-   python -m venv venv
-   source venv/bin/activate  # Windows: venv\Scripts\activate
-   pip install -r requirements.txt
-   
-   # Create .env file
-   echo "CORS_ORIGINS=http://localhost:3000" > .env
-   
-   uvicorn main:app --reload
+   ./run-local.sh
    ```
 
 4. **Start the frontend**
    ```bash
-   cd frontend
    npm install
-   
-   # Create .env.local file
-   cat > .env.local << EOF
-   NEXT_PUBLIC_SUPABASE_URL=your-supabase-url
-   NEXT_PUBLIC_SUPABASE_ANON_KEY=your-supabase-key
-   SCHEDULER_API_URL=http://localhost:8000
-   APP_PASSWORD=your-password
-   EOF
-   
+
+   # Create .env.local from .env.example
+   cp .env.example .env.local
+   # Edit .env.local with your Neon connection string
+
    npm run dev
    ```
 
@@ -75,31 +63,30 @@ A web application for generating optimized K-11th grade school schedules using c
 
 ## Deployment
 
-### Backend (Railway)
+### Backend (Cloud Run)
 
-1. Create a new Railway project
-2. Connect your GitHub repo
-3. Set root directory to `/backend`
-4. Add environment variables:
-   - `CORS_ORIGINS`: Your Vercel frontend URL
+```bash
+cd backend
+./deploy.sh
+```
 
 ### Frontend (Vercel)
 
 1. Import your GitHub repo to Vercel
-2. Set root directory to `/frontend`
-3. Add environment variables:
-   - `NEXT_PUBLIC_SUPABASE_URL`
-   - `NEXT_PUBLIC_SUPABASE_ANON_KEY`
-   - `SCHEDULER_API_URL`: Your Railway backend URL
+2. Add environment variables:
+   - `NEON_DATABASE_URL`: Your Neon connection string
+   - `SCHEDULER_API_URL`: Your Cloud Run backend URL
    - `APP_PASSWORD`
 
 ## Project Structure
 
 ```
 school-scheduler/
-├── frontend/           # Next.js app
-├── backend/            # FastAPI + OR-Tools
-├── supabase/          # Database migrations
+├── app/                # Next.js app router pages
+├── components/         # React components
+├── lib/               # Shared utilities
+├── backend/           # FastAPI + OR-Tools solver
+├── schema.sql         # Database schema
 ├── CLAUDE.md          # AI assistant context
 └── README.md
 ```

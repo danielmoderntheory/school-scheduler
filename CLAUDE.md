@@ -295,9 +295,9 @@ npm run dev          # http://localhost:3000
 # Build for production
 npm run build
 
-# Database (Supabase)
-npx supabase start   # Local Supabase
-npx supabase db push # Push migrations
+# Database (Neon)
+# Migrations are applied directly via psql
+# Schema is in schema.sql
 ```
 
 ### Type Checking
