@@ -70,7 +70,10 @@ export async function POST(request: NextRequest) {
         const gradeIds = sourceClasses.map((c: { grade_id: string }) => c.grade_id)
         const subjectIds = sourceClasses.map((c: { subject_id: string }) => c.subject_id)
         const daysPerWeek = sourceClasses.map((c: { days_per_week: number }) => c.days_per_week)
-        const gradeIdsArrays = sourceClasses.map((c: { grade_ids: string[] | null }) => c.grade_ids || null)
+        // Encode uuid[] arrays as text for unnest (PostgreSQL can't unnest 2D arrays properly)
+        const gradeIdsTexts = sourceClasses.map((c: { grade_ids: string[] | null }) =>
+          c.grade_ids ? `{${c.grade_ids.join(',')}}` : null
+        )
         const isElectives = sourceClasses.map((c: { is_elective: boolean }) => c.is_elective || false)
         const isCotaughts = sourceClasses.map((c: { is_cotaught: boolean }) => c.is_cotaught || false)
 
@@ -82,7 +85,7 @@ export async function POST(request: NextRequest) {
             unnest(${gradeIds}::uuid[]),
             unnest(${subjectIds}::uuid[]),
             unnest(${daysPerWeek}::int[]),
-            unnest(${gradeIdsArrays}::uuid[][]),
+            unnest(${gradeIdsTexts}::text[])::uuid[],
             unnest(${isElectives}::boolean[]),
             unnest(${isCotaughts}::boolean[])
           RETURNING id
