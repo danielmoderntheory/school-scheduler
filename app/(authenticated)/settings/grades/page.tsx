@@ -429,20 +429,22 @@ export default function GradesSettingsPage() {
         </div>
 
         {/* Archived Grades Section */}
-        {archivedGrades.length > 0 && (
-          <Collapsible
-            open={archivedOpen}
-            onOpenChange={setArchivedOpen}
-            className="mt-6"
-          >
-            <CollapsibleTrigger asChild>
-              <Button variant="ghost" className="flex items-center gap-2 text-muted-foreground hover:text-foreground">
-                <Archive className="h-4 w-4" />
-                <span>Archived Grades ({archivedGrades.length})</span>
-                <ChevronDown className={`h-4 w-4 transition-transform ${archivedOpen ? "rotate-180" : ""}`} />
-              </Button>
-            </CollapsibleTrigger>
-            <CollapsibleContent className="mt-2">
+        <Collapsible
+          open={archivedOpen}
+          onOpenChange={setArchivedOpen}
+          className="mt-6"
+        >
+          <CollapsibleTrigger asChild>
+            <Button variant="ghost" className="flex items-center gap-2 text-muted-foreground hover:text-foreground">
+              <Archive className="h-4 w-4" />
+              <span>Archived Grades ({archivedGrades.length})</span>
+              <ChevronDown className={`h-4 w-4 transition-transform ${archivedOpen ? "rotate-180" : ""}`} />
+            </Button>
+          </CollapsibleTrigger>
+          <CollapsibleContent className="mt-2">
+            {archivedGrades.length === 0 ? (
+              <p className="text-sm text-muted-foreground py-4 px-2">No archived grades</p>
+            ) : (
               <div className="border rounded-lg">
                 <Table>
                   <TableHeader>
@@ -482,9 +484,9 @@ export default function GradesSettingsPage() {
                   </TableBody>
                 </Table>
               </div>
-            </CollapsibleContent>
-          </Collapsible>
-        )}
+            )}
+          </CollapsibleContent>
+        </Collapsible>
       </div>
     </TooltipProvider>
   )

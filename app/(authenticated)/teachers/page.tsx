@@ -375,20 +375,22 @@ export default function TeachersPage() {
         </div>
 
         {/* Archived Teachers Section */}
-        {archivedTeachers.length > 0 && (
-          <Collapsible
-            open={archivedOpen}
-            onOpenChange={setArchivedOpen}
-            className="mt-6"
-          >
-            <CollapsibleTrigger asChild>
-              <Button variant="ghost" className="flex items-center gap-2 text-muted-foreground hover:text-foreground">
-                <Archive className="h-4 w-4" />
-                <span>Archived Teachers ({archivedTeachers.length})</span>
-                <ChevronDown className={`h-4 w-4 transition-transform ${archivedOpen ? "rotate-180" : ""}`} />
-              </Button>
-            </CollapsibleTrigger>
-            <CollapsibleContent className="mt-2">
+        <Collapsible
+          open={archivedOpen}
+          onOpenChange={setArchivedOpen}
+          className="mt-6"
+        >
+          <CollapsibleTrigger asChild>
+            <Button variant="ghost" className="flex items-center gap-2 text-muted-foreground hover:text-foreground">
+              <Archive className="h-4 w-4" />
+              <span>Archived Teachers ({archivedTeachers.length})</span>
+              <ChevronDown className={`h-4 w-4 transition-transform ${archivedOpen ? "rotate-180" : ""}`} />
+            </Button>
+          </CollapsibleTrigger>
+          <CollapsibleContent className="mt-2">
+            {archivedTeachers.length === 0 ? (
+              <p className="text-sm text-muted-foreground py-4 px-2">No archived teachers</p>
+            ) : (
               <div className="border rounded-lg">
                 <Table>
                   <TableHeader>
@@ -428,9 +430,9 @@ export default function TeachersPage() {
                   </TableBody>
                 </Table>
               </div>
-            </CollapsibleContent>
-          </Collapsible>
-        )}
+            )}
+          </CollapsibleContent>
+        </Collapsible>
       </div>
     </TooltipProvider>
   )

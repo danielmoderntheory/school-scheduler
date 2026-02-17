@@ -54,21 +54,41 @@ export async function DELETE(
   const { id } = await params
 
   try {
-    // Check if quarter has classes
-    const classes = await sql`
-      SELECT id FROM classes
-      WHERE quarter_id = ${id}
-      LIMIT 1
+    // Check if this is the active quarter
+    const [quarter] = await sql`
+      SELECT is_active FROM quarters WHERE id = ${id}
     `
 
-    if (classes.length > 0) {
+    if (quarter?.is_active) {
       return NextResponse.json(
-        { error: "Cannot archive quarter with classes. Delete classes first." },
+        { error: "Cannot archive the active quarter. Activate a different quarter first." },
         { status: 400 }
       )
     }
 
-    // Soft delete: set deleted_at instead of actually deleting
+    // Get class IDs for this quarter to cascade to restrictions
+    const classes = await sql`
+      SELECT id FROM classes WHERE quarter_id = ${id} AND deleted_at IS NULL
+    `
+    const classIds = classes.map((c: { id: string }) => c.id)
+
+    // Cascade soft-delete restrictions for these classes
+    if (classIds.length > 0) {
+      await sql`
+        UPDATE restrictions
+        SET deleted_at = NOW()
+        WHERE class_id = ANY(${classIds}::uuid[]) AND deleted_at IS NULL
+      `
+    }
+
+    // Cascade soft-delete classes belonging to this quarter
+    await sql`
+      UPDATE classes
+      SET deleted_at = NOW()
+      WHERE quarter_id = ${id} AND deleted_at IS NULL
+    `
+
+    // Soft delete the quarter
     await sql`
       UPDATE quarters
       SET deleted_at = NOW()

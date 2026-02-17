@@ -93,6 +93,7 @@ CREATE TABLE classes (
     grade_ids UUID[],
     created_at TIMESTAMPTZ DEFAULT NOW(),
     updated_at TIMESTAMPTZ DEFAULT NOW(),
+    deleted_at TIMESTAMPTZ DEFAULT NULL,
     UNIQUE(quarter_id, teacher_id, grade_id, subject_id)
 );
 
@@ -104,7 +105,8 @@ CREATE TABLE restrictions (
     class_id UUID NOT NULL REFERENCES classes(id) ON DELETE CASCADE,
     restriction_type TEXT NOT NULL CHECK (restriction_type IN ('fixed_slot', 'available_days', 'available_blocks')),
     value JSONB NOT NULL,
-    created_at TIMESTAMPTZ DEFAULT NOW()
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    deleted_at TIMESTAMPTZ DEFAULT NULL
 );
 
 -- ============================================================================
@@ -204,6 +206,8 @@ CREATE INDEX idx_teachers_deleted_at ON teachers(deleted_at);
 CREATE INDEX idx_grades_deleted_at ON grades(deleted_at);
 CREATE INDEX idx_subjects_deleted_at ON subjects(deleted_at);
 CREATE INDEX idx_quarters_deleted_at ON quarters(deleted_at);
+CREATE INDEX idx_classes_deleted_at ON classes(deleted_at);
+CREATE INDEX idx_restrictions_deleted_at ON restrictions(deleted_at);
 CREATE INDEX idx_timetable_templates_deleted_at ON timetable_templates(deleted_at);
 
 -- ============================================================================

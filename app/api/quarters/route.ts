@@ -37,26 +37,27 @@ export async function POST(request: NextRequest) {
     `
 
     let classesCopied = 0
+    let restrictionsCopied = 0
 
     // Copy classes from another quarter if specified
     if (body.copy_from_quarter_id) {
-      // Get classes from source quarter
+      // Get classes from source quarter (include id for restriction mapping)
       const sourceClasses = await sql`
-        SELECT teacher_id, grade_id, subject_id, days_per_week, grade_ids, is_elective, is_cotaught
+        SELECT id, teacher_id, grade_id, subject_id, days_per_week, grade_ids, is_elective, is_cotaught
         FROM classes
         WHERE quarter_id = ${body.copy_from_quarter_id}
       `
 
       if (sourceClasses.length > 0) {
         // Get restrictions for source classes
-        const sourceClassIds = sourceClasses.map((c: { id?: string }) => c.id).filter(Boolean)
-        const restrictions = sourceClassIds.length > 0 ? await sql`
+        const sourceClassIds = sourceClasses.map((c: { id: string }) => c.id)
+        const restrictions = await sql`
           SELECT class_id, restriction_type, value
           FROM restrictions
           WHERE class_id = ANY(${sourceClassIds})
-        ` : []
+        `
 
-        // Build restrictions map
+        // Build restrictions map by source class id
         const restrictionsMap = new Map<string, Array<{ restriction_type: string; value: unknown }>>()
         for (const r of restrictions) {
           const list = restrictionsMap.get(r.class_id) || []
@@ -64,22 +65,67 @@ export async function POST(request: NextRequest) {
           restrictionsMap.set(r.class_id, list)
         }
 
-        // Insert classes one by one and collect their IDs
-        const insertedClasses: Array<{ id: string; sourceIndex: number }> = []
-        for (let i = 0; i < sourceClasses.length; i++) {
-          const c = sourceClasses[i]
-          const [inserted] = await sql`
-            INSERT INTO classes (quarter_id, teacher_id, grade_id, subject_id, days_per_week, grade_ids, is_elective, is_cotaught)
-            VALUES (${newQuarter.id}, ${c.teacher_id}, ${c.grade_id}, ${c.subject_id}, ${c.days_per_week}, ${c.grade_ids}, ${c.is_elective || false}, ${c.is_cotaught || false})
-            RETURNING id
-          `
-          insertedClasses.push({ id: inserted.id, sourceIndex: i })
-        }
+        // Insert all classes in a batch using unnest for better performance
+        const teacherIds = sourceClasses.map((c: { teacher_id: string }) => c.teacher_id)
+        const gradeIds = sourceClasses.map((c: { grade_id: string }) => c.grade_id)
+        const subjectIds = sourceClasses.map((c: { subject_id: string }) => c.subject_id)
+        const daysPerWeek = sourceClasses.map((c: { days_per_week: number }) => c.days_per_week)
+        const gradeIdsArrays = sourceClasses.map((c: { grade_ids: string[] | null }) => c.grade_ids || null)
+        const isElectives = sourceClasses.map((c: { is_elective: boolean }) => c.is_elective || false)
+        const isCotaughts = sourceClasses.map((c: { is_cotaught: boolean }) => c.is_cotaught || false)
+
+        const insertedClasses = await sql`
+          INSERT INTO classes (quarter_id, teacher_id, grade_id, subject_id, days_per_week, grade_ids, is_elective, is_cotaught)
+          SELECT
+            ${newQuarter.id},
+            unnest(${teacherIds}::uuid[]),
+            unnest(${gradeIds}::uuid[]),
+            unnest(${subjectIds}::uuid[]),
+            unnest(${daysPerWeek}::int[]),
+            unnest(${gradeIdsArrays}::uuid[][]),
+            unnest(${isElectives}::boolean[]),
+            unnest(${isCotaughts}::boolean[])
+          RETURNING id
+        `
 
         classesCopied = insertedClasses.length
 
-        // Copy restrictions for each class (if we had source IDs)
-        // Note: The source query doesn't include id, so we skip restriction copying for now
+        // Build mapping from source class index to new class id
+        // (insertedClasses are returned in the same order as the unnest arrays)
+        const classIdMapping = new Map<string, string>()
+        for (let i = 0; i < sourceClasses.length; i++) {
+          classIdMapping.set(sourceClasses[i].id, insertedClasses[i].id)
+        }
+
+        // Copy restrictions for each class using batch insert
+        const restrictionInserts: Array<{ class_id: string; restriction_type: string; value: string }> = []
+        for (const [sourceClassId, classRestrictions] of restrictionsMap) {
+          const newClassId = classIdMapping.get(sourceClassId)
+          if (newClassId) {
+            for (const r of classRestrictions) {
+              restrictionInserts.push({
+                class_id: newClassId,
+                restriction_type: r.restriction_type,
+                value: JSON.stringify(r.value),
+              })
+            }
+          }
+        }
+
+        if (restrictionInserts.length > 0) {
+          const rClassIds = restrictionInserts.map(r => r.class_id)
+          const rTypes = restrictionInserts.map(r => r.restriction_type)
+          const rValues = restrictionInserts.map(r => r.value)
+
+          await sql`
+            INSERT INTO restrictions (class_id, restriction_type, value)
+            SELECT
+              unnest(${rClassIds}::uuid[]),
+              unnest(${rTypes}::text[]),
+              unnest(${rValues}::jsonb[])
+          `
+          restrictionsCopied = restrictionInserts.length
+        }
       }
     }
 
@@ -100,7 +146,7 @@ export async function POST(request: NextRequest) {
       `
     }
 
-    return NextResponse.json({ ...newQuarter, classes_copied: classesCopied })
+    return NextResponse.json({ ...newQuarter, classes_copied: classesCopied, restrictions_copied: restrictionsCopied })
   } catch (error) {
     const { message, code } = formatDbError(error)
     if (code === "23505") {

@@ -336,20 +336,22 @@ export default function SubjectsSettingsPage() {
         </div>
 
         {/* Archived Subjects Section */}
-        {archivedSubjects.length > 0 && (
-          <Collapsible
-            open={archivedOpen}
-            onOpenChange={setArchivedOpen}
-            className="mt-6"
-          >
-            <CollapsibleTrigger asChild>
-              <Button variant="ghost" className="flex items-center gap-2 text-muted-foreground hover:text-foreground">
-                <Archive className="h-4 w-4" />
-                <span>Archived Subjects ({archivedSubjects.length})</span>
-                <ChevronDown className={`h-4 w-4 transition-transform ${archivedOpen ? "rotate-180" : ""}`} />
-              </Button>
-            </CollapsibleTrigger>
-            <CollapsibleContent className="mt-2">
+        <Collapsible
+          open={archivedOpen}
+          onOpenChange={setArchivedOpen}
+          className="mt-6"
+        >
+          <CollapsibleTrigger asChild>
+            <Button variant="ghost" className="flex items-center gap-2 text-muted-foreground hover:text-foreground">
+              <Archive className="h-4 w-4" />
+              <span>Archived Subjects ({archivedSubjects.length})</span>
+              <ChevronDown className={`h-4 w-4 transition-transform ${archivedOpen ? "rotate-180" : ""}`} />
+            </Button>
+          </CollapsibleTrigger>
+          <CollapsibleContent className="mt-2">
+            {archivedSubjects.length === 0 ? (
+              <p className="text-sm text-muted-foreground py-4 px-2">No archived subjects</p>
+            ) : (
               <div className="border rounded-lg">
                 <Table>
                   <TableHeader>
@@ -389,9 +391,9 @@ export default function SubjectsSettingsPage() {
                   </TableBody>
                 </Table>
               </div>
-            </CollapsibleContent>
-          </Collapsible>
-        )}
+            )}
+          </CollapsibleContent>
+        </Collapsible>
       </div>
     </TooltipProvider>
   )

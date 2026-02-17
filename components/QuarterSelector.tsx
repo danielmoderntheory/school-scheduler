@@ -9,14 +9,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
 import { Button } from "@/components/ui/button"
-import { Input } from "@/components/ui/input"
-import {
-  Tooltip,
-  TooltipContent,
-  TooltipProvider,
-  TooltipTrigger,
-} from "@/components/ui/tooltip"
-import { ChevronDown, Plus, Check, Copy, Trash2, RotateCcw, Archive } from "lucide-react"
+import { ChevronDown, Plus, Check, Copy, Loader2 } from "lucide-react"
 import toast from "@/lib/toast"
 
 interface Quarter {
@@ -27,12 +20,6 @@ interface Quarter {
   is_active: boolean
 }
 
-interface ArchivedQuarter {
-  id: string
-  name: string
-  deleted_at: string
-}
-
 export function QuarterSelector() {
   const [quarters, setQuarters] = useState<Quarter[]>([])
   const [activeQuarter, setActiveQuarter] = useState<Quarter | null>(null)
@@ -41,14 +28,32 @@ export function QuarterSelector() {
   const [newQuarterNum, setNewQuarterNum] = useState(1)
   const [copyFromQuarterId, setCopyFromQuarterId] = useState<string>("")
   const [isOpen, setIsOpen] = useState(false)
-  const [archivedQuarters, setArchivedQuarters] = useState<ArchivedQuarter[]>([])
-  const [showArchived, setShowArchived] = useState(false)
-  const [restoringId, setRestoringId] = useState<string | null>(null)
+  const [creating, setCreating] = useState(false)
 
   useEffect(() => {
     loadQuarters()
-    loadArchivedQuarters()
   }, [])
+
+  // Set defaults for next quarter based on active quarter
+  function setNextQuarterDefaults(active: Quarter | null) {
+    if (active) {
+      // Calculate next quarter
+      if (active.quarter_num >= 4) {
+        setNewYear(active.year + 1)
+        setNewQuarterNum(1)
+      } else {
+        setNewYear(active.year)
+        setNewQuarterNum(active.quarter_num + 1)
+      }
+    } else {
+      // No active quarter, default to current school year Q1
+      const now = new Date()
+      // School year starts in fall, so if we're past August, use current year
+      const schoolYear = now.getMonth() >= 7 ? now.getFullYear() : now.getFullYear() - 1
+      setNewYear(schoolYear)
+      setNewQuarterNum(1)
+    }
+  }
 
   async function loadQuarters() {
     try {
@@ -68,18 +73,6 @@ export function QuarterSelector() {
     }
   }
 
-  async function loadArchivedQuarters() {
-    try {
-      const res = await fetch("/api/archived?type=quarter")
-      if (res.ok) {
-        const data = await res.json()
-        setArchivedQuarters(data)
-      }
-    } catch (error) {
-      console.error("Failed to load archived quarters:", error)
-    }
-  }
-
   async function activateQuarter(id: string) {
     try {
       const res = await fetch(`/api/quarters/${id}/activate`, { method: "PUT" })
@@ -94,49 +87,8 @@ export function QuarterSelector() {
     setIsOpen(false)
   }
 
-  async function archiveQuarter(id: string, name: string) {
-    if (!confirm(`Archive "${name}"? You can restore it later from the archived section.`)) {
-      return
-    }
-
-    try {
-      const res = await fetch(`/api/quarters/${id}`, { method: "DELETE" })
-      if (res.ok) {
-        toast.success("Quarter archived")
-        loadQuarters()
-        loadArchivedQuarters()
-        // If we archived the active quarter, reload the page
-        if (activeQuarter?.id === id) {
-          window.location.href = "/classes"
-        }
-      } else {
-        const error = await res.json()
-        toast.error(error.error || "Failed to archive quarter")
-      }
-    } catch (error) {
-      toast.error("Failed to archive quarter")
-    }
-  }
-
-  async function restoreQuarter(id: string) {
-    setRestoringId(id)
-    try {
-      const res = await fetch(`/api/quarters/${id}/restore`, { method: "POST" })
-      if (res.ok) {
-        toast.success("Quarter restored")
-        loadQuarters()
-        loadArchivedQuarters()
-      } else {
-        toast.error("Failed to restore quarter")
-      }
-    } catch (error) {
-      toast.error("Failed to restore quarter")
-    } finally {
-      setRestoringId(null)
-    }
-  }
-
   async function createQuarter() {
+    setCreating(true)
     try {
       const res = await fetch("/api/quarters", {
         method: "POST",
@@ -150,8 +102,9 @@ export function QuarterSelector() {
       if (res.ok) {
         const data = await res.json()
         const classesCopied = data.classes_copied || 0
+        const restrictionsCopied = data.restrictions_copied || 0
         if (classesCopied > 0) {
-          toast.success(`Quarter created with ${classesCopied} classes copied`)
+          toast.success(`Quarter created with ${classesCopied} classes and ${restrictionsCopied} restrictions copied`)
         } else {
           toast.success("Quarter created")
         }
@@ -161,103 +114,52 @@ export function QuarterSelector() {
       } else {
         const error = await res.json()
         toast.error(error.error || "Failed to create quarter")
+        setCreating(false)
       }
     } catch (error) {
       toast.error("Failed to create quarter")
+      setCreating(false)
     }
   }
 
   return (
-    <TooltipProvider>
-      <DropdownMenu open={isOpen} onOpenChange={setIsOpen}>
+    <DropdownMenu open={isOpen} onOpenChange={setIsOpen}>
         <DropdownMenuTrigger asChild>
-          <Button variant="outline" className="min-w-[150px] justify-between">
+          <Button variant="outline" className="min-w-[130px] justify-between">
             {activeQuarter ? activeQuarter.name : "Select Quarter"}
             <ChevronDown className="ml-2 h-4 w-4" />
           </Button>
         </DropdownMenuTrigger>
-        <DropdownMenuContent align="end" className="w-56">
+        <DropdownMenuContent align="end">
           {quarters.map((quarter) => (
-            <div key={quarter.id} className="flex items-center group">
-              <DropdownMenuItem
-                onClick={() => activateQuarter(quarter.id)}
-                className="flex-1 flex items-center justify-between"
-              >
-                {quarter.name}
-                {quarter.is_active && <Check className="h-4 w-4" />}
-              </DropdownMenuItem>
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <button
-                    onClick={(e) => {
-                      e.stopPropagation()
-                      archiveQuarter(quarter.id, quarter.name)
-                    }}
-                    className="p-2 opacity-0 group-hover:opacity-100 hover:text-destructive transition-opacity"
-                    title="Archive quarter"
-                  >
-                    <Trash2 className="h-3.5 w-3.5" />
-                  </button>
-                </TooltipTrigger>
-                <TooltipContent>
-                  <p>Archive quarter</p>
-                </TooltipContent>
-              </Tooltip>
-            </div>
+            <DropdownMenuItem
+              key={quarter.id}
+              onClick={() => activateQuarter(quarter.id)}
+              className="flex items-center justify-between gap-3"
+            >
+              {quarter.name}
+              {quarter.is_active && <Check className="h-4 w-4" />}
+            </DropdownMenuItem>
           ))}
           {quarters.length > 0 && <DropdownMenuSeparator />}
-
-          {/* Archived Quarters Section */}
-          {archivedQuarters.length > 0 && (
-            <>
-              <DropdownMenuItem
-                onClick={(e) => {
-                  e.preventDefault()
-                  setShowArchived(!showArchived)
-                }}
-                className="text-muted-foreground"
-              >
-                <Archive className="mr-2 h-4 w-4" />
-                Archived ({archivedQuarters.length})
-                <ChevronDown className={`ml-auto h-4 w-4 transition-transform ${showArchived ? "rotate-180" : ""}`} />
-              </DropdownMenuItem>
-              {showArchived && (
-                <div className="bg-muted/50 py-1">
-                  {archivedQuarters.map((quarter) => (
-                    <div key={quarter.id} className="flex items-center px-2 py-1">
-                      <span className="flex-1 text-sm text-muted-foreground truncate">
-                        {quarter.name}
-                      </span>
-                      <button
-                        onClick={(e) => {
-                          e.stopPropagation()
-                          restoreQuarter(quarter.id)
-                        }}
-                        disabled={restoringId === quarter.id}
-                        className="p-1 hover:text-foreground text-muted-foreground transition-colors"
-                        title="Restore quarter"
-                      >
-                        <RotateCcw className={`h-3.5 w-3.5 ${restoringId === quarter.id ? "animate-spin" : ""}`} />
-                      </button>
-                    </div>
-                  ))}
-                </div>
-              )}
-              <DropdownMenuSeparator />
-            </>
-          )}
 
           {isCreating ? (
             <div className="p-2 space-y-2">
               <div className="flex gap-2">
-                <Input
-                  type="number"
+                <select
                   value={newYear}
                   onChange={(e) => setNewYear(parseInt(e.target.value))}
-                  className="w-20 h-8"
-                  min={2020}
-                  max={2100}
-                />
+                  className="w-24 h-8 rounded-md border border-input bg-background px-2 text-sm"
+                >
+                  {Array.from({ length: 10 }, (_, i) => {
+                    const year = new Date().getFullYear() - 2 + i
+                    return (
+                      <option key={year} value={year}>
+                        {year}-{String(year + 1).slice(-2)}
+                      </option>
+                    )
+                  })}
+                </select>
                 <select
                   value={newQuarterNum}
                   onChange={(e) => setNewQuarterNum(parseInt(e.target.value))}
@@ -294,13 +196,22 @@ export function QuarterSelector() {
                   size="sm"
                   className="flex-1"
                   onClick={createQuarter}
+                  disabled={creating}
                 >
-                  Create
+                  {creating ? (
+                    <>
+                      <Loader2 className="mr-2 h-3 w-3 animate-spin" />
+                      {copyFromQuarterId ? "Copying..." : "Creating..."}
+                    </>
+                  ) : (
+                    "Create"
+                  )}
                 </Button>
                 <Button
                   size="sm"
                   variant="outline"
                   onClick={() => setIsCreating(false)}
+                  disabled={creating}
                 >
                   Cancel
                 </Button>
@@ -310,6 +221,7 @@ export function QuarterSelector() {
             <DropdownMenuItem
               onClick={(e) => {
                 e.preventDefault()
+                setNextQuarterDefaults(activeQuarter)
                 setIsCreating(true)
               }}
             >
@@ -319,6 +231,5 @@ export function QuarterSelector() {
           )}
         </DropdownMenuContent>
       </DropdownMenu>
-    </TooltipProvider>
   )
 }
