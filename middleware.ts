@@ -18,14 +18,45 @@ export function middleware(request: NextRequest) {
     return NextResponse.next()
   }
 
-  // Allow unauthenticated access to shared schedule pages (public view mode)
-  // Match /history/[uuid] pattern for both page and API
-  // Also allow read-only access to grades and timetable templates (needed for timetable view)
+  // Handle public schedule pages - use `view` param as public mode indicator
   const isHistoryDetailPage = request.nextUrl.pathname.match(/^\/history\/[a-f0-9-]+$/i)
   const isHistoryDetailApi = request.nextUrl.pathname.match(/^\/api\/history\/[a-f0-9-]+$/i)
   const isPublicReadApi = request.nextUrl.pathname === "/api/timetable-templates" || request.nextUrl.pathname === "/api/grades"
-  if (isHistoryDetailPage || isHistoryDetailApi || (isPublicReadApi && request.method === "GET")) {
-    // Allow access but don't set auth - page will detect public view mode
+
+  // Allow public read APIs (needed for timetable view)
+  if (isPublicReadApi && request.method === "GET") {
+    return NextResponse.next()
+  }
+
+  // Allow history detail API (view param determines lite vs full response)
+  if (isHistoryDetailApi) {
+    return NextResponse.next()
+  }
+
+  // Handle history detail page redirects based on auth + view param
+  if (isHistoryDetailPage) {
+    const authCookie = request.cookies.get("auth")
+    const isAdmin = authCookie?.value === "admin"
+    const viewParam = request.nextUrl.searchParams.get("view")
+
+    if (!isAdmin && !viewParam) {
+      // Non-authed without view param → redirect to add ?view=timetable
+      const url = request.nextUrl.clone()
+      url.searchParams.set("view", "timetable")
+      return NextResponse.redirect(url)
+    }
+
+    if (isAdmin && viewParam) {
+      // Admin with view param → redirect to remove view, store in cookie for initial state
+      const url = request.nextUrl.clone()
+      url.searchParams.delete("view")
+      const response = NextResponse.redirect(url)
+      // Store the view preference so the page can use it as initial state
+      response.cookies.set("initialView", viewParam, { maxAge: 60, path: "/" })
+      return response
+    }
+
+    // Allow access
     return NextResponse.next()
   }
 

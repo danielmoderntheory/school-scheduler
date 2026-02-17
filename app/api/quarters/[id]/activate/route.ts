@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server"
-import { supabase } from "@/lib/supabase-admin"
+import { sql, formatDbError } from "@/lib/db"
 
 export async function PUT(
   request: NextRequest,
@@ -7,27 +7,28 @@ export async function PUT(
 ) {
   const { id } = await params
 
-  // Deactivate all quarters first
-  const { error: deactivateError } = await supabase
-    .from("quarters")
-    .update({ is_active: false })
-    .neq("id", "00000000-0000-0000-0000-000000000000") // Match all rows
+  try {
+    // Deactivate all quarters first
+    await sql`
+      UPDATE quarters
+      SET is_active = false
+    `
 
-  if (deactivateError) {
-    return NextResponse.json({ error: deactivateError.message }, { status: 500 })
+    // Activate the selected quarter
+    const [data] = await sql`
+      UPDATE quarters
+      SET is_active = true
+      WHERE id = ${id}
+      RETURNING *
+    `
+
+    if (!data) {
+      return NextResponse.json({ error: "Quarter not found" }, { status: 404 })
+    }
+
+    return NextResponse.json(data)
+  } catch (error) {
+    const { message } = formatDbError(error)
+    return NextResponse.json({ error: message }, { status: 500 })
   }
-
-  // Activate the selected quarter
-  const { data, error } = await supabase
-    .from("quarters")
-    .update({ is_active: true })
-    .eq("id", id)
-    .select()
-    .single()
-
-  if (error) {
-    return NextResponse.json({ error: error.message }, { status: 500 })
-  }
-
-  return NextResponse.json(data)
 }

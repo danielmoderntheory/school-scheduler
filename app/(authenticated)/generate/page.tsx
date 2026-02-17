@@ -218,11 +218,11 @@ export default function GeneratePage() {
         setClasses(classesData)
       }
 
-      // Load recent history (saved only)
-      const historyRes = await fetch("/api/history")
+      // Load recent history (summary only - no heavy JSONB data)
+      const historyRes = await fetch("/api/history?summary=true&limit=5")
       if (historyRes.ok) {
         const historyData = await historyRes.json()
-        setRecentHistory(historyData.slice(0, 5))
+        setRecentHistory(historyData)
       }
     } catch (error) {
       toast.error("Failed to load data")

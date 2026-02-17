@@ -21,18 +21,19 @@ export function EnvIndicator() {
   const gitSha = process.env.NEXT_PUBLIC_VERCEL_GIT_COMMIT_SHA
   const solverUrl = process.env.NEXT_PUBLIC_SCHEDULER_API_URL || process.env.NEXT_PUBLIC_SOLVER_URL
   // Optional: explicitly set database environment (e.g., "production", "staging", "local")
-  const supabaseEnv = process.env.NEXT_PUBLIC_SUPABASE_ENV
+  // Supports both NEXT_PUBLIC_DB_ENV (preferred) and NEXT_PUBLIC_SUPABASE_ENV (legacy)
+  const dbEnvVar = process.env.NEXT_PUBLIC_DB_ENV || process.env.NEXT_PUBLIC_SUPABASE_ENV
 
   const isProduction = vercelEnv === "production"
   const isPreview = vercelEnv === "preview"
   const isLocalDev = !vercelEnv || vercelEnv === "development"
 
   // Determine database environment from explicit env var
-  // NEXT_PUBLIC_SUPABASE_ENV should be set to: "production", "preview", or "staging"
+  // NEXT_PUBLIC_DB_ENV (or legacy NEXT_PUBLIC_SUPABASE_ENV) should be set to: "production", "preview", or "staging"
   let dbEnv: string
   let isProductionDb = false
 
-  const envLower = supabaseEnv?.toLowerCase()
+  const envLower = dbEnvVar?.toLowerCase()
   if (envLower === "production" || envLower === "prod") {
     dbEnv = "prod"
     isProductionDb = true

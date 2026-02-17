@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server"
-import { supabase } from "@/lib/supabase-admin"
+import { sql, formatDbError } from "@/lib/db"
 
 export async function PUT(
   request: NextRequest,
@@ -8,33 +8,59 @@ export async function PUT(
   const { id } = await params
   const body = await request.json()
 
-  // Only update fields that are provided
-  const updates: Record<string, unknown> = {}
-  if (body.name !== undefined) updates.name = body.name
-  if (body.status !== undefined) updates.status = body.status
-  if (body.can_supervise_study_hall !== undefined) {
-    updates.can_supervise_study_hall = body.can_supervise_study_hall
+  // Build dynamic update query
+  const updates: string[] = []
+  const values: unknown[] = []
+
+  if (body.name !== undefined) {
+    updates.push("name")
+    values.push(body.name)
   }
-  if (body.notes !== undefined) updates.notes = body.notes
+  if (body.status !== undefined) {
+    updates.push("status")
+    values.push(body.status)
+  }
+  if (body.can_supervise_study_hall !== undefined) {
+    updates.push("can_supervise_study_hall")
+    values.push(body.can_supervise_study_hall)
+  }
+  if (body.notes !== undefined) {
+    updates.push("notes")
+    values.push(body.notes)
+  }
 
-  const { data, error } = await supabase
-    .from("teachers")
-    .update(updates)
-    .eq("id", id)
-    .select()
-    .single()
+  if (updates.length === 0) {
+    return NextResponse.json({ error: "No fields to update" }, { status: 400 })
+  }
 
-  if (error) {
-    if (error.code === "23505") {
+  try {
+    // Use conditional updates with COALESCE pattern
+    const [data] = await sql`
+      UPDATE teachers
+      SET
+        name = COALESCE(${body.name ?? null}, name),
+        status = COALESCE(${body.status ?? null}, status),
+        can_supervise_study_hall = COALESCE(${body.can_supervise_study_hall ?? null}, can_supervise_study_hall),
+        notes = ${body.notes !== undefined ? body.notes : null}
+      WHERE id = ${id}
+      RETURNING *
+    `
+
+    if (!data) {
+      return NextResponse.json({ error: "Teacher not found" }, { status: 404 })
+    }
+
+    return NextResponse.json(data)
+  } catch (error) {
+    const { message, code } = formatDbError(error)
+    if (code === "23505") {
       return NextResponse.json(
         { error: "A teacher with this name already exists" },
         { status: 400 }
       )
     }
-    return NextResponse.json({ error: error.message }, { status: 500 })
+    return NextResponse.json({ error: message }, { status: 500 })
   }
-
-  return NextResponse.json(data)
 }
 
 export async function DELETE(
@@ -43,15 +69,16 @@ export async function DELETE(
 ) {
   const { id } = await params
 
-  // Soft delete: set deleted_at instead of actually deleting
-  const { error } = await supabase
-    .from("teachers")
-    .update({ deleted_at: new Date().toISOString() })
-    .eq("id", id)
-
-  if (error) {
-    return NextResponse.json({ error: error.message }, { status: 500 })
+  try {
+    // Soft delete: set deleted_at instead of actually deleting
+    await sql`
+      UPDATE teachers
+      SET deleted_at = NOW()
+      WHERE id = ${id}
+    `
+    return NextResponse.json({ success: true })
+  } catch (error) {
+    const { message } = formatDbError(error)
+    return NextResponse.json({ error: message }, { status: 500 })
   }
-
-  return NextResponse.json({ success: true })
 }

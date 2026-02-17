@@ -8,7 +8,7 @@ A web application for generating optimized K-11th grade school schedules using c
 
 - **Frontend**: Next.js 14 (App Router) + TypeScript + Tailwind CSS
 - **Solver**: OR-Tools CP-SAT on Google Cloud Run (primary), JS backtracking (fallback)
-- **Database**: Supabase (PostgreSQL)
+- **Database**: Neon Postgres (serverless)
 - **Hosting**: Vercel (frontend) + Cloud Run (solver)
 - **Auth**: Simple password protection via middleware
 
@@ -56,8 +56,7 @@ school-scheduler/
 │   ├── ScheduleStats.tsx    # Stats + teacher utilization
 │   └── ...
 ├── lib/
-│   ├── supabase.ts          # Database client (anon key, legacy/unused)
-│   ├── supabase-admin.ts    # Database client (service role, used by API routes)
+│   ├── db.ts                # Neon Postgres client (used by API routes)
 │   ├── scheduler.ts         # JS backtracking solver (fallback)
 │   ├── scheduler-remote.ts  # Cloud Run client
 │   ├── types.ts             # TypeScript types
@@ -225,7 +224,7 @@ GET    /api/export?generation_id=...&option=1&format=xlsx
 
 ### Schedule Generation Flow
 
-1. **Load Data**: Fetch teachers, classes, restrictions from Supabase
+1. **Load Data**: Fetch teachers, classes, restrictions from database
 2. **Call Cloud Run**: POST to `/api/solve-remote` → Cloud Run OR-Tools solver
 3. **CP-SAT Solving**: OR-Tools tries ~50 seeds with different random orderings
 4. **Post-Process**: Add study halls, redistribute OPEN blocks (2000 iterations)
@@ -264,9 +263,7 @@ This heavily penalizes missing study halls (each missing = +100) over back-to-ba
 
 ### Vercel (.env.local / Vercel dashboard)
 ```
-NEXT_PUBLIC_SUPABASE_URL=https://xxx.supabase.co
-NEXT_PUBLIC_SUPABASE_ANON_KEY=xxx           # Legacy, not used (anon access revoked)
-SUPABASE_SERVICE_ROLE_KEY=xxx               # Server-only, used by API routes
+NEON_DATABASE_URL=postgres://user:pass@host/db  # Auto-set by Vercel Neon integration
 APP_VIEW_PASSWORD=your-viewer-password
 APP_ADMIN_PASSWORD=your-admin-password
 SCHEDULER_API_URL=https://school-scheduler-api-xxx.us-central1.run.app
@@ -277,17 +274,14 @@ SCHEDULER_API_URL=https://school-scheduler-api-xxx.us-central1.run.app
 This app uses a **server-side only** database access pattern:
 
 1. **All database access goes through Next.js API routes** (`app/api/**`)
-2. **API routes use the service role key** (`lib/supabase-admin.ts`) which bypasses RLS
-3. **Anon/authenticated access is revoked** (see `supabase/migrations/20260211_revoke_anon_access.sql`)
-4. **Authentication is handled by password middleware** (`middleware.ts`)
+2. **API routes use the Neon serverless driver** (`lib/db.ts`)
+3. **Authentication is handled by password middleware** (`middleware.ts`)
 
 This means:
-- The `NEXT_PUBLIC_SUPABASE_ANON_KEY` is effectively useless (no grants)
-- Direct PostgREST access is blocked
-- RLS is not needed since only the service role accesses the database
+- The `DATABASE_URL` connection string should never be exposed to the client
 - Security is enforced at the API route level via password middleware
 
-**Never import `lib/supabase-admin.ts` in client components or pages** - it should only be used in API routes and server-side utilities.
+**Never import `lib/db.ts` in client components or pages** - it should only be used in API routes and server-side utilities.
 
 ## Development Commands
 

@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server"
-import { supabase } from "@/lib/supabase-admin"
+import { sql, formatDbError } from "@/lib/db"
 
 export async function GET(
   request: Request,
@@ -7,17 +7,21 @@ export async function GET(
 ) {
   const { id } = await params
 
-  const { data, error } = await supabase
-    .from("timetable_templates")
-    .select("*")
-    .eq("id", id)
-    .single()
+  try {
+    const [data] = await sql`
+      SELECT * FROM timetable_templates
+      WHERE id = ${id}
+    `
 
-  if (error) {
-    return NextResponse.json({ error: error.message }, { status: 500 })
+    if (!data) {
+      return NextResponse.json({ error: "Template not found" }, { status: 404 })
+    }
+
+    return NextResponse.json(data)
+  } catch (error) {
+    const { message } = formatDbError(error)
+    return NextResponse.json({ error: message }, { status: 500 })
   }
-
-  return NextResponse.json(data)
 }
 
 export async function PUT(
@@ -27,18 +31,25 @@ export async function PUT(
   const { id } = await params
   const body = await request.json()
 
-  const { data, error } = await supabase
-    .from("timetable_templates")
-    .update(body)
-    .eq("id", id)
-    .select()
-    .single()
+  try {
+    const [data] = await sql`
+      UPDATE timetable_templates
+      SET
+        name = COALESCE(${body.name ?? null}, name),
+        rows = COALESCE(${body.rows ? JSON.stringify(body.rows) : null}, rows)
+      WHERE id = ${id}
+      RETURNING *
+    `
 
-  if (error) {
-    return NextResponse.json({ error: error.message }, { status: 500 })
+    if (!data) {
+      return NextResponse.json({ error: "Template not found" }, { status: 404 })
+    }
+
+    return NextResponse.json(data)
+  } catch (error) {
+    const { message } = formatDbError(error)
+    return NextResponse.json({ error: message }, { status: 500 })
   }
-
-  return NextResponse.json(data)
 }
 
 export async function DELETE(
@@ -47,15 +58,16 @@ export async function DELETE(
 ) {
   const { id } = await params
 
-  // Soft delete: set deleted_at instead of actually deleting
-  const { error } = await supabase
-    .from("timetable_templates")
-    .update({ deleted_at: new Date().toISOString() })
-    .eq("id", id)
-
-  if (error) {
-    return NextResponse.json({ error: error.message }, { status: 500 })
+  try {
+    // Soft delete: set deleted_at instead of actually deleting
+    await sql`
+      UPDATE timetable_templates
+      SET deleted_at = NOW()
+      WHERE id = ${id}
+    `
+    return NextResponse.json({ success: true })
+  } catch (error) {
+    const { message } = formatDbError(error)
+    return NextResponse.json({ error: message }, { status: 500 })
   }
-
-  return NextResponse.json({ success: true })
 }

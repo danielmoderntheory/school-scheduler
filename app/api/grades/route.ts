@@ -1,18 +1,18 @@
 import { NextResponse } from "next/server"
-import { supabase } from "@/lib/supabase-admin"
+import { sql, formatDbError } from "@/lib/db"
 
 export async function GET() {
-  const { data, error } = await supabase
-    .from("grades")
-    .select("*")
-    .is("deleted_at", null)
-    .order("sort_order")
-
-  if (error) {
-    return NextResponse.json({ error: error.message }, { status: 500 })
+  try {
+    const data = await sql`
+      SELECT * FROM grades
+      WHERE deleted_at IS NULL
+      ORDER BY sort_order
+    `
+    return NextResponse.json(data)
+  } catch (error) {
+    const { message } = formatDbError(error)
+    return NextResponse.json({ error: message }, { status: 500 })
   }
-
-  return NextResponse.json(data)
 }
 
 export async function POST(request: Request) {
@@ -26,30 +26,31 @@ export async function POST(request: Request) {
     )
   }
 
-  // Get max sort_order if not provided
-  let order = sort_order
-  if (order === undefined) {
-    const { data: maxData } = await supabase
-      .from("grades")
-      .select("sort_order")
-      .order("sort_order", { ascending: false })
-      .limit(1)
-    order = maxData && maxData.length > 0 ? maxData[0].sort_order + 1 : 0
+  try {
+    // Get max sort_order if not provided
+    let order = sort_order
+    if (order === undefined) {
+      const [maxData] = await sql`
+        SELECT sort_order FROM grades
+        ORDER BY sort_order DESC
+        LIMIT 1
+      `
+      order = maxData ? maxData.sort_order + 1 : 0
+    }
+
+    const [data] = await sql`
+      INSERT INTO grades (name, display_name, sort_order)
+      VALUES (
+        ${name.toLowerCase().replace(/\s+/g, "-")},
+        ${display_name},
+        ${order}
+      )
+      RETURNING *
+    `
+
+    return NextResponse.json(data)
+  } catch (error) {
+    const { message } = formatDbError(error)
+    return NextResponse.json({ error: message }, { status: 500 })
   }
-
-  const { data, error } = await supabase
-    .from("grades")
-    .insert({
-      name: name.toLowerCase().replace(/\s+/g, "-"),
-      display_name,
-      sort_order: order,
-    })
-    .select()
-    .single()
-
-  if (error) {
-    return NextResponse.json({ error: error.message }, { status: 500 })
-  }
-
-  return NextResponse.json(data)
 }

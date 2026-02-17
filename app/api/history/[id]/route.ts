@@ -1,26 +1,75 @@
 import { NextRequest, NextResponse } from "next/server"
-import { supabase } from "@/lib/supabase-admin"
+import { sql, formatDbError } from "@/lib/db"
 
 export async function GET(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
   const { id } = await params
+  const searchParams = request.nextUrl.searchParams
 
-  const { data, error } = await supabase
-    .from("schedule_generations")
-    .select(`
-      *,
-      quarter:quarters(id, name)
-    `)
-    .eq("id", id)
-    .single()
+  // `view` param indicates public/lite mode (e.g., ?view=timetable)
+  const viewParam = searchParams.get("view")
+  const isLiteMode = !!viewParam
 
-  if (error) {
-    return NextResponse.json({ error: error.message }, { status: 500 })
+  try {
+    let row
+
+    if (isLiteMode) {
+      // Lightweight query for public view - only load selected option, skip stats
+      const [result] = await sql`
+        SELECT
+          sg.id, sg.quarter_id, sg.generated_at, sg.selected_option,
+          sg.notes, sg.is_starred, sg.is_saved,
+          sg.options->((sg.selected_option - 1)::int) as selected_schedule,
+          q.id as quarter_id_ref,
+          q.name as quarter_name
+        FROM schedule_generations sg
+        LEFT JOIN quarters q ON sg.quarter_id = q.id
+        WHERE sg.id = ${id}
+      `
+      if (result) {
+        // Wrap the single option in an array to maintain compatibility
+        // Set selected_option to 1 since we only return one option at index 0
+        row = {
+          ...result,
+          options: result.selected_schedule ? [result.selected_schedule] : [],
+          selected_option: 1,
+          stats: null, // Not needed for public view
+        }
+        delete row.selected_schedule
+      }
+    } else {
+      // Full query for admin editing
+      const [result] = await sql`
+        SELECT
+          sg.*,
+          q.id as quarter_id_ref,
+          q.name as quarter_name
+        FROM schedule_generations sg
+        LEFT JOIN quarters q ON sg.quarter_id = q.id
+        WHERE sg.id = ${id}
+      `
+      row = result
+    }
+
+    if (!row) {
+      return NextResponse.json({ error: "Schedule not found" }, { status: 404 })
+    }
+
+    // Transform to match expected format
+    const data = {
+      ...row,
+      quarter: row.quarter_id_ref ? { id: row.quarter_id_ref, name: row.quarter_name } : null,
+    }
+    delete data.quarter_id_ref
+    delete data.quarter_name
+
+    return NextResponse.json(data)
+  } catch (error) {
+    const { message } = formatDbError(error)
+    return NextResponse.json({ error: message }, { status: 500 })
   }
-
-  return NextResponse.json(data)
 }
 
 export async function PUT(
@@ -30,25 +79,28 @@ export async function PUT(
   const { id } = await params
   const body = await request.json()
 
-  const updates: Record<string, unknown> = {}
-  if (body.selected_option !== undefined) updates.selected_option = body.selected_option
-  if (body.notes !== undefined) updates.notes = body.notes
-  if (body.is_starred !== undefined) updates.is_starred = body.is_starred
-  if (body.options !== undefined) updates.options = body.options
-  if (body.stats !== undefined) updates.stats = body.stats
+  try {
+    const [data] = await sql`
+      UPDATE schedule_generations
+      SET
+        selected_option = COALESCE(${body.selected_option ?? null}, selected_option),
+        notes = COALESCE(${body.notes ?? null}, notes),
+        is_starred = COALESCE(${body.is_starred ?? null}, is_starred),
+        options = COALESCE(${body.options ? JSON.stringify(body.options) : null}, options),
+        stats = COALESCE(${body.stats ? JSON.stringify(body.stats) : null}, stats)
+      WHERE id = ${id}
+      RETURNING *
+    `
 
-  const { data, error } = await supabase
-    .from("schedule_generations")
-    .update(updates)
-    .eq("id", id)
-    .select()
-    .single()
+    if (!data) {
+      return NextResponse.json({ error: "Schedule not found" }, { status: 404 })
+    }
 
-  if (error) {
-    return NextResponse.json({ error: error.message }, { status: 500 })
+    return NextResponse.json(data)
+  } catch (error) {
+    const { message } = formatDbError(error)
+    return NextResponse.json({ error: message }, { status: 500 })
   }
-
-  return NextResponse.json(data)
 }
 
 export async function DELETE(
@@ -57,11 +109,11 @@ export async function DELETE(
 ) {
   const { id } = await params
 
-  const { error } = await supabase.from("schedule_generations").delete().eq("id", id)
-
-  if (error) {
-    return NextResponse.json({ error: error.message }, { status: 500 })
+  try {
+    await sql`DELETE FROM schedule_generations WHERE id = ${id}`
+    return NextResponse.json({ success: true })
+  } catch (error) {
+    const { message } = formatDbError(error)
+    return NextResponse.json({ error: message }, { status: 500 })
   }
-
-  return NextResponse.json({ success: true })
 }

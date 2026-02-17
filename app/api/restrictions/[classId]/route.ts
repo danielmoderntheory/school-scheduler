@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server"
-import { supabase } from "@/lib/supabase-admin"
+import { sql, formatDbError } from "@/lib/db"
 
 export async function GET(
   request: NextRequest,
@@ -7,16 +7,16 @@ export async function GET(
 ) {
   const { classId } = await params
 
-  const { data, error } = await supabase
-    .from("restrictions")
-    .select("*")
-    .eq("class_id", classId)
-
-  if (error) {
-    return NextResponse.json({ error: error.message }, { status: 500 })
+  try {
+    const data = await sql`
+      SELECT * FROM restrictions
+      WHERE class_id = ${classId}
+    `
+    return NextResponse.json(data)
+  } catch (error) {
+    const { message } = formatDbError(error)
+    return NextResponse.json({ error: message }, { status: 500 })
   }
-
-  return NextResponse.json(data)
 }
 
 export async function PUT(
@@ -26,38 +26,38 @@ export async function PUT(
   const { classId } = await params
   const body = await request.json()
 
-  // Delete existing restrictions
-  await supabase.from("restrictions").delete().eq("class_id", classId)
+  try {
+    // Delete existing restrictions
+    await sql`DELETE FROM restrictions WHERE class_id = ${classId}`
 
-  // Insert new restrictions
-  const restrictions = body.restrictions || []
+    // Insert new restrictions
+    const restrictions = body.restrictions || []
 
-  if (restrictions.length > 0) {
-    const { error } = await supabase.from("restrictions").insert(
-      restrictions.map((r: { restriction_type: string; value: unknown }) => ({
-        class_id: classId,
-        restriction_type: r.restriction_type,
-        value: r.value,
-      }))
-    )
-
-    if (error) {
-      return NextResponse.json({ error: error.message }, { status: 500 })
+    if (restrictions.length > 0) {
+      for (const r of restrictions) {
+        await sql`
+          INSERT INTO restrictions (class_id, restriction_type, value)
+          VALUES (${classId}, ${r.restriction_type}, ${JSON.stringify(r.value)})
+        `
+      }
     }
+
+    // Touch the parent class to update its updated_at (trigger sets the actual value)
+    await sql`
+      UPDATE classes
+      SET updated_at = NOW()
+      WHERE id = ${classId}
+    `
+
+    // Return updated restrictions
+    const data = await sql`
+      SELECT * FROM restrictions
+      WHERE class_id = ${classId}
+    `
+
+    return NextResponse.json(data)
+  } catch (error) {
+    const { message } = formatDbError(error)
+    return NextResponse.json({ error: message }, { status: 500 })
   }
-
-  // Touch the parent class to update its updated_at (trigger sets the actual value)
-  await supabase.from("classes").update({ updated_at: new Date().toISOString() }).eq("id", classId)
-
-  // Return updated restrictions
-  const { data, error } = await supabase
-    .from("restrictions")
-    .select("*")
-    .eq("class_id", classId)
-
-  if (error) {
-    return NextResponse.json({ error: error.message }, { status: 500 })
-  }
-
-  return NextResponse.json(data)
 }

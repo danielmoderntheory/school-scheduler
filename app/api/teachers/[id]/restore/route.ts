@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server"
-import { supabase } from "@/lib/supabase-admin"
+import { sql, formatDbError } from "@/lib/db"
 
 export async function POST(
   request: NextRequest,
@@ -7,16 +7,21 @@ export async function POST(
 ) {
   const { id } = await params
 
-  const { data, error } = await supabase
-    .from("teachers")
-    .update({ deleted_at: null })
-    .eq("id", id)
-    .select()
-    .single()
+  try {
+    const [data] = await sql`
+      UPDATE teachers
+      SET deleted_at = NULL
+      WHERE id = ${id}
+      RETURNING *
+    `
 
-  if (error) {
-    return NextResponse.json({ error: error.message }, { status: 500 })
+    if (!data) {
+      return NextResponse.json({ error: "Teacher not found" }, { status: 404 })
+    }
+
+    return NextResponse.json(data)
+  } catch (error) {
+    const { message } = formatDbError(error)
+    return NextResponse.json({ error: message }, { status: 500 })
   }
-
-  return NextResponse.json(data)
 }

@@ -1,16 +1,15 @@
 import { NextResponse } from "next/server"
-import { supabase } from "@/lib/supabase-admin"
+import { sql, formatDbError } from "@/lib/db"
 
 export async function GET() {
-  const { data, error } = await supabase
-    .from("rules")
-    .select("*")
-    .order("rule_type")
-    .order("priority")
-
-  if (error) {
-    return NextResponse.json({ error: error.message }, { status: 500 })
+  try {
+    const data = await sql`
+      SELECT * FROM rules
+      ORDER BY rule_type, priority
+    `
+    return NextResponse.json(data)
+  } catch (error) {
+    const { message } = formatDbError(error)
+    return NextResponse.json({ error: message }, { status: 500 })
   }
-
-  return NextResponse.json(data)
 }

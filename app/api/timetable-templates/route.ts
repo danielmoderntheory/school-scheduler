@@ -1,18 +1,18 @@
 import { NextResponse } from "next/server"
-import { supabase } from "@/lib/supabase-admin"
+import { sql, formatDbError } from "@/lib/db"
 
 export async function GET() {
-  const { data, error } = await supabase
-    .from("timetable_templates")
-    .select("*")
-    .is("deleted_at", null)
-    .order("created_at")
-
-  if (error) {
-    return NextResponse.json({ error: error.message }, { status: 500 })
+  try {
+    const data = await sql`
+      SELECT * FROM timetable_templates
+      WHERE deleted_at IS NULL
+      ORDER BY created_at
+    `
+    return NextResponse.json(data)
+  } catch (error) {
+    const { message } = formatDbError(error)
+    return NextResponse.json({ error: message }, { status: 500 })
   }
-
-  return NextResponse.json(data)
 }
 
 export async function POST(request: Request) {
@@ -26,18 +26,15 @@ export async function POST(request: Request) {
     )
   }
 
-  const { data, error } = await supabase
-    .from("timetable_templates")
-    .insert({
-      name,
-      rows: rows || [],
-    })
-    .select()
-    .single()
-
-  if (error) {
-    return NextResponse.json({ error: error.message }, { status: 500 })
+  try {
+    const [data] = await sql`
+      INSERT INTO timetable_templates (name, rows)
+      VALUES (${name}, ${JSON.stringify(rows || [])})
+      RETURNING *
+    `
+    return NextResponse.json(data)
+  } catch (error) {
+    const { message } = formatDbError(error)
+    return NextResponse.json({ error: message }, { status: 500 })
   }
-
-  return NextResponse.json(data)
 }

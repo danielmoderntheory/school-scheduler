@@ -41,7 +41,7 @@ export default function HistoryPage() {
 
   async function loadGenerations() {
     try {
-      const res = await fetch("/api/history")
+      const res = await fetch("/api/history?summary=true")
       if (res.ok) {
         const data = await res.json()
         setGenerations(data)

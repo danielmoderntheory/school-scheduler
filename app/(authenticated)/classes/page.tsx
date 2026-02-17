@@ -203,19 +203,20 @@ export default function ClassesPage() {
         setClasses(sorted)
 
         // Fetch schedule generations: starred for display, most recent for locking
+        // Use summary=true to avoid loading heavy JSONB options column
         try {
           let displayGen = null
           let mostRecentGen = null
 
           // Fetch most recent (needed for lock comparison)
-          const historyRes = await fetch(`/api/history?quarter_id=${active.id}&limit=1&most_recent=true`)
+          const historyRes = await fetch(`/api/history?quarter_id=${active.id}&limit=1&most_recent=true&summary=true`)
           if (historyRes.ok) {
             const historyData = await historyRes.json()
             if (historyData.length > 0) mostRecentGen = historyData[0]
           }
 
           // Try starred for display preference
-          const starredRes = await fetch(`/api/history?quarter_id=${active.id}&limit=1&starred_only=true`)
+          const starredRes = await fetch(`/api/history?quarter_id=${active.id}&limit=1&starred_only=true&summary=true`)
           if (starredRes.ok) {
             const starredData = await starredRes.json()
             if (starredData.length > 0) displayGen = starredData[0]
@@ -225,14 +226,14 @@ export default function ClassesPage() {
           if (!displayGen) displayGen = mostRecentGen
 
           if (displayGen) {
-            const bestOption = displayGen.options?.[0]
+            // Stats now come directly from summary response (extracted from stats column)
             setLastRun({
               historyId: displayGen.id,
               timestamp: displayGen.generated_at,
               quarterId: active.id,
               quarterName: active.name,
-              studyHallsPlaced: bestOption?.studyHallsPlaced ?? 0,
-              backToBackIssues: bestOption?.backToBackIssues ?? 0,
+              studyHallsPlaced: displayGen.studyHallsPlaced ?? 0,
+              backToBackIssues: displayGen.backToBackIssues ?? 0,
               starred: displayGen.is_starred ?? false,
             })
           }

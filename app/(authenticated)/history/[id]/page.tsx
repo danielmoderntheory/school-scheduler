@@ -343,7 +343,12 @@ export default function HistoryDetailPage() {
   const router = useRouter()
   const id = params.id as string
   const isNewGeneration = searchParams.get('new') === 'true'
-  const initialView = searchParams.get('view')
+  // Check URL param first, then fall back to initialView cookie (set by middleware for admin redirects)
+  const viewFromUrl = searchParams.get('view')
+  const viewFromCookie = typeof document !== 'undefined'
+    ? document.cookie.match(/(?:^|; )initialView=([^;]*)/)?.[1] || null
+    : null
+  const initialView = viewFromUrl || viewFromCookie
   const { setIsGenerating: setGlobalGenerating } = useGeneration()
   const [generation, setGeneration] = useState<Generation | null>(null)
   const [loading, setLoading] = useState(true)
@@ -811,6 +816,13 @@ export default function HistoryDetailPage() {
   useEffect(() => {
     loadGeneration()
   }, [id])
+
+  // Clear initialView cookie after it's been used (set by middleware for admin redirects)
+  useEffect(() => {
+    if (typeof document !== 'undefined' && document.cookie.includes('initialView=')) {
+      document.cookie = 'initialView=; path=/; expires=Thu, 01 Jan 1970 00:00:00 GMT'
+    }
+  }, [])
 
   // Load timetable template + grades data for timetable view
   useEffect(() => {

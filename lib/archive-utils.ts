@@ -5,7 +5,7 @@
  * Schedules store snapshots, so archived entities won't affect historical schedule display.
  */
 
-import { supabase } from "./supabase-admin"
+import { sql } from "./db"
 import type { GenerationStats } from "./snapshot-utils"
 
 export type ArchiveEntityType = "teacher" | "grade" | "subject"
@@ -29,29 +29,26 @@ export async function checkArchiveStatus(
   }
 
   // Get the active quarter
-  const { data: activeQuarter, error: quarterError } = await supabase
-    .from("quarters")
-    .select("id")
-    .eq("is_active", true)
-    .is("deleted_at", null)
-    .single()
+  const activeQuarters = await sql`
+    SELECT id FROM quarters
+    WHERE is_active = true AND deleted_at IS NULL
+    LIMIT 1
+  `
 
-  if (quarterError || !activeQuarter) {
+  if (activeQuarters.length === 0) {
     // No active quarter - all entities can be archived
     return entityIds.map((id) => ({ entityId: id, canArchive: true }))
   }
 
+  const activeQuarter = activeQuarters[0]
+
   // Get all schedule generations for the active quarter
-  const { data: schedules, error: schedulesError } = await supabase
-    .from("schedule_generations")
-    .select("id, stats")
-    .eq("quarter_id", activeQuarter.id)
+  const schedules = await sql`
+    SELECT id, stats FROM schedule_generations
+    WHERE quarter_id = ${activeQuarter.id}
+  `
 
-  if (schedulesError) {
-    throw new Error(`Failed to fetch schedules: ${schedulesError.message}`)
-  }
-
-  if (!schedules || schedules.length === 0) {
+  if (schedules.length === 0) {
     // No schedules for active quarter - all entities can be archived
     return entityIds.map((id) => ({ entityId: id, canArchive: true }))
   }
@@ -138,24 +135,51 @@ export async function checkArchiveStatus(
 export async function getArchivedEntities(
   entityType: ArchiveEntityType | "quarter" | "timetable_template"
 ): Promise<Array<{ id: string; name: string; deleted_at: string }>> {
-  const tableName =
-    entityType === "timetable_template" ? "timetable_templates" : `${entityType}s`
-  const nameField =
-    entityType === "grade" ? "display_name" : "name"
+  let data: Array<{ id: string; name?: string; display_name?: string; deleted_at: string }>
 
-  const { data, error } = await supabase
-    .from(tableName)
-    .select(`id, ${nameField}, deleted_at`)
-    .not("deleted_at", "is", null)
-    .order("deleted_at", { ascending: false })
-
-  if (error) {
-    throw new Error(`Failed to fetch archived ${entityType}s: ${error.message}`)
+  switch (entityType) {
+    case "teacher":
+      data = await sql`
+        SELECT id, name, deleted_at FROM teachers
+        WHERE deleted_at IS NOT NULL
+        ORDER BY deleted_at DESC
+      `
+      break
+    case "grade":
+      data = await sql`
+        SELECT id, display_name, deleted_at FROM grades
+        WHERE deleted_at IS NOT NULL
+        ORDER BY deleted_at DESC
+      `
+      break
+    case "subject":
+      data = await sql`
+        SELECT id, name, deleted_at FROM subjects
+        WHERE deleted_at IS NOT NULL
+        ORDER BY deleted_at DESC
+      `
+      break
+    case "quarter":
+      data = await sql`
+        SELECT id, name, deleted_at FROM quarters
+        WHERE deleted_at IS NOT NULL
+        ORDER BY deleted_at DESC
+      `
+      break
+    case "timetable_template":
+      data = await sql`
+        SELECT id, name, deleted_at FROM timetable_templates
+        WHERE deleted_at IS NOT NULL
+        ORDER BY deleted_at DESC
+      `
+      break
+    default:
+      return []
   }
 
-  return (data || []).map((item) => ({
+  return data.map((item) => ({
     id: item.id,
-    name: item[nameField as keyof typeof item] as string,
+    name: (entityType === "grade" ? item.display_name : item.name) || "",
     deleted_at: item.deleted_at,
   }))
 }

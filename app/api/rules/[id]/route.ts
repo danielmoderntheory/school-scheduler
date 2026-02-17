@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server"
-import { supabase } from "@/lib/supabase-admin"
+import { sql, formatDbError } from "@/lib/db"
 
 export async function PUT(
   request: NextRequest,
@@ -8,21 +8,24 @@ export async function PUT(
   const { id } = await params
   const body = await request.json()
 
-  const updates: Record<string, unknown> = {}
-  if (body.enabled !== undefined) updates.enabled = body.enabled
-  if (body.priority !== undefined) updates.priority = body.priority
-  if (body.config !== undefined) updates.config = body.config
+  try {
+    const [data] = await sql`
+      UPDATE rules
+      SET
+        enabled = COALESCE(${body.enabled ?? null}, enabled),
+        priority = COALESCE(${body.priority ?? null}, priority),
+        config = COALESCE(${body.config ? JSON.stringify(body.config) : null}, config)
+      WHERE id = ${id}
+      RETURNING *
+    `
 
-  const { data, error } = await supabase
-    .from("rules")
-    .update(updates)
-    .eq("id", id)
-    .select()
-    .single()
+    if (!data) {
+      return NextResponse.json({ error: "Rule not found" }, { status: 404 })
+    }
 
-  if (error) {
-    return NextResponse.json({ error: error.message }, { status: 500 })
+    return NextResponse.json(data)
+  } catch (error) {
+    const { message } = formatDbError(error)
+    return NextResponse.json({ error: message }, { status: 500 })
   }
-
-  return NextResponse.json(data)
 }
