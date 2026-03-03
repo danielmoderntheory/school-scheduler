@@ -7,7 +7,7 @@ import { Checkbox } from "@/components/ui/checkbox"
 import { ScheduleGrid } from "@/components/ScheduleGrid"
 import { ScheduleStats } from "@/components/ScheduleStats"
 import { GradeTimetable } from "@/components/GradeTimetable"
-import { Loader2, Download, ArrowLeft, Check, RefreshCw, Shuffle, Trash2, Star, MoreVertical, Users, GraduationCap, Printer, ArrowLeftRight, X, Hand, Pencil, Copy, ChevronDown, ChevronUp, AlertTriangle, Minus, Info, Crosshair, Clock, ImageDown, Globe, Undo2 } from "lucide-react"
+import { Loader2, Download, ArrowLeft, Check, RefreshCw, Shuffle, Trash2, Star, MoreVertical, Users, GraduationCap, Printer, ArrowLeftRight, X, Hand, Pencil, Copy, ChevronDown, ChevronUp, AlertTriangle, Minus, Info, Crosshair, Clock, ImageDown, Globe, Undo2, UserCog } from "lucide-react"
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -41,7 +41,7 @@ import { Label } from "@/components/ui/label"
 import Link from "next/link"
 import type { ScheduleOption, TeacherSchedule, GradeSchedule, Teacher, FloatingBlock, PendingPlacement, ValidationError, CellLocation, ClassEntry, OpenBlockLabels, PendingTransfer, TimetableTemplate } from "@/lib/types"
 import { resolveRowsForGrade } from "@/lib/timetable-utils"
-import { parseClassesFromSnapshot, parseTeachersFromSnapshot, parseRulesFromSnapshot, hasValidSnapshots, detectClassChanges, computeExpectedTeachingSessions, type GenerationStats, type ChangeDetectionResult, type CurrentClass, type ClassSnapshot, type TeacherSnapshot } from "@/lib/snapshot-utils"
+import { parseClassesFromSnapshot, parseTeachersFromSnapshot, parseRulesFromSnapshot, hasValidSnapshots, detectClassChanges, detectTeacherChanges, applyTeacherRenames, applyTeacherChangesToSnapshot, computeExpectedTeachingSessions, type GenerationStats, type ChangeDetectionResult, type CurrentClass, type ClassSnapshot, type TeacherSnapshot, type TeacherChangeResult } from "@/lib/snapshot-utils"
 import { parseGradeDisplayToNumbers, parseGradeDisplayToNames, gradesOverlap, gradesEqual, gradeNumToDisplay, isClassElective, isClassCotaught, shouldIgnoreGradeConflict, formatGradeDisplayCompact } from "@/lib/grade-utils"
 import { BLOCK_TYPE_OPEN, BLOCK_TYPE_STUDY_HALL, isOpenBlock, isStudyHall, isScheduledClass, isOccupiedBlock, entryIsOpen, entryIsOccupied, entryIsScheduledClass, isFullTime, setOpenBlockLabel, recalculateOptionStats, getFirstGradeEntry, isMultipleEntryCell } from "@/lib/schedule-utils"
 import toast, { successIcon, errorIcon, warningIcon } from "@/lib/toast"
@@ -527,6 +527,11 @@ export default function HistoryDetailPage() {
   // Track dismissed state per option/revision (so dismissing for Rev 1 doesn't affect Rev 2)
   const [dismissedForOptions, setDismissedForOptions] = useState<Set<string>>(new Set())
   const [showChangesDialog, setShowChangesDialog] = useState(false)
+
+  // Teacher rename detection state (separate from class changes)
+  const [teacherChanges, setTeacherChanges] = useState<TeacherChangeResult | null>(null)
+  const [showTeacherRenameDialog, setShowTeacherRenameDialog] = useState(false)
+  const [applyingRenames, setApplyingRenames] = useState(false)
   const [pendingModeEntry, setPendingModeEntry] = useState<'regen' | 'swap' | 'freeform' | 'studyHall' | null>(null)
   const [useCurrentClasses, setUseCurrentClasses] = useState(false) // When true, regen uses current DB classes instead of snapshot
   const [changesExpanded, setChangesExpanded] = useState(false) // Expandable changes list in regen banner
@@ -1008,32 +1013,70 @@ export default function HistoryDetailPage() {
     }
   }, [generation, viewingOption, isPublicView])
 
-  // Detect class changes when generation loads (admin only)
+  // Detect class changes and teacher renames when generation loads (admin only)
+  // Also re-check when page becomes visible (user returns from /classes or /teachers)
   useEffect(() => {
     async function checkForChanges() {
       if (!generation || !hasValidSnapshots(generation.stats) || isPublicView) {
         setClassChanges(null)
+        setTeacherChanges(null)
         return
       }
 
       try {
-        // Fetch current classes for this quarter
-        const res = await fetch(`/api/classes?quarter_id=${generation.quarter_id}`)
-        if (!res.ok) {
+        // Fetch current classes and teachers in parallel
+        const [classesRes, teachersRes] = await Promise.all([
+          fetch(`/api/classes?quarter_id=${generation.quarter_id}`),
+          fetch('/api/teachers'),
+        ])
+
+        if (!classesRes.ok) {
           console.error('Failed to fetch current classes for change detection')
           return
         }
 
-        const currentClasses: CurrentClass[] = await res.json()
-        const result = detectClassChanges(generation.stats!.classes_snapshot!, currentClasses)
-        setClassChanges(result)
+        const currentClasses: CurrentClass[] = await classesRes.json()
+
+        // Detect teacher renames first
+        let teacherResult: TeacherChangeResult | null = null
+        if (teachersRes.ok && generation.stats?.teachers_snapshot) {
+          const currentTeachers: Array<{ id: string; name: string; status: string; can_supervise_study_hall?: boolean }> = await teachersRes.json()
+          teacherResult = detectTeacherChanges(generation.stats.teachers_snapshot, currentTeachers)
+          setTeacherChanges(teacherResult)
+        } else {
+          setTeacherChanges(null)
+        }
+
+        // For class change detection, apply any teacher renames to the snapshot first
+        // This prevents false positives where renamed teachers appear as removed+added classes
+        let classesSnapshot = generation.stats!.classes_snapshot!
+        if (teacherResult?.hasChanges) {
+          const renameMap = new Map(teacherResult.renames.map(r => [r.oldName, r.newName]))
+          classesSnapshot = classesSnapshot.map(c => ({
+            ...c,
+            teacher_name: renameMap.get(c.teacher_name || '') ?? c.teacher_name
+          }))
+        }
+
+        const classResult = detectClassChanges(classesSnapshot, currentClasses)
+        setClassChanges(classResult)
         setDismissedForOptions(new Set()) // Reset dismissed state when generation changes
       } catch (error) {
-        console.error('Error detecting class changes:', error)
+        console.error('Error detecting changes:', error)
       }
     }
 
     checkForChanges()
+
+    // Re-check when page becomes visible (user returns from another page)
+    function handleVisibilityChange() {
+      if (document.visibilityState === 'visible') {
+        checkForChanges()
+      }
+    }
+
+    document.addEventListener('visibilitychange', handleVisibilityChange)
+    return () => document.removeEventListener('visibilitychange', handleVisibilityChange)
   }, [generation?.id, generation?.quarter_id, generation?.stats?.snapshotVersion, isPublicView])
 
   async function handleDownloadPng() {
@@ -1100,6 +1143,55 @@ export default function HistoryDetailPage() {
       toast.error("Failed to unstar schedule")
     } finally {
       setSaving(false)
+    }
+  }
+
+  async function handleApplyTeacherChanges() {
+    if (!generation || !teacherChanges?.hasChanges) return
+    setApplyingRenames(true)
+
+    try {
+      // Apply renames to all options (eligibility changes don't affect schedules, only snapshot)
+      const updatedOptions = teacherChanges.renames.length > 0
+        ? generation.options.map(opt => applyTeacherRenames(opt, teacherChanges.renames))
+        : generation.options
+
+      // Update teachers_snapshot (both renames and eligibility) and classes_snapshot (renames only)
+      const updatedStats = {
+        ...generation.stats,
+        teachers_snapshot: applyTeacherChangesToSnapshot(
+          generation.stats!.teachers_snapshot!,
+          teacherChanges.renames,
+          teacherChanges.eligibilityChanges
+        ),
+        classes_snapshot: teacherChanges.renames.length > 0
+          ? generation.stats!.classes_snapshot!.map(c => ({
+              ...c,
+              teacher_name: teacherChanges.renames.find(r => r.oldName === c.teacher_name)?.newName ?? c.teacher_name
+            }))
+          : generation.stats!.classes_snapshot
+      }
+
+      // Save to database
+      const res = await fetch(`/api/history/${id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ options: updatedOptions, stats: updatedStats })
+      })
+
+      if (res.ok) {
+        setGeneration({ ...generation, options: updatedOptions, stats: updatedStats })
+        setTeacherChanges(null)
+        setShowTeacherRenameDialog(false)
+        toast.success('Teacher changes applied')
+      } else {
+        toast.error('Failed to apply teacher changes')
+      }
+    } catch (error) {
+      console.error('Error applying teacher changes:', error)
+      toast.error('Failed to apply teacher changes')
+    } finally {
+      setApplyingRenames(false)
     }
   }
 
@@ -7349,6 +7441,20 @@ export default function HistoryDetailPage() {
                 </Button>
               )}
 
+              {/* Teacher Changes Indicator - allows applying name/eligibility changes without regeneration */}
+              {teacherChanges?.hasChanges && !regenMode && !swapMode && !freeformMode && !studyHallMode && (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => setShowTeacherRenameDialog(true)}
+                  className="gap-1.5 text-blue-700 border-blue-300 bg-blue-50 hover:bg-blue-100 no-print"
+                  title={teacherChanges.summary}
+                >
+                  <UserCog className="h-3.5 w-3.5" />
+                  <span className="text-xs">{teacherChanges.changes.length} teacher change{teacherChanges.changes.length !== 1 ? 's' : ''}</span>
+                </Button>
+              )}
+
               {/* Edit menu - only visible to admin users */}
               {userRole === "admin" && (
                 <DropdownMenu>
@@ -9086,6 +9192,70 @@ export default function HistoryDetailPage() {
             >
               <RefreshCw className="h-4 w-4 mr-1" />
               {snapshotNeedsUpdate ? 'Apply Changes & Regenerate' : 'Align & Regenerate'}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      {/* Teacher Changes Dialog - Apply name/eligibility changes without regeneration */}
+      <AlertDialog open={showTeacherRenameDialog} onOpenChange={setShowTeacherRenameDialog}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle className="flex items-center gap-2">
+              <UserCog className="h-5 w-5 text-blue-600" />
+              Teacher settings have changed
+            </AlertDialogTitle>
+            <AlertDialogDescription asChild>
+              <div className="space-y-3">
+                <p className="text-sm text-muted-foreground">
+                  The following teacher settings have been updated:
+                </p>
+                <div className="bg-slate-50 rounded-md p-3 space-y-2 max-h-[250px] overflow-y-auto">
+                  {teacherChanges?.renames.map((r, idx) => (
+                    <div key={`rename-${idx}`} className="flex items-center gap-2 text-sm">
+                      <span className="text-xs text-slate-500 w-16">Name:</span>
+                      <span className="font-medium text-slate-700">{r.oldName}</span>
+                      <span className="text-slate-400">→</span>
+                      <span className="font-medium text-blue-700">{r.newName}</span>
+                    </div>
+                  ))}
+                  {teacherChanges?.eligibilityChanges.map((e, idx) => (
+                    <div key={`elig-${idx}`} className="flex items-center gap-2 text-sm">
+                      <span className="text-xs text-slate-500 w-16">Study Hall:</span>
+                      <span className="font-medium text-slate-700">{e.name}</span>
+                      <span className="text-slate-400">→</span>
+                      <span className={`font-medium ${e.newValue ? 'text-green-600' : 'text-red-600'}`}>
+                        {e.newValue ? 'eligible' : 'excluded'}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+                <p className="text-sm text-muted-foreground">
+                  This will update all schedule versions.
+                </p>
+              </div>
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={applyingRenames}>
+              Cancel
+            </AlertDialogCancel>
+            <AlertDialogAction
+              onClick={handleApplyTeacherChanges}
+              disabled={applyingRenames}
+              className="bg-blue-600 hover:bg-blue-700"
+            >
+              {applyingRenames ? (
+                <>
+                  <Loader2 className="h-4 w-4 mr-1 animate-spin" />
+                  Applying...
+                </>
+              ) : (
+                <>
+                  <Check className="h-4 w-4 mr-1" />
+                  Apply Changes
+                </>
+              )}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>

@@ -5,7 +5,7 @@
  * the classes, teachers, rules, and grades as they were at generation time.
  */
 
-import type { ClassEntry, Teacher } from './types'
+import type { ClassEntry, Teacher, ScheduleOption, TeacherSchedule } from './types'
 import { calculateGradeBlocks } from './schedule-utils'
 
 // Snapshot types (as stored in stats column)
@@ -438,4 +438,170 @@ export function revisionMatchesSnapshot(
   }
 
   return true // All counts match
+}
+
+// =============================================================================
+// Teacher Rename Detection
+// =============================================================================
+
+/**
+ * Describes a detected change in teacher data between snapshot and current state
+ */
+export interface TeacherChange {
+  type: 'renamed' | 'status_changed' | 'eligibility_changed'
+  teacherId: string
+  oldName: string
+  newName: string
+  details?: string
+}
+
+/**
+ * Result of detecting teacher changes between snapshot and current database
+ */
+export interface TeacherChangeResult {
+  hasChanges: boolean
+  renames: Array<{ id: string; oldName: string; newName: string }>
+  eligibilityChanges: Array<{ id: string; name: string; oldValue: boolean; newValue: boolean }>
+  changes: TeacherChange[]
+  summary: string
+}
+
+/**
+ * Detect teacher changes by matching on teacher ID.
+ * Detects:
+ * - Name changes (renames)
+ * - Study hall eligibility changes (canSuperviseStudyHall)
+ */
+export function detectTeacherChanges(
+  snapshot: TeacherSnapshot[],
+  currentTeachers: Array<{ id: string; name: string; status: string; can_supervise_study_hall?: boolean }>
+): TeacherChangeResult {
+  const changes: TeacherChange[] = []
+  const renames: Array<{ id: string; oldName: string; newName: string }> = []
+  const eligibilityChanges: Array<{ id: string; name: string; oldValue: boolean; newValue: boolean }> = []
+
+  // Build map of current teachers by ID
+  const currentById = new Map(currentTeachers.map(t => [t.id, t]))
+
+  for (const snap of snapshot) {
+    const current = currentById.get(snap.id)
+    if (!current) continue // Teacher deleted - ignore for now
+
+    // Detect name changes
+    if (snap.name !== current.name) {
+      renames.push({ id: snap.id, oldName: snap.name, newName: current.name })
+      changes.push({
+        type: 'renamed',
+        teacherId: snap.id,
+        oldName: snap.name,
+        newName: current.name,
+      })
+    }
+
+    // Detect study hall eligibility changes
+    // Snapshot stores canSuperviseStudyHall, API returns can_supervise_study_hall
+    const snapEligibility = snap.canSuperviseStudyHall !== false // default true if undefined
+    const currentEligibility = current.can_supervise_study_hall !== false // default true if undefined
+    if (snapEligibility !== currentEligibility) {
+      const displayName = current.name // Use current name for display
+      eligibilityChanges.push({
+        id: snap.id,
+        name: displayName,
+        oldValue: snapEligibility,
+        newValue: currentEligibility,
+      })
+      changes.push({
+        type: 'eligibility_changed',
+        teacherId: snap.id,
+        oldName: snap.name,
+        newName: current.name,
+        details: currentEligibility ? 'now eligible for study hall' : 'now excluded from study hall',
+      })
+    }
+  }
+
+  // Build summary
+  const parts: string[] = []
+  if (renames.length > 0) {
+    parts.push(`${renames.length} renamed`)
+  }
+  if (eligibilityChanges.length > 0) {
+    parts.push(`${eligibilityChanges.length} eligibility changed`)
+  }
+
+  return {
+    hasChanges: renames.length > 0 || eligibilityChanges.length > 0,
+    renames,
+    eligibilityChanges,
+    changes,
+    summary: parts.join(', '),
+  }
+}
+
+/**
+ * Apply teacher renames to a schedule option.
+ * Updates:
+ * - teacherSchedules keys (teacher name is the object key)
+ * - teacherStats[].teacher property
+ * Returns a new object; does not mutate the original.
+ */
+export function applyTeacherRenames(
+  option: ScheduleOption,
+  renames: Array<{ oldName: string; newName: string }>
+): ScheduleOption {
+  const renameMap = new Map(renames.map(r => [r.oldName, r.newName]))
+
+  // Update teacherSchedules keys
+  const newTeacherSchedules: Record<string, TeacherSchedule> = {}
+  for (const [teacherName, schedule] of Object.entries(option.teacherSchedules)) {
+    const newName = renameMap.get(teacherName) ?? teacherName
+    newTeacherSchedules[newName] = schedule
+  }
+
+  // Update teacherStats
+  const newTeacherStats = option.teacherStats.map(stat => ({
+    ...stat,
+    teacher: renameMap.get(stat.teacher) ?? stat.teacher,
+  }))
+
+  return {
+    ...option,
+    teacherSchedules: newTeacherSchedules,
+    teacherStats: newTeacherStats,
+  }
+}
+
+/**
+ * Apply teacher renames to a teachers_snapshot.
+ * Returns a new array; does not mutate the original.
+ */
+export function applyTeacherRenamesToSnapshot(
+  snapshot: TeacherSnapshot[],
+  renames: Array<{ oldName: string; newName: string }>
+): TeacherSnapshot[] {
+  const renameMap = new Map(renames.map(r => [r.oldName, r.newName]))
+
+  return snapshot.map(t => ({
+    ...t,
+    name: renameMap.get(t.name) ?? t.name,
+  }))
+}
+
+/**
+ * Apply all teacher changes (renames + eligibility) to a teachers_snapshot.
+ * Returns a new array; does not mutate the original.
+ */
+export function applyTeacherChangesToSnapshot(
+  snapshot: TeacherSnapshot[],
+  renames: Array<{ oldName: string; newName: string }>,
+  eligibilityChanges: Array<{ id: string; newValue: boolean }>
+): TeacherSnapshot[] {
+  const renameMap = new Map(renames.map(r => [r.oldName, r.newName]))
+  const eligibilityMap = new Map(eligibilityChanges.map(e => [e.id, e.newValue]))
+
+  return snapshot.map(t => ({
+    ...t,
+    name: renameMap.get(t.name) ?? t.name,
+    canSuperviseStudyHall: eligibilityMap.has(t.id) ? eligibilityMap.get(t.id)! : t.canSuperviseStudyHall,
+  }))
 }

@@ -308,7 +308,11 @@ export interface ClassSnapshotEntry {
 }
 
 /**
- * Check if a class (by teacher + subject) is marked as an elective in the snapshot.
+ * Check if a class is marked as an elective in the snapshot.
+ *
+ * First tries to match by teacher+subject. If not found (e.g., class was transferred
+ * to a different teacher in Freeform mode), falls back to matching by subject only.
+ * This ensures transferred electives are still recognized as electives.
  *
  * @param teacher - Teacher name
  * @param subject - Subject name
@@ -321,8 +325,19 @@ export function isClassElective(
   classesSnapshot: ClassSnapshotEntry[] | undefined
 ): boolean {
   if (!classesSnapshot) return false
+
+  // First try exact match (teacher + subject)
+  const exactMatch = classesSnapshot.find(
+    c => c.teacher_name === teacher && c.subject_name === subject
+  )
+  if (exactMatch) {
+    return exactMatch.is_elective === true
+  }
+
+  // If no exact match, check if ANY class with this subject is an elective
+  // This handles transfers where the teacher changed but the subject's elective nature didn't
   return classesSnapshot.some(
-    c => c.teacher_name === teacher && c.subject_name === subject && c.is_elective
+    c => c.subject_name === subject && c.is_elective === true
   )
 }
 

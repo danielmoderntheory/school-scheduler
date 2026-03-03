@@ -276,12 +276,12 @@ export default function TeachersPage() {
                     </TableCell>
                     <TableCell>
                       <Checkbox
-                        checked={teacher.can_supervise_study_hall === true}
+                        checked={teacher.can_supervise_study_hall === false}
                         onCheckedChange={(checked) =>
                           updateTeacher(
                             teacher.id,
                             "can_supervise_study_hall",
-                            checked  // checked = excluded = true
+                            !checked  // checked = excluded, so can_supervise = !checked
                           )
                         }
                       />
