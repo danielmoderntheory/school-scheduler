@@ -13,9 +13,16 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog"
-import { ChevronDown, ChevronUp, Loader2, Plus, X, Clock, Users, Upload, Download, Check, History, Star, Lock } from "lucide-react"
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu"
+import { ChevronDown, ChevronUp, Loader2, Plus, X, Clock, Users, Upload, Download, Check, History, Star, Lock, Play, MoreVertical, Settings2 } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { GradeSelector, formatGradeDisplay } from "@/components/GradeSelector"
+import { AddClassModal } from "@/components/AddClassModal"
 import { TEACHER_STATUS_FULL_TIME, isPartTime, calculateGradeBlocks, buildCotaughtGroups, type TeacherStatus } from "@/lib/schedule-utils"
 import toast from "@/lib/toast"
 
@@ -106,6 +113,7 @@ export default function ClassesPage() {
   const [tableLocked, setTableLocked] = useState(true)
   const [lockReason, setLockReason] = useState<'generation' | 'import' | null>(null)
   const [showImportDialog, setShowImportDialog] = useState(false)
+  const [showAddClassModal, setShowAddClassModal] = useState(false)
   const [showExportDialog, setShowExportDialog] = useState(false)
   const [showImportFromHistoryDialog, setShowImportFromHistoryDialog] = useState(false)
   const [historyItems, setHistoryItems] = useState<Array<{
@@ -465,7 +473,7 @@ export default function ClassesPage() {
         const error = await res.json()
         toast.error(error.error || "Failed to add class")
       }
-    } catch (error) {
+    } catch {
       toast.error("Failed to add class")
     }
     return null
@@ -574,12 +582,12 @@ export default function ClassesPage() {
     return null
   }
 
-  async function createTeacher(name: string): Promise<Teacher | null> {
+  async function createTeacher(name: string, status: "full-time" | "part-time" = TEACHER_STATUS_FULL_TIME): Promise<Teacher | null> {
     try {
       const res = await fetch("/api/teachers", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name, status: TEACHER_STATUS_FULL_TIME }),
+        body: JSON.stringify({ name, status }),
       })
       if (res.ok) {
         const teacher = await res.json()
@@ -1372,7 +1380,7 @@ export default function ClassesPage() {
     const lines: string[] = []
 
     // Header
-    lines.push(['Teacher', 'Grade', 'Subject', 'Days per Week', 'Restrictions'].join('\t'))
+    lines.push(['Teacher', 'Grade', 'Subject', 'Blocks/Week', 'Restrictions'].join('\t'))
 
     // Sort classes by teacher name, then grade (incomplete classes first)
     const sortedClasses = [...classes].sort((a, b) => {
@@ -1611,39 +1619,33 @@ export default function ClassesPage() {
           )}
         </div>
         <div className="flex items-center gap-2">
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button size="sm" variant="outline" className="h-7 text-xs">
+                <MoreVertical className="h-3.5 w-3.5" />
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end">
+              <DropdownMenuItem onClick={() => {
+                setShowImportFromHistoryDialog(true)
+                loadHistoryForImport()
+              }}>
+                <History className="h-4 w-4 mr-2" />
+                Import from Schedule
+              </DropdownMenuItem>
+              <DropdownMenuItem onClick={() => setShowImportDialog(true)}>
+                <Upload className="h-4 w-4 mr-2" />
+                Import from Text
+              </DropdownMenuItem>
+              <DropdownMenuItem onClick={handleExport}>
+                <Download className="h-4 w-4 mr-2" />
+                Export
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
           <Button
             size="sm"
-            variant="outline"
-            onClick={() => {
-              setShowImportFromHistoryDialog(true)
-              loadHistoryForImport()
-            }}
-            className="h-7 text-xs gap-1"
-          >
-            <History className="h-3 w-3" />
-            Import from Schedule
-          </Button>
-          <Button
-            size="sm"
-            variant="outline"
-            onClick={() => setShowImportDialog(true)}
-            className="h-7 text-xs gap-1"
-          >
-            <Upload className="h-3 w-3" />
-            Import
-          </Button>
-          <Button
-            size="sm"
-            variant="outline"
-            onClick={handleExport}
-            className="h-7 text-xs gap-1"
-          >
-            <Download className="h-3 w-3" />
-            Export
-          </Button>
-          <Button
-            size="sm"
-            onClick={scrollToBottom}
+            onClick={() => setShowAddClassModal(true)}
             className="h-7 text-xs gap-1 bg-emerald-500 hover:bg-emerald-600 text-white"
           >
             <Plus className="h-3 w-3" />
@@ -1782,7 +1784,7 @@ export default function ClassesPage() {
             </DialogTitle>
             <DialogDescription>
               {importStep === 'input'
-                ? 'Paste tab-delimited data from Google Sheets. Format: Teacher, Grade, Subject, Days per Week, Restrictions (optional)'
+                ? 'Paste tab-delimited data from Google Sheets. Format: Teacher, Grade, Subject, Blocks/Week, Restrictions (optional)'
                 : `Review ${pendingImport.length} classes before importing. Adjust elective and co-taught flags as needed.`
               }
             </DialogDescription>
@@ -1793,7 +1795,7 @@ export default function ClassesPage() {
               <div className="space-y-4">
                 <textarea
                   className="w-full h-64 p-3 text-sm font-mono border rounded-lg resize-none focus:outline-none focus:ring-2 focus:ring-sky-500"
-                  placeholder={`Teacher\tGrade\tSubject\tDays per Week\tRestrictions
+                  placeholder={`Teacher\tGrade\tSubject\tBlocks/Week\tRestrictions
 New Teacher\tKindergarten\tEnglish\t4\t
 Carolina\t1st Grade\tMath\t4\t
 Phil\t6th-8th\tScience\t3\t
@@ -1998,6 +2000,20 @@ Maria\t6th-11th Elective\tSpanish 101\t1\tMon Block 5`}
         </DialogContent>
       </Dialog>
 
+      {/* Add Class Modal */}
+      <AddClassModal
+        open={showAddClassModal}
+        onOpenChange={setShowAddClassModal}
+        teachers={teachers}
+        grades={grades}
+        subjects={subjects}
+        existingClasses={classes}
+        quarterId={activeQuarter?.id || ""}
+        onCreateClass={createClass}
+        onCreateSubject={createSubject}
+        onCreateTeacher={createTeacher}
+      />
+
       {/* Grade Capacity & Status Indicator */}
       <div className="mb-4 rounded-lg bg-slate-50 border border-slate-200">
         <div className="flex items-center gap-1.5 px-3 py-2 overflow-x-auto">
@@ -2069,14 +2085,26 @@ Maria\t6th-11th Elective\tSpanish 101\t1\tMon Block 5`}
         )}
       </div>
 
-      {showLastRunNotice && (
+      {showLastRunNotice ? (
         lastRun.starred ? (
           <div className="mb-4 flex items-center gap-2 px-3 py-2 rounded-lg bg-amber-50 border border-amber-200 text-sm text-amber-700">
             <Star className="h-4 w-4 flex-shrink-0 fill-amber-400 text-amber-400" />
             <span>You have a starred schedule for these classes.</span>
-            <Link href={`/history/${lastRun.historyId}`} className="ml-auto text-amber-600 hover:text-amber-800 font-medium">
-              View results →
-            </Link>
+            <div className="ml-auto flex items-center gap-2">
+              <Link
+                href="/generate"
+                className="px-2 py-1 rounded text-amber-600 hover:bg-amber-100 transition-colors"
+              >
+                Generate new
+              </Link>
+              <span className="text-amber-300">|</span>
+              <Link
+                href={`/history/${lastRun.historyId}`}
+                className="px-2 py-1 rounded bg-amber-600 text-white hover:bg-amber-700 transition-colors font-medium"
+              >
+                View results →
+              </Link>
+            </div>
           </div>
         ) : (
           <div className="mb-4 flex items-center gap-2 px-3 py-2 rounded-lg bg-sky-50 border border-sky-200 text-sm text-sky-700">
@@ -2085,11 +2113,34 @@ Maria\t6th-11th Elective\tSpanish 101\t1\tMon Block 5`}
               You generated a schedule for these classes{" "}
               <span className="font-medium">{formatTimeAgo(lastRun.timestamp)}</span>.
             </span>
-            <Link href={`/history/${lastRun.historyId}`} className="ml-auto text-sky-600 hover:text-sky-800 font-medium">
-              View results →
-            </Link>
+            <div className="ml-auto flex items-center gap-2">
+              <Link
+                href="/generate"
+                className="px-2 py-1 rounded text-sky-600 hover:bg-sky-100 transition-colors"
+              >
+                Generate new
+              </Link>
+              <span className="text-sky-300">|</span>
+              <Link
+                href={`/history/${lastRun.historyId}`}
+                className="px-2 py-1 rounded bg-sky-600 text-white hover:bg-sky-700 transition-colors font-medium"
+              >
+                View results →
+              </Link>
+            </div>
           </div>
         )
+      ) : activeQuarter && classes.length > 0 && (
+        <div className="mb-4 flex items-center gap-2 px-3 py-2 rounded-lg bg-emerald-50 border border-emerald-200 text-sm text-emerald-700">
+          <Play className="h-4 w-4 flex-shrink-0" />
+          <span>Ready to generate a schedule for these {classes.length} classes?</span>
+          <Link
+            href="/generate"
+            className="ml-auto px-3 py-1 rounded bg-emerald-600 text-white hover:bg-emerald-700 transition-colors font-medium"
+          >
+            Generate schedule →
+          </Link>
+        </div>
       )}
 
 
@@ -2142,8 +2193,8 @@ Maria\t6th-11th Elective\tSpanish 101\t1\tMon Block 5`}
               <th className="text-left font-medium text-slate-500 px-3 py-2.5 w-[180px]">Teacher</th>
               <th className="text-left font-medium text-slate-500 px-3 py-2.5 w-[160px]">Grade</th>
               <th className="text-left font-medium text-slate-500 px-3 py-2.5 w-[200px]">Subject</th>
-              <th className="text-left font-medium text-slate-500 px-3 py-2.5 w-[60px]">Days</th>
-              <th className="text-left font-medium text-slate-500 px-3 py-2.5">Restricted Availability</th>
+              <th className="text-left font-medium text-slate-500 px-3 py-2.5 w-[60px]">Blocks</th>
+              <th className="text-left font-medium text-slate-500 px-3 py-2.5">Fixed Time Slots</th>
               <th className="w-8"></th>
             </tr>
           </thead>
@@ -2278,7 +2329,7 @@ function ClassRow({
           value={cls.days_per_week}
           onChange={(val) => onUpdate(cls.id, "days_per_week", val)}
           min={1}
-          max={5}
+          max={10}
         />
       </td>
       <td className="px-1 py-1">
@@ -2401,7 +2452,7 @@ function NewClassRow({
             value={data.days_per_week}
             onChange={(val) => setData((d) => ({ ...d, days_per_week: val }))}
             min={1}
-            max={5}
+            max={10}
           />
         )}
       </td>
@@ -2598,7 +2649,7 @@ interface RestrictionsCellProps {
 }
 
 function RestrictionsCell({ restrictions, onChange }: RestrictionsCellProps) {
-  const [adding, setAdding] = useState(false)
+  const [editing, setEditing] = useState(false)
   const [selectedDays, setSelectedDays] = useState<string[]>([])
   const [selectedBlocks, setSelectedBlocks] = useState<number[]>([])
   const containerRef = useRef<HTMLDivElement>(null)
@@ -2606,17 +2657,26 @@ function RestrictionsCell({ restrictions, onChange }: RestrictionsCellProps) {
   useEffect(() => {
     function handleClickOutside(e: MouseEvent) {
       if (containerRef.current && !containerRef.current.contains(e.target as Node)) {
-        setAdding(false)
-        resetAdd()
+        setEditing(false)
       }
     }
     document.addEventListener("mousedown", handleClickOutside)
     return () => document.removeEventListener("mousedown", handleClickOutside)
   }, [])
 
-  function resetAdd() {
-    setSelectedDays([])
-    setSelectedBlocks([])
+  function openEditor() {
+    // Preselect existing fixed_slot restrictions
+    const fixedSlots = restrictions.filter((r) => r.restriction_type === "fixed_slot")
+    const days: string[] = []
+    const blocks: number[] = []
+    fixedSlots.forEach((r) => {
+      const slot = r.value as { day: string; block: number }
+      days.push(slot.day)
+      blocks.push(slot.block)
+    })
+    setSelectedDays(days)
+    setSelectedBlocks(blocks)
+    setEditing(true)
   }
 
   function formatRestriction(r: Restriction): string {
@@ -2639,32 +2699,14 @@ function RestrictionsCell({ restrictions, onChange }: RestrictionsCellProps) {
     onChange(newRestrictions)
   }
 
-  function addRestriction() {
-    if (selectedDays.length === 0) return
-
-    const newRestrictions = [...restrictions]
-
-    if (selectedBlocks.length > 0) {
-      // Add fixed slots for each day+block combo
-      selectedDays.forEach((day) => {
-        selectedBlocks.forEach((block) => {
-          newRestrictions.push({
-            restriction_type: "fixed_slot",
-            value: { day, block },
-          })
-        })
-      })
-    } else {
-      // Just available days
-      newRestrictions.push({
-        restriction_type: "available_days",
-        value: selectedDays,
-      })
-    }
-
+  function saveRestrictions() {
+    // Replace all restrictions with selected slots
+    const newRestrictions: Restriction[] = selectedDays.map((day, i) => ({
+      restriction_type: "fixed_slot",
+      value: { day, block: selectedBlocks[i] },
+    }))
     onChange(newRestrictions)
-    setAdding(false)
-    resetAdd()
+    setEditing(false)
   }
 
   return (
@@ -2675,7 +2717,7 @@ function RestrictionsCell({ restrictions, onChange }: RestrictionsCellProps) {
             key={i}
             variant="secondary"
             className={cn(
-              "text-xs font-normal py-0 h-5 gap-1 group/badge cursor-default",
+              "text-xs font-normal py-0 h-5 gap-0.5 pr-1 group/badge cursor-default",
               r.restriction_type === "fixed_slot"
                 ? "bg-violet-100 text-violet-700 hover:bg-violet-100"
                 : "bg-sky-100 text-sky-700 hover:bg-sky-100"
@@ -2684,93 +2726,88 @@ function RestrictionsCell({ restrictions, onChange }: RestrictionsCellProps) {
             {formatRestriction(r)}
             <button
               onClick={() => removeRestriction(i)}
-              className="opacity-0 group-hover/badge:opacity-100 hover:text-red-500 ml-0.5"
+              className="opacity-0 group-hover/badge:opacity-100 hover:text-red-500"
             >
               <X className="h-3 w-3" />
             </button>
           </Badge>
         ))}
         <button
-          onClick={() => setAdding(true)}
+          onClick={openEditor}
           className="h-5 px-1.5 text-xs text-slate-400 hover:text-emerald-600 hover:bg-emerald-50 rounded flex items-center"
         >
-          <Plus className="h-3 w-3" />
+          <Settings2 className="h-3 w-3" />
         </button>
       </div>
 
-      {adding && (
-        <div className="absolute z-50 top-full left-0 mt-1 bg-popover border rounded-md shadow-lg p-3 w-72">
-          <div className="space-y-3">
-            <div className="text-xs text-muted-foreground">
-              Limit which days/blocks this class can be scheduled
-            </div>
-            <div>
-              <div className="text-xs font-medium mb-1">Available days</div>
-              <div className="flex gap-1">
-                {DAYS.map((day) => (
-                  <button
-                    key={day}
-                    onClick={() => {
-                      setSelectedDays((d) =>
-                        d.includes(day) ? d.filter((x) => x !== day) : [...d, day]
-                      )
-                    }}
-                    className={cn(
-                      "px-2 py-1 text-xs rounded border transition-colors",
-                      selectedDays.includes(day)
-                        ? "bg-sky-500 text-white border-sky-500"
-                        : "border-slate-200 hover:border-sky-300 hover:bg-sky-50"
-                    )}
-                  >
-                    {day.slice(0, 2)}
-                  </button>
-                ))}
-              </div>
-            </div>
-
-            <div>
-              <div className="text-xs font-medium mb-1">Fixed block (optional)</div>
-              <div className="flex gap-1">
-                {BLOCKS.map((block) => (
-                  <button
-                    key={block}
-                    onClick={() => {
-                      setSelectedBlocks((b) =>
-                        b.includes(block) ? b.filter((x) => x !== block) : [...b, block]
-                      )
-                    }}
-                    className={cn(
-                      "w-7 h-7 text-xs rounded border transition-colors",
-                      selectedBlocks.includes(block)
-                        ? "bg-violet-500 text-white border-violet-500"
-                        : "border-slate-200 hover:border-violet-300 hover:bg-violet-50"
-                    )}
-                  >
-                    {block}
-                  </button>
-                ))}
-              </div>
-              <div className="text-xs text-muted-foreground mt-1">
-                Leave empty to allow any block on selected days
-              </div>
-            </div>
+      {editing && (
+        <div className="absolute z-50 top-full left-0 mt-1 bg-popover border rounded-md shadow-lg p-2">
+          <div className="space-y-2">
+            <div className="text-xs font-medium text-muted-foreground">Fixed Time Slots</div>
+            <table className="text-xs border rounded-md border-separate border-spacing-0">
+              <thead>
+                <tr className="bg-muted/50">
+                  <th className="w-7 h-7 border-r border-b"></th>
+                  {DAYS.map((day) => (
+                    <th key={day} className="w-7 h-7 text-center border-r border-b last:border-r-0 text-muted-foreground font-medium">
+                      {day.slice(0, 2)}
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {BLOCKS.map((block, blockIdx) => {
+                  const isLastRow = blockIdx === BLOCKS.length - 1
+                  return (
+                    <tr key={block}>
+                      <td className={cn("w-7 h-7 text-center border-r font-medium bg-muted/50 text-muted-foreground", !isLastRow && "border-b")}>B{block}</td>
+                      {DAYS.map((day) => {
+                        const isSelected = selectedDays.some((d, i) => d === day && selectedBlocks[i] === block)
+                        return (
+                          <td
+                            key={day}
+                            onClick={() => {
+                              if (isSelected) {
+                                const idx = selectedDays.findIndex((d, i) => d === day && selectedBlocks[i] === block)
+                                if (idx >= 0) {
+                                  setSelectedDays(selectedDays.filter((_, i) => i !== idx))
+                                  setSelectedBlocks(selectedBlocks.filter((_, i) => i !== idx))
+                                }
+                              } else {
+                                setSelectedDays([...selectedDays, day])
+                                setSelectedBlocks([...selectedBlocks, block])
+                              }
+                            }}
+                            className={cn(
+                              "w-7 h-7 text-center border-r last:border-r-0 cursor-pointer transition-colors",
+                              !isLastRow && "border-b",
+                              isSelected
+                                ? "bg-emerald-500 text-white hover:bg-emerald-600"
+                                : "hover:bg-emerald-50"
+                            )}
+                          >
+                            {isSelected && <Check className="h-3.5 w-3.5 mx-auto" />}
+                          </td>
+                        )
+                      })}
+                    </tr>
+                  )
+                })}
+              </tbody>
+            </table>
 
             <div className="flex gap-2">
               <Button
                 size="sm"
-                onClick={addRestriction}
-                disabled={selectedDays.length === 0}
-                className="h-6 text-xs bg-emerald-500 hover:bg-emerald-600 text-white disabled:bg-slate-200 disabled:text-slate-400"
+                onClick={saveRestrictions}
+                className="h-6 text-xs bg-emerald-500 hover:bg-emerald-600 text-white"
               >
-                Add
+                Save
               </Button>
               <Button
                 size="sm"
                 variant="ghost"
-                onClick={() => {
-                  setAdding(false)
-                  resetAdd()
-                }}
+                onClick={() => setEditing(false)}
                 className="h-6 text-xs text-slate-500 hover:text-slate-700"
               >
                 Cancel

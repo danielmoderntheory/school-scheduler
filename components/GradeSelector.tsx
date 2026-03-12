@@ -114,12 +114,7 @@ export function GradeSelector({
   function handleMultiSelectToggle(enabled: boolean) {
     setMultiSelect(enabled)
     if (enabled) {
-      // Switch to multi-select: keep current or default to first two
-      if (selectedIds.length < 2) {
-        const first = individualGrades[0]?.id
-        const second = individualGrades[1]?.id
-        onChange([first, second].filter(Boolean), isElective)
-      }
+      // Switch to multi-select: keep current selection (don't preselect)
     } else {
       // Switch to single: keep first selected
       const firstId = selectedIds[0] || individualGrades[0]?.id
@@ -266,7 +261,7 @@ export function GradeSelector({
               {isElective && !hasRestrictions && (
                 <div className="mt-2 flex items-start gap-1.5 p-2 bg-amber-50 border border-amber-200 rounded text-xs text-amber-700">
                   <AlertTriangle className="h-3.5 w-3.5 mt-0.5 flex-shrink-0" />
-                  <span>Select restricted blocks so all elective options align</span>
+                  <span>Fix all elective options to the same time slots</span>
                 </div>
               )}
               {isElective && hasRestrictions && (

@@ -214,6 +214,33 @@ export async function POST(request: NextRequest) {
   } catch (error) {
     const { message, code } = formatDbError(error)
     if (code === "23505") {
+      // Look up the conflicting class to provide better error message
+      try {
+        const [existing] = await sql`
+          SELECT c.*, t.name as teacher_name, g.display_name as grade_display, s.name as subject_name
+          FROM classes c
+          LEFT JOIN teachers t ON c.teacher_id = t.id
+          LEFT JOIN grades g ON c.grade_id = g.id
+          LEFT JOIN subjects s ON c.subject_id = s.id
+          WHERE c.quarter_id = ${body.quarter_id}
+            AND c.teacher_id = ${body.teacher_id || null}
+            AND c.grade_id = ${gradeId}
+            AND c.subject_id = ${body.subject_id || null}
+        `
+        if (existing) {
+          const details = [
+            existing.teacher_name || 'No teacher',
+            existing.grade_display || 'No grade',
+            existing.subject_name || 'No subject'
+          ].join(' + ')
+          return NextResponse.json(
+            { error: `Class already exists: ${details}` },
+            { status: 400 }
+          )
+        }
+      } catch {
+        // Fall back to generic message if lookup fails
+      }
       return NextResponse.json(
         { error: "This class assignment already exists" },
         { status: 400 }

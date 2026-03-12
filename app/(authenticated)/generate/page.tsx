@@ -21,7 +21,7 @@ import { Loader2, Play, Download, Coffee, History, AlertTriangle, X, Server, Eye
 import { generateSchedulesRemote, type ScheduleDiagnostics } from "@/lib/scheduler-remote"
 import type { Teacher, ClassEntry, ScheduleOption } from "@/lib/types"
 import { useGeneration } from "@/lib/generation-context"
-import { isScheduledClass, calculateGradeBlocks, buildCotaughtGroups } from "@/lib/schedule-utils"
+import { isScheduledClass, calculateGradeBlocks, buildCotaughtGroups, TEACHER_STATUS_FULL_TIME } from "@/lib/schedule-utils"
 import toast from "@/lib/toast"
 
 // Sort grades: Kindergarten first, then by grade number
@@ -121,7 +121,7 @@ interface Grade {
 
 interface DBClass {
   id: string
-  teacher: { id: string; name: string }
+  teacher: { id: string; name: string; status?: string }
   grade: { id: string; name: string; display_name: string }
   grade_ids?: string[]
   grades?: Array<{ id: string; name: string; display_name: string; sort_order: number }>
@@ -431,11 +431,13 @@ export default function GeneratePage() {
           }))
 
           // Save teacher data for reference (status, study hall eligibility)
-          const teachersSnapshot = teachers.map(t => ({
+          // Note: API returns snake_case, we convert to camelCase for consistency with snapshot types
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const teachersSnapshot = teachers.map((t: any) => ({
             id: t.id,
             name: t.name,
             status: t.status,
-            canSuperviseStudyHall: t.canSuperviseStudyHall,
+            canSuperviseStudyHall: t.can_supervise_study_hall ?? true,
           }))
 
           // Save grades list for reference (in case grades are renamed/reordered)
@@ -612,6 +614,32 @@ export default function GeneratePage() {
     const hasAvailableBlocks = c.restrictions?.some(r => r.restriction_type === 'available_blocks')
     return !hasFixedSlot && !hasAvailableDays && !hasAvailableBlocks
   })
+
+  // Calculate teaching blocks per teacher for workload warnings
+  // Create a map to look up teacher status from the teachers array
+  const teacherStatusMap = new Map(teachers.map(t => [t.id, t.status]))
+  const teacherWorkload = new Map<string, { id: string; name: string; status: string; blocks: number }>()
+  for (const c of classes) {
+    if (!c.teacher) continue
+    const existing = teacherWorkload.get(c.teacher.id) || {
+      id: c.teacher.id,
+      name: c.teacher.name,
+      status: teacherStatusMap.get(c.teacher.id) || 'full-time',
+      blocks: 0
+    }
+    existing.blocks += c.days_per_week
+    teacherWorkload.set(c.teacher.id, existing)
+  }
+
+  // Full-time teachers with many open blocks (teaching ≤ 20 means ≥ 5 open)
+  const underutilizedTeachers = Array.from(teacherWorkload.values())
+    .filter(t => t.status === TEACHER_STATUS_FULL_TIME && t.blocks <= 20)
+    .sort((a, b) => a.blocks - b.blocks)
+
+  // Full-time teachers with very few open blocks (teaching ≥ 22 means ≤ 3 open)
+  const overloadedTeachers = Array.from(teacherWorkload.values())
+    .filter(t => t.status === TEACHER_STATUS_FULL_TIME && t.blocks >= 22)
+    .sort((a, b) => b.blocks - a.blocks)
 
   return (
     <div className="max-w-7xl mx-auto p-8">
@@ -1042,7 +1070,7 @@ export default function GeneratePage() {
 
       {/* Stats and History - always visible when not generating */}
       {!generating && !results && (
-        <Card className="bg-white shadow-sm mb-4">
+        <Card className="bg-sky-50 border-sky-200 shadow-md mb-4">
           <CardHeader className="pb-3">
             <CardTitle className="text-slate-700 text-lg flex items-center gap-2">
               Ready to Generate
@@ -1155,43 +1183,6 @@ export default function GeneratePage() {
               </div>
             )}
 
-            {/* Electives without restrictions warning */}
-            {electivesWithoutRestrictions.length > 0 && (
-              <div className="bg-amber-50 border border-amber-200 rounded-lg p-3">
-                <div className="flex items-start gap-2">
-                  <AlertTriangle className="h-4 w-4 text-amber-600 mt-0.5 flex-shrink-0" />
-                  <div>
-                    <div className="text-sm font-medium text-amber-800">
-                      {electivesWithoutRestrictions.length} elective{electivesWithoutRestrictions.length !== 1 ? 's' : ''} without restrictions
-                    </div>
-                    <p className="text-xs text-amber-700 mt-1">
-                      Electives need fixed time slots so all options align. Without restrictions, elective scheduling may conflict with other classes.
-                    </p>
-                    <ul className="text-xs text-amber-600 mt-1 space-y-0.5">
-                      {electivesWithoutRestrictions.slice(0, 3).map((c, i) => {
-                        let gradeDisplay = c.grade?.display_name || ''
-                        if (c.grades && c.grades.length > 1) {
-                          const sorted = [...c.grades].sort((a, b) => a.sort_order - b.sort_order)
-                          const first = sorted[0].display_name.replace(' Grade', '')
-                          const last = sorted[sorted.length - 1].display_name.replace(' Grade', '')
-                          gradeDisplay = `${first}-${last}`
-                        } else if (c.grades?.length === 1) {
-                          gradeDisplay = c.grades[0].display_name
-                        }
-                        return <li key={i}>• {c.teacher.name} - {c.subject.name} ({gradeDisplay})</li>
-                      })}
-                      {electivesWithoutRestrictions.length > 3 && (
-                        <li className="text-amber-500">...and {electivesWithoutRestrictions.length - 3} more</li>
-                      )}
-                    </ul>
-                    <Link href="/classes" className="text-xs text-amber-700 hover:text-amber-900 underline mt-2 inline-block">
-                      Edit class restrictions →
-                    </Link>
-                  </div>
-                </div>
-              </div>
-            )}
-
             {/* Incomplete classes error */}
             {incompleteClasses.length > 0 && (
               <div className="bg-red-50 border border-red-200 rounded-lg p-3">
@@ -1228,6 +1219,92 @@ export default function GeneratePage() {
                 </div>
               </div>
             )}
+
+            {/* Full-time teacher workload suggestions */}
+            {(overloadedTeachers.length > 0 || underutilizedTeachers.length > 0) && (
+              <div className="bg-amber-50 border border-amber-200 rounded-lg p-3">
+                <div className="flex items-center gap-2 mb-3">
+                  <AlertTriangle className="h-4 w-4 text-amber-600" />
+                  <span className="text-sm font-medium text-amber-800">Full-Time Teacher Workload</span>
+                </div>
+                <div className="grid grid-cols-2 gap-4">
+                  {/* Overloaded - too many blocks */}
+                  <div>
+                    <div className="text-xs font-medium text-amber-700 mb-1">Overloaded (≤3 open)</div>
+                    {overloadedTeachers.length > 0 ? (
+                      <div className="text-xs text-amber-600 flex flex-wrap gap-x-3 gap-y-0.5">
+                        {overloadedTeachers.slice(0, 8).map((t, i) => (
+                          <span key={i}>{t.name} <span className="text-amber-500">({25 - t.blocks})</span></span>
+                        ))}
+                        {overloadedTeachers.length > 8 && (
+                          <span className="text-amber-500">+{overloadedTeachers.length - 8} more</span>
+                        )}
+                      </div>
+                    ) : (
+                      <div className="text-xs text-amber-500 italic">None</div>
+                    )}
+                    <Link href="/classes" className="text-xs text-amber-600 hover:text-amber-800 underline mt-1 inline-block">Reassign classes →</Link>
+                  </div>
+                  {/* Underutilized - too few blocks */}
+                  <div>
+                    <div className="text-xs font-medium text-amber-700 mb-1">Underutilized (≥5 open)</div>
+                    {underutilizedTeachers.length > 0 ? (
+                      <div className="text-xs text-amber-600 flex flex-wrap gap-x-3 gap-y-0.5">
+                        {underutilizedTeachers.slice(0, 8).map((t, i) => (
+                          <span key={i}>{t.name} <span className="text-amber-500">({25 - t.blocks})</span></span>
+                        ))}
+                        {underutilizedTeachers.length > 8 && (
+                          <span className="text-amber-500">+{underutilizedTeachers.length - 8} more</span>
+                        )}
+                      </div>
+                    ) : (
+                      <div className="text-xs text-amber-500 italic">None</div>
+                    )}
+                    <div className="flex gap-2 mt-1">
+                      <Link href="/classes" className="text-xs text-amber-600 hover:text-amber-800 underline">Add classes →</Link>
+                      <Link href="/teachers" className="text-xs text-amber-600 hover:text-amber-800 underline">Set teachers part-time →</Link>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* Electives without restrictions warning */}
+            {electivesWithoutRestrictions.length > 0 && (
+              <div className="bg-amber-50 border border-amber-200 rounded-lg p-3">
+                <div className="flex items-start gap-2">
+                  <AlertTriangle className="h-4 w-4 text-amber-600 mt-0.5 flex-shrink-0" />
+                  <div>
+                    <div className="text-sm font-medium text-amber-800">
+                      {electivesWithoutRestrictions.length} elective{electivesWithoutRestrictions.length !== 1 ? 's' : ''} without restrictions
+                    </div>
+                    <p className="text-xs text-amber-700 mt-1">
+                      Electives need fixed time slots so all options align. Without restrictions, elective scheduling may conflict with other classes.
+                    </p>
+                    <ul className="text-xs text-amber-600 mt-1 space-y-0.5">
+                      {electivesWithoutRestrictions.slice(0, 3).map((c, i) => {
+                        let gradeDisplay = c.grade?.display_name || ''
+                        if (c.grades && c.grades.length > 1) {
+                          const sorted = [...c.grades].sort((a, b) => a.sort_order - b.sort_order)
+                          const first = sorted[0].display_name.replace(' Grade', '')
+                          const last = sorted[sorted.length - 1].display_name.replace(' Grade', '')
+                          gradeDisplay = `${first}-${last}`
+                        } else if (c.grades?.length === 1) {
+                          gradeDisplay = c.grades[0].display_name
+                        }
+                        return <li key={i}>• {c.teacher.name} - {c.subject.name} ({gradeDisplay})</li>
+                      })}
+                      {electivesWithoutRestrictions.length > 3 && (
+                        <li className="text-amber-500">...and {electivesWithoutRestrictions.length - 3} more</li>
+                      )}
+                    </ul>
+                    <Link href="/classes" className="text-xs text-amber-700 hover:text-amber-900 underline mt-2 inline-block">
+                      Edit class restrictions →
+                    </Link>
+                  </div>
+                </div>
+              </div>
+            )}
           </CardContent>
         </Card>
       )}
@@ -1253,10 +1330,10 @@ export default function GeneratePage() {
                     <Link
                       key={item.id}
                       href={`/history/${item.id}`}
-                      className="flex items-center gap-3 py-3 px-4 rounded-lg bg-amber-50 border border-amber-200 hover:bg-amber-100 transition-colors group"
+                      className="flex items-center gap-3 py-3 px-4 rounded-lg bg-emerald-50 border border-emerald-200 hover:bg-emerald-100 transition-colors group"
                     >
-                      <Star className="h-4 w-4 text-amber-500 fill-amber-500 flex-shrink-0" />
-                      <Badge variant="outline" className="text-xs border-amber-300">{item.quarter?.name}</Badge>
+                      <Star className="h-4 w-4 text-emerald-500 fill-emerald-500 flex-shrink-0" />
+                      <Badge variant="outline" className="text-xs border-emerald-300">{item.quarter?.name}</Badge>
                       <span className="text-xs text-muted-foreground">
                         {new Date(item.generated_at).toLocaleString(undefined, {
                           month: 'short',
@@ -1270,7 +1347,7 @@ export default function GeneratePage() {
                           — {item.notes}
                         </span>
                       )}
-                      <Eye className="h-3.5 w-3.5 text-amber-400 group-hover:text-amber-600 ml-auto flex-shrink-0" />
+                      <Eye className="h-3.5 w-3.5 text-emerald-400 group-hover:text-emerald-600 ml-auto flex-shrink-0" />
                     </Link>
                   ))}
                 </div>
