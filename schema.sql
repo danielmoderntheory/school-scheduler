@@ -93,9 +93,14 @@ CREATE TABLE classes (
     grade_ids UUID[],
     created_at TIMESTAMPTZ DEFAULT NOW(),
     updated_at TIMESTAMPTZ DEFAULT NOW(),
-    deleted_at TIMESTAMPTZ DEFAULT NULL,
-    UNIQUE(quarter_id, teacher_id, grade_id, subject_id)
+    deleted_at TIMESTAMPTZ DEFAULT NULL
 );
+
+-- Partial unique index: only enforce uniqueness on non-deleted classes
+-- This allows soft-deleted classes to not block new ones with same combination
+CREATE UNIQUE INDEX classes_unique_active
+    ON classes (quarter_id, teacher_id, grade_id, subject_id)
+    WHERE deleted_at IS NULL;
 
 -- ============================================================================
 -- RESTRICTIONS (Fixed slots, availability limits)
@@ -160,7 +165,8 @@ CREATE TABLE schedule_generations (
     selected_option INT,
     notes TEXT,
     is_saved BOOLEAN NOT NULL DEFAULT false,
-    is_starred BOOLEAN DEFAULT false
+    is_starred BOOLEAN DEFAULT false,
+    deleted_at TIMESTAMPTZ DEFAULT NULL
 );
 
 -- ============================================================================
@@ -209,6 +215,7 @@ CREATE INDEX idx_quarters_deleted_at ON quarters(deleted_at);
 CREATE INDEX idx_classes_deleted_at ON classes(deleted_at);
 CREATE INDEX idx_restrictions_deleted_at ON restrictions(deleted_at);
 CREATE INDEX idx_timetable_templates_deleted_at ON timetable_templates(deleted_at);
+CREATE INDEX idx_schedule_generations_deleted_at ON schedule_generations(deleted_at);
 
 -- ============================================================================
 -- TRIGGERS for updated_at

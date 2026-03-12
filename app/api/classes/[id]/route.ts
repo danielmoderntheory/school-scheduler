@@ -100,7 +100,8 @@ export async function DELETE(
   const { id } = await params
 
   try {
-    await sql`DELETE FROM classes WHERE id = ${id}`
+    // Soft delete: set deleted_at instead of actually deleting
+    await sql`UPDATE classes SET deleted_at = NOW() WHERE id = ${id}`
     return NextResponse.json({ success: true })
   } catch (error) {
     const { message } = formatDbError(error)

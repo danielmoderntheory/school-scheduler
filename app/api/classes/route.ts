@@ -15,6 +15,7 @@ interface ClassRow {
   updated_at: string
   teacher_name: string | null
   teacher_status: string | null
+  teacher_deleted: boolean
   grade_name: string | null
   grade_display_name: string | null
   subject_name: string | null
@@ -26,12 +27,14 @@ export async function GET(request: NextRequest) {
 
   try {
     // Fetch classes with teacher, grade, and subject info via JOINs
+    // Include deleted teachers but mark them with teacher_deleted flag
     const classes = quarterId
       ? await sql`
           SELECT
             c.*,
             t.name as teacher_name,
             t.status as teacher_status,
+            CASE WHEN t.deleted_at IS NOT NULL THEN true ELSE false END as teacher_deleted,
             g.name as grade_name,
             g.display_name as grade_display_name,
             s.name as subject_name
@@ -39,7 +42,7 @@ export async function GET(request: NextRequest) {
           LEFT JOIN teachers t ON c.teacher_id = t.id
           LEFT JOIN grades g ON c.grade_id = g.id
           LEFT JOIN subjects s ON c.subject_id = s.id
-          WHERE c.quarter_id = ${quarterId}
+          WHERE c.quarter_id = ${quarterId} AND c.deleted_at IS NULL
           ORDER BY c.created_at
         `
       : await sql`
@@ -47,6 +50,7 @@ export async function GET(request: NextRequest) {
             c.*,
             t.name as teacher_name,
             t.status as teacher_status,
+            CASE WHEN t.deleted_at IS NOT NULL THEN true ELSE false END as teacher_deleted,
             g.name as grade_name,
             g.display_name as grade_display_name,
             s.name as subject_name
@@ -54,6 +58,7 @@ export async function GET(request: NextRequest) {
           LEFT JOIN teachers t ON c.teacher_id = t.id
           LEFT JOIN grades g ON c.grade_id = g.id
           LEFT JOIN subjects s ON c.subject_id = s.id
+          WHERE c.deleted_at IS NULL
           ORDER BY c.created_at
         `
 
@@ -109,6 +114,7 @@ export async function GET(request: NextRequest) {
       created_at: c.created_at,
       updated_at: c.updated_at,
       teacher: c.teacher_id ? { id: c.teacher_id, name: c.teacher_name, status: c.teacher_status } : null,
+      teacher_deleted: c.teacher_deleted === true,
       grade: c.grade_id ? { id: c.grade_id, name: c.grade_name, display_name: c.grade_display_name } : null,
       subject: c.subject_id ? { id: c.subject_id, name: c.subject_name } : null,
       restrictions: restrictionsMap.get(c.id) || [],
@@ -226,6 +232,7 @@ export async function POST(request: NextRequest) {
             AND c.teacher_id = ${body.teacher_id || null}
             AND c.grade_id = ${gradeId}
             AND c.subject_id = ${body.subject_id || null}
+            AND c.deleted_at IS NULL
         `
         if (existing) {
           const details = [

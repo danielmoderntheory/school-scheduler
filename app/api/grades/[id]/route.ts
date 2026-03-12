@@ -38,10 +38,10 @@ export async function DELETE(
   const { id } = await params
 
   try {
-    // Check if grade is used in any classes
+    // Check if grade is used in any active classes (not soft-deleted)
     const classes = await sql`
       SELECT id FROM classes
-      WHERE grade_id = ${id}
+      WHERE grade_id = ${id} AND deleted_at IS NULL
       LIMIT 1
     `
 

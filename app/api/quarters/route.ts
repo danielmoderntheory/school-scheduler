@@ -42,10 +42,11 @@ export async function POST(request: NextRequest) {
     // Copy classes from another quarter if specified
     if (body.copy_from_quarter_id) {
       // Get classes from source quarter (include id for restriction mapping)
+      // Filter out soft-deleted classes
       const sourceClasses = await sql`
         SELECT id, teacher_id, grade_id, subject_id, days_per_week, grade_ids, is_elective, is_cotaught
         FROM classes
-        WHERE quarter_id = ${body.copy_from_quarter_id}
+        WHERE quarter_id = ${body.copy_from_quarter_id} AND deleted_at IS NULL
       `
 
       if (sourceClasses.length > 0) {

@@ -4,7 +4,6 @@ import { useState, useEffect } from "react"
 import Link from "next/link"
 import { usePathname, useRouter } from "next/navigation"
 import { cn } from "@/lib/utils"
-import { QuarterSelector } from "./QuarterSelector"
 import { Button } from "@/components/ui/button"
 import {
   DropdownMenu,
@@ -17,8 +16,8 @@ import { DropdownMenuSeparator } from "@/components/ui/dropdown-menu"
 import { useGeneration } from "@/lib/generation-context"
 
 const mainNavItems = [
-  { href: "/classes", label: "Classes" },
-  { href: "/generate", label: "Schedules" },
+  { href: "/classes", label: "Class Setup" },
+  { href: "/schedules", label: "Schedules" },
 ]
 
 const moreItems = [
@@ -128,10 +127,7 @@ export function Navigation() {
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
         <div className="flex h-14 items-center justify-between">
           <div className="flex items-center gap-6">
-            <div className="flex items-center gap-2">
-              <span className="text-xs text-muted-foreground">Quarter</span>
-              <QuarterSelector />
-            </div>
+            <span className="text-lg font-semibold text-foreground">Journey Schedule</span>
             <nav className="flex items-center gap-1">
               {mainNavItems.map((item) => (
                 <Link

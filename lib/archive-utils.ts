@@ -42,10 +42,10 @@ export async function checkArchiveStatus(
 
   const activeQuarter = activeQuarters[0]
 
-  // Get all schedule generations for the active quarter
+  // Get all schedule generations for the active quarter (excluding deleted)
   const schedules = await sql`
     SELECT id, stats FROM schedule_generations
-    WHERE quarter_id = ${activeQuarter.id}
+    WHERE quarter_id = ${activeQuarter.id} AND deleted_at IS NULL
   `
 
   if (schedules.length === 0) {

@@ -110,8 +110,30 @@ export async function DELETE(
   const { id } = await params
 
   try {
-    await sql`DELETE FROM schedule_generations WHERE id = ${id}`
+    // Soft delete - set deleted_at timestamp
+    await sql`UPDATE schedule_generations SET deleted_at = NOW() WHERE id = ${id}`
     return NextResponse.json({ success: true })
+  } catch (error) {
+    const { message } = formatDbError(error)
+    return NextResponse.json({ error: message }, { status: 500 })
+  }
+}
+
+export async function PATCH(
+  request: NextRequest,
+  { params }: { params: Promise<{ id: string }> }
+) {
+  const { id } = await params
+  const body = await request.json()
+
+  try {
+    // Undelete - clear deleted_at timestamp
+    if (body.action === "undelete") {
+      await sql`UPDATE schedule_generations SET deleted_at = NULL WHERE id = ${id}`
+      return NextResponse.json({ success: true })
+    }
+
+    return NextResponse.json({ error: "Unknown action" }, { status: 400 })
   } catch (error) {
     const { message } = formatDbError(error)
     return NextResponse.json({ error: message }, { status: 500 })

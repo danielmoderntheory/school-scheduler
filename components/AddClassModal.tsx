@@ -20,6 +20,7 @@ import {
 import {
   ChevronLeft,
   ChevronRight,
+  Clock,
   Loader2,
   Plus,
   Trash2,
@@ -226,8 +227,10 @@ export function AddClassModal({
 
   function canProceedFromAssign(): boolean {
     if (isElective) {
-      // Need at least 1 option for electives
-      if (assignments.length < 1) return false
+      // Need at least 2 options for electives (otherwise it's not really a choice)
+      if (assignments.length < 2) return false
+      // Electives must have fixed time slots
+      if (sharedRestrictions.length === 0) return false
       // Each option needs subject + teacher, and any co-teachers must also have IDs
       return assignments.every((a) => {
         if (!a.subjectId || !a.teacherId) return false
@@ -248,8 +251,9 @@ export function AddClassModal({
     if (step === "setup") {
       // Initialize assignments when moving to step 2
       if (isElective) {
-        // Start with 1 empty elective option
+        // Start with 2 empty elective options (electives need at least 2 choices)
         setAssignments([
+          { id: crypto.randomUUID(), teacherId: "", teacherName: "", subjectId: "", subjectName: "", restrictions: [] },
           { id: crypto.randomUUID(), teacherId: "", teacherName: "", subjectId: "", subjectName: "", restrictions: [] },
         ])
       } else {
@@ -406,6 +410,18 @@ export function AddClassModal({
   }
 
   // === Helper Functions ===
+  // Calculate total class count including co-teachers
+  function getTotalClassCount(): number {
+    let count = 0
+    for (const assignment of assignments) {
+      count++ // Primary teacher
+      if (assignment.coTeachers) {
+        count += assignment.coTeachers.filter(ct => ct.id).length
+      }
+    }
+    return count
+  }
+
   function getSelectedGradeNames(): string {
     if (gradeIds.length === 0) return ""
     const selected = individualGrades
@@ -424,21 +440,24 @@ export function AddClassModal({
     if (restrictions.length === 0) return "None"
 
     const parts: string[] = []
+
+    // Show available days first
+    const availDays = restrictions.find((r) => r.restriction_type === "available_days")
+    if (availDays) {
+      parts.push((availDays.value as string[]).join(", "))
+    }
+
+    // Then show fixed slots
     const fixedSlots = restrictions.filter((r) => r.restriction_type === "fixed_slot")
     for (const r of fixedSlots) {
       const slot = r.value as { day: string; block: number }
       parts.push(`${slot.day} B${slot.block}`)
     }
 
-    if (fixedSlots.length === 0) {
-      const availDays = restrictions.find((r) => r.restriction_type === "available_days")
-      const availBlocks = restrictions.find((r) => r.restriction_type === "available_blocks")
-      if (availDays) {
-        parts.push((availDays.value as string[]).join(", "))
-      }
-      if (availBlocks) {
-        parts.push(`Blocks ${(availBlocks.value as number[]).join(", ")}`)
-      }
+    // Show available blocks if present
+    const availBlocks = restrictions.find((r) => r.restriction_type === "available_blocks")
+    if (availBlocks) {
+      parts.push(`Blocks ${(availBlocks.value as number[]).join(", ")}`)
     }
 
     return parts.join(", ") || "None"
@@ -535,15 +554,16 @@ export function AddClassModal({
                 </select>
               )}
             </label>
-            <label className="flex items-start gap-2 cursor-pointer">
+            <label className={cn("flex gap-2 cursor-pointer", multiGrade ? "items-start" : "items-center")}>
               <input
                 type="radio"
                 name="gradeMode"
                 checked={multiGrade}
                 onChange={() => {
                   setMultiGrade(true)
+                  setGradeIds([])
                 }}
-                className="mt-0.5"
+                className={multiGrade ? "mt-0.5" : ""}
               />
               <div className="flex-1">
                 <span className="text-sm">Multiple Grades</span>
@@ -676,9 +696,7 @@ export function AddClassModal({
                 <div className="flex items-center justify-between">
                   <Label className="text-sm font-medium">
                     Teacher {index + 1}
-                    {index > 0 && (
-                      <span className="ml-2 text-purple-600 font-normal">(Co-taught)</span>
-                    )}
+                    <span className="ml-2 text-purple-600 font-normal">(Co-taught)</span>
                   </Label>
                   {index > 0 && (
                     <Button
@@ -781,17 +799,25 @@ export function AddClassModal({
 
         {/* Elective selection label */}
         <div>
-          <Label className="text-sm font-medium">Select Subject & Teacher</Label>
-          <p className="text-xs text-muted-foreground">Add subject and teacher for each elective option</p>
+          <Label className="text-sm font-medium">Elective Options</Label>
+          <p className="text-xs text-muted-foreground">Add at least 2 options — students choose one</p>
         </div>
 
         {/* Elective options */}
         <div className="space-y-3">
           {assignments.map((assignment, index) => (
-            <div key={assignment.id} className="p-3 border rounded-lg space-y-3">
+            <div key={assignment.id} className="p-2 border rounded-lg space-y-2">
               <div className="flex items-center justify-between">
-                <span className="text-sm font-medium">{assignments.length > 1 ? `Option ${index + 1}` : "Elective Class"}</span>
-                {assignments.length > 1 && (
+                <div className="flex items-center gap-2">
+                  <span className="text-sm font-medium">Option {index + 1}</span>
+                  {assignment.coTeachers && assignment.coTeachers.length > 0 && (
+                    <div className="flex items-center gap-1 text-xs text-purple-600">
+                      <Users className="h-3 w-3" />
+                      Co-taught
+                    </div>
+                  )}
+                </div>
+                {assignments.length > 2 && (
                   <Button
                     variant="ghost"
                     size="sm"
@@ -805,7 +831,7 @@ export function AddClassModal({
                 )}
               </div>
 
-              <div className="grid grid-cols-2 gap-3">
+              <div className="grid grid-cols-2 gap-2">
                 <div className="space-y-1">
                   <Label className="text-xs text-muted-foreground">Subject</Label>
                   <SubjectSelect
@@ -836,114 +862,125 @@ export function AddClassModal({
                       .map((a) => a.subjectId!)}
                   />
                 </div>
-                <div className="space-y-1">
-                  <Label className="text-xs text-muted-foreground">Teacher{assignment.coTeachers?.length ? 's' : ''}</Label>
-                  <div className="space-y-1.5">
-                    <TeacherSelect
-                      teachers={allTeachers}
-                      value={assignment.teacherId}
-                      onChange={(id, name) => {
-                        setAssignments(
-                          assignments.map((a) =>
-                            a.id === assignment.id ? { ...a, teacherId: id, teacherName: name } : a
-                          )
+                <div className="space-y-1 relative">
+                  <Label className="text-xs text-muted-foreground">Teacher</Label>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setAssignments(
+                        assignments.map((a) =>
+                          a.id === assignment.id
+                            ? { ...a, coTeachers: [...(a.coTeachers || []), { id: '', name: '' }] }
+                            : a
                         )
-                      }}
-                      onCreatePending={(name, status) => {
-                        const tempId = addPendingTeacher(name, status)
-                        setAssignments(
-                          assignments.map((a) =>
-                            a.id === assignment.id ? { ...a, teacherId: tempId, teacherName: name } : a
-                          )
+                      )
+                    }}
+                    className="absolute top-0 right-0 text-[11px] text-purple-600 hover:text-purple-700"
+                  >
+                    + Add Co-Teacher
+                  </button>
+                  <TeacherSelect
+                    teachers={allTeachers}
+                    value={assignment.teacherId}
+                    onChange={(id, name) => {
+                      setAssignments(
+                        assignments.map((a) =>
+                          a.id === assignment.id ? { ...a, teacherId: id, teacherName: name } : a
                         )
-                      }}
-                      onUpdatePendingStatus={updatePendingTeacherStatus}
-                      isPending={isTeacherPending}
-                      getPendingStatus={getPendingTeacherStatus}
-                      excludeIds={assignment.coTeachers?.map(t => t.id) || []}
-                    />
-                    {/* Co-teachers */}
-                    {assignment.coTeachers?.map((coTeacher, coIdx) => (
-                      <div key={coTeacher.id} className="flex items-center gap-1">
+                      )
+                    }}
+                    onCreatePending={(name, status) => {
+                      const tempId = addPendingTeacher(name, status)
+                      setAssignments(
+                        assignments.map((a) =>
+                          a.id === assignment.id ? { ...a, teacherId: tempId, teacherName: name } : a
+                        )
+                      )
+                    }}
+                    onUpdatePendingStatus={updatePendingTeacherStatus}
+                    isPending={isTeacherPending}
+                    getPendingStatus={getPendingTeacherStatus}
+                    excludeIds={[
+                      // Exclude co-teachers in same option
+                      ...(assignment.coTeachers?.map(t => t.id) || []),
+                      // Exclude all teachers from OTHER options
+                      ...assignments
+                        .filter(a => a.id !== assignment.id)
+                        .flatMap(a => [a.teacherId, ...(a.coTeachers?.map(ct => ct.id) || [])])
+                        .filter(Boolean)
+                    ]}
+                  />
+                  {/* Co-teachers */}
+                  {assignment.coTeachers?.map((coTeacher, coIdx) => (
+                    <div key={coTeacher.id} className="flex items-center gap-1">
+                      <div className="flex-1">
                         <TeacherSelect
-                          teachers={allTeachers}
-                          value={coTeacher.id}
-                          onChange={(id, name) => {
-                            setAssignments(
-                              assignments.map((a) =>
-                                a.id === assignment.id
-                                  ? {
-                                      ...a,
-                                      coTeachers: a.coTeachers?.map((ct, i) =>
-                                        i === coIdx ? { id, name } : ct
-                                      ),
-                                    }
-                                  : a
-                              )
+                        teachers={allTeachers}
+                        value={coTeacher.id}
+                        onChange={(id, name) => {
+                          setAssignments(
+                            assignments.map((a) =>
+                              a.id === assignment.id
+                                ? {
+                                    ...a,
+                                    coTeachers: a.coTeachers?.map((ct, i) =>
+                                      i === coIdx ? { id, name } : ct
+                                    ),
+                                  }
+                                : a
                             )
-                          }}
-                          onCreatePending={(name, status) => {
-                            const tempId = addPendingTeacher(name, status)
-                            setAssignments(
-                              assignments.map((a) =>
-                                a.id === assignment.id
-                                  ? {
-                                      ...a,
-                                      coTeachers: a.coTeachers?.map((ct, i) =>
-                                        i === coIdx ? { id: tempId, name } : ct
-                                      ),
-                                    }
-                                  : a
-                              )
-                            )
-                          }}
-                          onUpdatePendingStatus={updatePendingTeacherStatus}
-                          isPending={isTeacherPending}
-                          getPendingStatus={getPendingTeacherStatus}
-                          excludeIds={[assignment.teacherId, ...(assignment.coTeachers?.filter((_, i) => i !== coIdx).map(t => t.id) || [])]}
-                        />
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          onClick={() => {
-                            setAssignments(
-                              assignments.map((a) =>
-                                a.id === assignment.id
-                                  ? { ...a, coTeachers: a.coTeachers?.filter((_, i) => i !== coIdx) }
-                                  : a
-                              )
-                            )
-                          }}
-                          className="h-6 w-6 p-0 text-slate-400 hover:text-red-500"
-                        >
-                          <X className="h-3 w-3" />
-                        </Button>
-                      </div>
-                    ))}
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setAssignments(
-                          assignments.map((a) =>
-                            a.id === assignment.id
-                              ? { ...a, coTeachers: [...(a.coTeachers || []), { id: '', name: '' }] }
-                              : a
                           )
-                        )
-                      }}
-                      className="text-xs text-purple-600 hover:text-purple-700"
-                    >
-                      + Add Co-Teacher
-                    </button>
-                  </div>
+                        }}
+                        onCreatePending={(name, status) => {
+                          const tempId = addPendingTeacher(name, status)
+                          setAssignments(
+                            assignments.map((a) =>
+                              a.id === assignment.id
+                                ? {
+                                    ...a,
+                                    coTeachers: a.coTeachers?.map((ct, i) =>
+                                      i === coIdx ? { id: tempId, name } : ct
+                                    ),
+                                  }
+                                : a
+                            )
+                          )
+                        }}
+                        onUpdatePendingStatus={updatePendingTeacherStatus}
+                        isPending={isTeacherPending}
+                        getPendingStatus={getPendingTeacherStatus}
+                        excludeIds={[
+                          // Exclude primary teacher and other co-teachers in same option
+                          assignment.teacherId,
+                          ...(assignment.coTeachers?.filter((_, i) => i !== coIdx).map(t => t.id) || []),
+                          // Exclude all teachers from OTHER options
+                          ...assignments
+                            .filter(a => a.id !== assignment.id)
+                            .flatMap(a => [a.teacherId, ...(a.coTeachers?.map(ct => ct.id) || [])])
+                            .filter(Boolean)
+                        ]}
+                        />
+                      </div>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={() => {
+                          setAssignments(
+                            assignments.map((a) =>
+                              a.id === assignment.id
+                                ? { ...a, coTeachers: a.coTeachers?.filter((_, i) => i !== coIdx) }
+                                : a
+                            )
+                          )
+                        }}
+                        className="h-6 w-6 p-0 text-slate-400 hover:text-red-500"
+                      >
+                        <X className="h-3 w-3" />
+                      </Button>
+                    </div>
+                  ))}
                 </div>
               </div>
-              {assignment.coTeachers && assignment.coTeachers.length > 0 && (
-                <div className="flex items-center gap-1 text-xs text-purple-600">
-                  <Users className="h-3 w-3" />
-                  Co-taught
-                </div>
-              )}
             </div>
           ))}
         </div>
@@ -970,10 +1007,19 @@ export function AddClassModal({
           {assignments.length === 1 ? "Add Elective Option" : "Add Another Option"}
         </button>
 
+        {/* Elective explainer */}
+        <div className="flex items-center gap-2 p-2 bg-violet-50 border border-violet-200 rounded text-sm text-violet-700">
+          <Clock className="h-4 w-4 flex-shrink-0" />
+          All options scheduled at the same time — students choose one
+        </div>
+
         {/* Fixed time slots (shared across all electives) */}
-        <div className="p-3 border rounded-lg bg-slate-50 space-y-2">
+        <div className="p-3 border rounded-lg space-y-2 bg-slate-50">
           <div className="flex items-center gap-2">
-            <Label className="text-sm font-medium">Fixed Time Slots</Label>
+            <Label className="text-sm font-medium">
+              Fixed Time Slots
+              <span className="text-red-500 ml-0.5">*</span>
+            </Label>
             <RestrictionEditor
               restrictions={sharedRestrictions}
               onSave={setSharedRestrictions}
@@ -982,7 +1028,7 @@ export function AddClassModal({
           <p className="text-xs text-muted-foreground">
             {sharedRestrictions.length > 0
               ? `All options fixed to: ${formatRestrictionsDisplay(sharedRestrictions)}`
-              : "Optional: Fix all elective options to the same time slots"}
+              : "Required: Select time slots so all options are scheduled together"}
           </p>
         </div>
       </div>
@@ -992,21 +1038,90 @@ export function AddClassModal({
   function renderConfirmStep() {
     const isCotaught = !isElective && assignments.length > 1
 
-    // Count pending items to be created
-    const pendingTeacherCount = pendingTeachers.length
-    const pendingSubjectCount = pendingSubjects.length
+    // Count only pending items that are actually used in assignments
+    const usedPendingTeacherIds = new Set<string>()
+    const usedPendingSubjectIds = new Set<string>()
+
+    for (const assignment of assignments) {
+      if (assignment.teacherId && isPendingId(assignment.teacherId)) {
+        usedPendingTeacherIds.add(assignment.teacherId)
+      }
+      if (assignment.coTeachers) {
+        for (const ct of assignment.coTeachers) {
+          if (ct.id && isPendingId(ct.id)) {
+            usedPendingTeacherIds.add(ct.id)
+          }
+        }
+      }
+      if (isElective && assignment.subjectId && isPendingId(assignment.subjectId)) {
+        usedPendingSubjectIds.add(assignment.subjectId)
+      }
+    }
+    if (!isElective && subjectId && isPendingId(subjectId)) {
+      usedPendingSubjectIds.add(subjectId)
+    }
+
+    const pendingTeacherCount = usedPendingTeacherIds.size
+    const pendingSubjectCount = usedPendingSubjectIds.size
 
     // Get restrictions to display (shared for electives, per-assignment for regular)
     const getRestrictions = (assignment: Assignment) => {
       return isElective ? sharedRestrictions : assignment.restrictions
     }
 
+    // Build flat list of all class rows (including co-teachers)
+    const allClassRows: Array<{
+      key: string
+      teacherId: string
+      teacherName: string
+      subjectId?: string
+      subjectName?: string
+      restrictions: Restriction[]
+      isCotaughtClass: boolean
+    }> = []
+
+    for (const assignment of assignments) {
+      // Check if this assignment has co-teachers (for electives) or if regular mode has multiple assignments
+      const hasCoTeachers = assignment.coTeachers && assignment.coTeachers.some(ct => ct.id)
+      const isThisCotaught = isElective ? !!hasCoTeachers : isCotaught
+
+      // Primary teacher
+      allClassRows.push({
+        key: `${assignment.id}-primary`,
+        teacherId: assignment.teacherId,
+        teacherName: assignment.teacherName,
+        subjectId: assignment.subjectId,
+        subjectName: assignment.subjectName,
+        restrictions: getRestrictions(assignment),
+        isCotaughtClass: isThisCotaught,
+      })
+      // Co-teachers
+      if (assignment.coTeachers) {
+        for (let i = 0; i < assignment.coTeachers.length; i++) {
+          const ct = assignment.coTeachers[i]
+          if (ct.id) {
+            allClassRows.push({
+              key: `${assignment.id}-co-${i}`,
+              teacherId: ct.id,
+              teacherName: ct.name,
+              subjectId: assignment.subjectId,
+              subjectName: assignment.subjectName,
+              restrictions: getRestrictions(assignment),
+              isCotaughtClass: true,
+            })
+          }
+        }
+      }
+    }
+
+    const totalClassCount = allClassRows.length
+
     return (
       <div className="space-y-4">
         {/* Summary header */}
         <div className="flex items-center justify-between text-sm">
           <div className="flex items-center gap-2">
-            <span className="text-muted-foreground">Creating {assignments.length} class{assignments.length > 1 ? "es" : ""}</span>
+            <span className="text-muted-foreground">Creating {totalClassCount} class{totalClassCount > 1 ? "es" : ""}</span>
             {isElective && (
               <Badge variant="secondary" className="bg-violet-100 text-violet-700">
                 Elective
@@ -1030,19 +1145,20 @@ export function AddClassModal({
                 <th className="text-left font-medium text-slate-500 px-3 py-2 w-[70px]">Grade</th>
                 <th className="text-left font-medium text-slate-500 px-3 py-2 w-[80px]">Subject</th>
                 <th className="text-left font-medium text-slate-500 px-3 py-2 w-[55px]">Blocks</th>
-                <th className="text-left font-medium text-slate-500 px-3 py-2">Fixed Slots</th>
+                <th className="text-left font-medium text-slate-500 px-3 py-2">Restrictions</th>
               </tr>
             </thead>
             <tbody>
-              {assignments.map((assignment) => {
-                const restrictions = getRestrictions(assignment)
-                return (
-                  <tr key={assignment.id} className="border-b last:border-b-0">
+              {allClassRows.map((row) => (
+                  <tr key={row.key} className="border-b last:border-b-0">
                     <td className="px-3 py-2">
                       <div className="flex items-center gap-1">
-                        {assignment.teacherName || <span className="text-slate-400">—</span>}
-                        {assignment.teacherId && isTeacherPending(assignment.teacherId) && (
+                        {row.teacherName || <span className="text-slate-400">—</span>}
+                        {row.teacherId && isTeacherPending(row.teacherId) && (
                           <Badge variant="outline" className="text-xs py-0 h-4">New</Badge>
+                        )}
+                        {row.isCotaughtClass && (
+                          <span className="text-xs text-purple-600">(co)</span>
                         )}
                       </div>
                     </td>
@@ -1053,8 +1169,8 @@ export function AddClassModal({
                       <div className="flex items-center gap-1">
                         {isElective ? (
                           <>
-                            {assignment.subjectName || <span className="text-slate-400">—</span>}
-                            {assignment.subjectId && isSubjectPending(assignment.subjectId) && (
+                            {row.subjectName || <span className="text-slate-400">—</span>}
+                            {row.subjectId && isSubjectPending(row.subjectId) && (
                               <Badge variant="outline" className="text-xs py-0 h-4">New</Badge>
                             )}
                           </>
@@ -1070,15 +1186,26 @@ export function AddClassModal({
                     </td>
                     <td className="px-3 py-2 text-slate-600">{daysPerWeek}</td>
                     <td className="px-3 py-2">
-                      {restrictions.filter(r => r.restriction_type === "fixed_slot").length > 0 ? (
+                      {row.restrictions.length > 0 ? (
                         <div className="flex flex-wrap gap-1">
-                          {restrictions
+                          {row.restrictions
+                            .filter(r => r.restriction_type === "available_days")
+                            .map((r, i) => (
+                              <Badge
+                                key={`avail-${i}`}
+                                variant="secondary"
+                                className="text-xs font-normal py-0 h-5 bg-sky-100 text-sky-700 hover:bg-sky-100"
+                              >
+                                {(r.value as string[]).join(", ")}
+                              </Badge>
+                            ))}
+                          {row.restrictions
                             .filter(r => r.restriction_type === "fixed_slot")
                             .map((r, i) => {
                               const slot = r.value as { day: string; block: number }
                               return (
                                 <Badge
-                                  key={i}
+                                  key={`fixed-${i}`}
                                   variant="secondary"
                                   className="text-xs font-normal py-0 h-5 bg-violet-100 text-violet-700 hover:bg-violet-100"
                                 >
@@ -1092,8 +1219,7 @@ export function AddClassModal({
                       )}
                     </td>
                   </tr>
-                )
-              })}
+              ))}
             </tbody>
           </table>
         </div>
@@ -1116,13 +1242,6 @@ export function AddClassModal({
           </div>
         )}
 
-        {/* Warnings */}
-        {isElective && sharedRestrictions.length === 0 && (
-          <div className="p-3 bg-amber-50 border border-amber-200 rounded-lg text-sm text-amber-700 flex items-start gap-2">
-            <AlertTriangle className="h-4 w-4 mt-0.5 flex-shrink-0" />
-            <span>No time slot set. Elective options may not be scheduled at the same time.</span>
-          </div>
-        )}
       </div>
     )
   }
@@ -1206,7 +1325,7 @@ export function AddClassModal({
                     Creating...
                   </>
                 ) : (
-                  `Create ${assignments.length} Class${assignments.length > 1 ? "es" : ""}`
+                  `Create ${getTotalClassCount()} Class${getTotalClassCount() > 1 ? "es" : ""}`
                 )}
               </Button>
             )}
@@ -1327,9 +1446,10 @@ interface TeacherSelectProps {
   isPending: (id: string) => boolean
   getPendingStatus?: (id: string) => "full-time" | "part-time" | undefined
   excludeIds?: string[]
+  placeholder?: string
 }
 
-function TeacherSelect({ teachers, value, onChange, onCreatePending, onUpdatePendingStatus, isPending, getPendingStatus, excludeIds = [] }: TeacherSelectProps) {
+function TeacherSelect({ teachers, value, onChange, onCreatePending, onUpdatePendingStatus, isPending, getPendingStatus, excludeIds = [], placeholder = "Select or type to create..." }: TeacherSelectProps) {
   const [open, setOpen] = useState(false)
   const [search, setSearch] = useState("")
   const containerRef = useRef<HTMLDivElement>(null)
@@ -1373,8 +1493,8 @@ function TeacherSelect({ teachers, value, onChange, onCreatePending, onUpdatePen
             if (!open) setOpen(true)
           }}
           onFocus={() => setOpen(true)}
-          placeholder="Select or type to create..."
-          className="h-9 pr-32"
+          placeholder={placeholder}
+          className={cn("h-9", selectedTeacher && isPending(selectedTeacher.id) ? "pr-32" : "")}
         />
         {selectedTeacher && isPending(selectedTeacher.id) && (
           <div className="absolute right-2 top-1/2 -translate-y-1/2 flex items-center gap-1.5">
@@ -1449,100 +1569,218 @@ interface RestrictionEditorProps {
 function RestrictionEditor({ restrictions, onSave }: RestrictionEditorProps) {
   const [open, setOpen] = useState(false)
   const [fixedSlots, setFixedSlots] = useState<{ day: string; block: number }[]>([])
+  const [availableDaysOnly, setAvailableDaysOnly] = useState<string[]>([])
 
   useEffect(() => {
+    // Load fixed slots
     const fixed = restrictions.filter((r) => r.restriction_type === "fixed_slot")
-    if (fixed.length > 0) {
-      setFixedSlots(fixed.map((f) => f.value as { day: string; block: number }))
-    } else {
-      setFixedSlots([])
-    }
+    setFixedSlots(fixed.map((f) => f.value as { day: string; block: number }))
+
+    // Load available days
+    const availDays = restrictions.find((r) => r.restriction_type === "available_days")
+    setAvailableDaysOnly(availDays ? (availDays.value as string[]) : [])
   }, [restrictions, open])
 
   function handleSave() {
-    const newRestrictions: Restriction[] = fixedSlots.map((slot) => ({
-      restriction_type: "fixed_slot",
-      value: slot,
-    }))
+    const newRestrictions: Restriction[] = []
+
+    // Check which days have all 5 blocks selected (should become available_days)
+    const daysWithAllBlocks: string[] = []
+    DAYS.forEach((day) => {
+      const blocksForDay = fixedSlots.filter((s) => s.day === day).map((s) => s.block)
+      if (blocksForDay.length === 5) {
+        daysWithAllBlocks.push(day)
+      }
+    })
+
+    // Combine explicit available days with days that have all blocks selected
+    const allAvailableDays = [...new Set([...availableDaysOnly, ...daysWithAllBlocks])]
+    if (allAvailableDays.length > 0) {
+      newRestrictions.push({
+        restriction_type: "available_days",
+        value: allAvailableDays,
+      })
+    }
+
+    // Add fixed_slots only for days that don't have all 5 blocks selected
+    fixedSlots.forEach((slot) => {
+      if (!daysWithAllBlocks.includes(slot.day)) {
+        newRestrictions.push({
+          restriction_type: "fixed_slot",
+          value: slot,
+        })
+      }
+    })
+
     onSave(newRestrictions)
     setOpen(false)
   }
 
-  function toggleFixedSlot(day: string, block: number) {
-    const exists = fixedSlots.some((s) => s.day === day && s.block === block)
-    if (exists) {
-      setFixedSlots((prev) => prev.filter((s) => !(s.day === day && s.block === block)))
-    } else {
-      setFixedSlots((prev) => [...prev, { day, block }])
-    }
+  function handleClear() {
+    setFixedSlots([])
+    setAvailableDaysOnly([])
   }
 
-  // Count fixed_slot restrictions for badge
+  // Count restrictions for badge
   const fixedSlotCount = restrictions.filter((r) => r.restriction_type === "fixed_slot").length
+  const hasAvailDays = restrictions.some((r) => r.restriction_type === "available_days")
+  const totalCount = fixedSlotCount + (hasAvailDays ? 1 : 0)
 
   return (
     <Popover open={open} onOpenChange={setOpen}>
       <PopoverTrigger asChild>
         <Button variant="outline" size="sm" className="h-7 px-2 gap-1">
           <Settings2 className="h-4 w-4" />
-          {fixedSlotCount > 0 && (
+          {totalCount > 0 && (
             <Badge variant="secondary" className="h-5 px-1.5 text-xs">
-              {fixedSlotCount}
+              {totalCount}
             </Badge>
           )}
         </Button>
       </PopoverTrigger>
       <PopoverContent className="w-auto p-2" align="start">
-        <div className="space-y-2">
-          <div className="text-xs font-medium text-muted-foreground">Fixed Time Slots</div>
-          <table className="text-xs border rounded-md overflow-hidden border-separate border-spacing-0">
-            <thead>
-              <tr className="bg-muted/50">
-                <th className="w-7 h-7 border-r border-b"></th>
-                {DAYS.map((day) => (
-                  <th key={day} className="w-7 h-7 text-center border-r border-b last:border-r-0 text-muted-foreground font-medium">
-                    {day.slice(0, 2)}
-                  </th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {BLOCKS.map((block, blockIdx) => {
-                const isLastRow = blockIdx === BLOCKS.length - 1
+        <div className="space-y-3">
+          {/* Available Days Only */}
+          <div className="space-y-1.5">
+            <div className="text-xs font-medium text-muted-foreground">Available Days</div>
+            <div className="flex gap-1">
+              {DAYS.map((day) => {
+                const isSelected = availableDaysOnly.includes(day)
                 return (
-                  <tr key={block}>
-                    <td className={cn("w-7 h-7 text-center border-r font-medium bg-muted/50 text-muted-foreground", !isLastRow && "border-b")}>B{block}</td>
-                    {DAYS.map((day) => {
-                      const isFixed = fixedSlots.some(
-                        (s) => s.day === day && s.block === block
-                      )
-                      return (
-                        <td
-                          key={day}
-                          onClick={() => toggleFixedSlot(day, block)}
-                          className={cn(
-                            "w-7 h-7 text-center border-r last:border-r-0 cursor-pointer transition-colors",
-                            !isLastRow && "border-b",
-                            isFixed
-                              ? "bg-emerald-500 text-white hover:bg-emerald-600"
-                              : "hover:bg-emerald-50"
-                          )}
-                        >
-                          {isFixed && <Check className="h-3.5 w-3.5 mx-auto" />}
-                        </td>
-                      )
-                    })}
-                  </tr>
+                  <button
+                    key={day}
+                    onClick={() => {
+                      let newAvailDays: string[]
+                      if (isSelected) {
+                        newAvailDays = availableDaysOnly.filter((d) => d !== day)
+                      } else {
+                        newAvailDays = [...availableDaysOnly, day]
+                      }
+                      setAvailableDaysOnly(newAvailDays)
+                      // Clear fixed slots that are no longer on available days
+                      if (newAvailDays.length > 0) {
+                        setFixedSlots(fixedSlots.filter((s) => newAvailDays.includes(s.day)))
+                      }
+                    }}
+                    className={cn(
+                      "px-2 py-1 text-xs rounded transition-colors",
+                      isSelected
+                        ? "bg-sky-500 text-white hover:bg-sky-600"
+                        : "bg-slate-100 text-slate-600 hover:bg-sky-50 hover:text-sky-600"
+                    )}
+                  >
+                    {day}
+                  </button>
                 )
               })}
-            </tbody>
-          </table>
+            </div>
+            {availableDaysOnly.length > 0 && (
+              <p className="text-[10px] text-muted-foreground">Class can only be scheduled on selected days</p>
+            )}
+          </div>
+
+          {/* Divider */}
+          <div className="border-t border-slate-200" />
+
+          {/* Fixed Time Slots Grid */}
+          <div className="space-y-1.5">
+            <div className="text-xs font-medium text-muted-foreground">Fixed Time Slots</div>
+            <p className="text-[10px] text-muted-foreground">
+              {availableDaysOnly.length > 0
+                ? "Lock to exact slots on available days"
+                : "Lock class to specific time slots"}
+            </p>
+            <table className="text-xs border rounded-md overflow-hidden border-separate border-spacing-0">
+              <thead>
+                <tr className="bg-muted/50">
+                  <th className="w-7 h-7 border-r border-b"></th>
+                  {DAYS.map((day) => {
+                    const isDayAvailable = availableDaysOnly.length === 0 || availableDaysOnly.includes(day)
+                    return (
+                      <th key={day} className={cn(
+                        "w-7 h-7 text-center border-r border-b last:border-r-0 font-medium",
+                        isDayAvailable ? "text-muted-foreground" : "text-slate-300"
+                      )}>
+                        {day.slice(0, 2)}
+                      </th>
+                    )
+                  })}
+                </tr>
+              </thead>
+              <tbody>
+                {BLOCKS.map((block, blockIdx) => {
+                  const isLastRow = blockIdx === BLOCKS.length - 1
+                  return (
+                    <tr key={block}>
+                      <td className={cn("w-7 h-7 text-center border-r font-medium bg-muted/50 text-muted-foreground", !isLastRow && "border-b")}>B{block}</td>
+                      {DAYS.map((day) => {
+                        const isExplicitlySelected = fixedSlots.some(
+                          (s) => s.day === day && s.block === block
+                        )
+                        const isDayInAvailable = availableDaysOnly.includes(day)
+                        const dayHasExplicitSlots = fixedSlots.some((s) => s.day === day)
+                        // If day is available and has no explicit slots, all blocks are implicitly selected
+                        const isImplicitlySelected = isDayInAvailable && !dayHasExplicitSlots
+                        const isSelected = isExplicitlySelected || isImplicitlySelected
+                        const isDayAvailable = availableDaysOnly.length === 0 || isDayInAvailable
+                        return (
+                          <td
+                            key={day}
+                            onClick={() => {
+                              if (!isDayAvailable) return // Can't select slots on unavailable days
+
+                              if (isDayInAvailable) {
+                                // Day is in available days
+                                if (isImplicitlySelected) {
+                                  // All blocks implicitly selected - add OTHER blocks explicitly (unselect this one)
+                                  const otherBlocks = BLOCKS.filter((b) => b !== block)
+                                  const newSlots = [
+                                    ...fixedSlots.filter((s) => s.day !== day),
+                                    ...otherBlocks.map((b) => ({ day, block: b }))
+                                  ]
+                                  setFixedSlots(newSlots)
+                                } else if (isExplicitlySelected) {
+                                  // Explicitly selected - remove it
+                                  setFixedSlots(fixedSlots.filter((s) => !(s.day === day && s.block === block)))
+                                } else {
+                                  // Not selected - add it
+                                  setFixedSlots([...fixedSlots, { day, block }])
+                                }
+                              } else {
+                                // Day not in available days (no days selected = all available)
+                                if (isExplicitlySelected) {
+                                  setFixedSlots(fixedSlots.filter((s) => !(s.day === day && s.block === block)))
+                                } else {
+                                  setFixedSlots([...fixedSlots, { day, block }])
+                                }
+                              }
+                            }}
+                            className={cn(
+                              "w-7 h-7 text-center border-r last:border-r-0 transition-colors",
+                              !isLastRow && "border-b",
+                              isSelected
+                                ? "bg-violet-500 text-white hover:bg-violet-600 cursor-pointer"
+                                : isDayAvailable
+                                  ? "hover:bg-violet-50 cursor-pointer"
+                                  : "bg-slate-100 cursor-not-allowed"
+                            )}
+                          >
+                            {isSelected && <Check className="h-3.5 w-3.5 mx-auto" />}
+                          </td>
+                        )
+                      })}
+                    </tr>
+                  )
+                })}
+              </tbody>
+            </table>
+          </div>
 
           <div className="flex justify-end gap-2">
             <Button
               variant="outline"
               size="sm"
-              onClick={() => setFixedSlots([])}
+              onClick={handleClear}
             >
               Clear
             </Button>

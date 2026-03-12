@@ -17,13 +17,18 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
-import { ChevronDown, ChevronUp, Loader2, Plus, X, Clock, Users, Upload, Download, Check, History, Star, Lock, Play, MoreVertical, Settings2 } from "lucide-react"
+import { AlertTriangle, ChevronDown, ChevronUp, Loader2, Plus, X, Clock, Users, UserX, Upload, Download, Check, History, Star, Lock, Play, MoreVertical, Settings2, Trash2, Undo2 } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { GradeSelector, formatGradeDisplay } from "@/components/GradeSelector"
 import { AddClassModal } from "@/components/AddClassModal"
+import { LocalQuarterSelector } from "@/components/LocalQuarterSelector"
+import { GenerateModal } from "@/components/GenerateModal"
+import { useQuarterSelection } from "@/lib/hooks/useQuarterSelection"
 import { TEACHER_STATUS_FULL_TIME, isPartTime, calculateGradeBlocks, buildCotaughtGroups, type TeacherStatus } from "@/lib/schedule-utils"
+import type { SchedulingRule } from "@/lib/scheduler-remote"
 import toast from "@/lib/toast"
 
 interface LastRun {
@@ -70,7 +75,8 @@ interface ClassEntry {
   is_cotaught?: boolean
   subject_id: string
   days_per_week: number
-  teacher: Teacher
+  teacher: Teacher | null
+  teacher_deleted?: boolean
   grade: Grade
   grades?: Grade[]
   subject: Subject
@@ -107,13 +113,31 @@ export default function ClassesPage() {
   const [grades, setGrades] = useState<Grade[]>([])
   const [subjects, setSubjects] = useState<Subject[]>([])
   const [studyHallGrades, setStudyHallGrades] = useState<string[]>([])
-  const [activeQuarter, setActiveQuarter] = useState<Quarter | null>(null)
+  const [rules, setRules] = useState<SchedulingRule[]>([])
   const [loading, setLoading] = useState(true)
+  const [showGenerateModal, setShowGenerateModal] = useState(false)
+
+  // Use localStorage-based quarter selection
+  const {
+    quarters,
+    selectedQuarter: activeQuarter,
+    setSelectedQuarterId,
+    refetchQuarters,
+    isLoading: quartersLoading,
+    error: quartersError,
+  } = useQuarterSelection({
+    onQuarterChange: (quarterId) => {
+      // Reload classes when quarter changes
+      loadClassesForQuarter(quarterId)
+    },
+  })
   const [lastRun, setLastRun] = useState<LastRun | null>(null)
   const [tableLocked, setTableLocked] = useState(true)
   const [lockReason, setLockReason] = useState<'generation' | 'import' | null>(null)
   const [showImportDialog, setShowImportDialog] = useState(false)
   const [showAddClassModal, setShowAddClassModal] = useState(false)
+  const [showCotaughtSuggestion, setShowCotaughtSuggestion] = useState(false)
+  const [cotaughtSuggestionClasses, setCotaughtSuggestionClasses] = useState<ClassEntry[]>([])
   const [showExportDialog, setShowExportDialog] = useState(false)
   const [showImportFromHistoryDialog, setShowImportFromHistoryDialog] = useState(false)
   const [historyItems, setHistoryItems] = useState<Array<{
@@ -145,8 +169,14 @@ export default function ClassesPage() {
   const [importCotaughtGroups, setImportCotaughtGroups] = useState<Map<string, number[]>>(new Map())
   const [showCotaughtDetails, setShowCotaughtDetails] = useState(false)
   const [importWarnings, setImportWarnings] = useState<string[]>([])
+  const [showDeletedDialog, setShowDeletedDialog] = useState(false)
+  const [deletedClasses, setDeletedClasses] = useState<Array<{
+    id: string
+    deleted_at: string
+    description: string
+  }>>([])
+  const [restoringIds, setRestoringIds] = useState<Set<string>>(new Set())
   const undoToastId = useRef<string | null>(null)
-  const pendingDeletes = useRef<Map<string, NodeJS.Timeout>>(new Map())
   const initialLoadDone = useRef(false)
 
   // Unlock table when classes are modified after initial load
@@ -158,33 +188,112 @@ export default function ClassesPage() {
 
   useEffect(() => {
     loadData()
-    // Cleanup pending deletes on unmount
-    return () => {
-      pendingDeletes.current.forEach((timeout) => clearTimeout(timeout))
-    }
   }, [])
 
+  // Load classes for a specific quarter (called on quarter change)
+  async function loadClassesForQuarter(quarterId: string) {
+    if (!quarterId) return
+
+    try {
+      const classesRes = await fetch(`/api/classes?quarter_id=${quarterId}`)
+      const classesData = await classesRes.json()
+      // Sort by teacher name
+      const sorted = [...classesData].sort((a: ClassEntry, b: ClassEntry) => {
+        const aName = a.teacher?.name || ''
+        const bName = b.teacher?.name || ''
+        if (!aName && bName) return -1
+        if (aName && !bName) return 1
+        return aName.localeCompare(bName)
+      })
+      setClasses(sorted)
+
+      // Fetch schedule generations for display
+      try {
+        let displayGen = null
+        let mostRecentGen = null
+
+        const historyRes = await fetch(`/api/history?quarter_id=${quarterId}&limit=1&most_recent=true&summary=true`)
+        if (historyRes.ok) {
+          const historyData = await historyRes.json()
+          if (historyData.length > 0) mostRecentGen = historyData[0]
+        }
+
+        const starredRes = await fetch(`/api/history?quarter_id=${quarterId}&limit=1&starred_only=true&summary=true`)
+        if (starredRes.ok) {
+          const starredData = await starredRes.json()
+          if (starredData.length > 0) displayGen = starredData[0]
+        }
+
+        if (!displayGen) displayGen = mostRecentGen
+
+        if (displayGen) {
+          const quarterInfo = quarters.find(q => q.id === quarterId)
+          setLastRun({
+            historyId: displayGen.id,
+            timestamp: displayGen.generated_at,
+            quarterId: quarterId,
+            quarterName: quarterInfo?.name || '',
+            studyHallsPlaced: displayGen.studyHallsPlaced ?? 0,
+            backToBackIssues: displayGen.backToBackIssues ?? 0,
+            starred: displayGen.is_starred ?? false,
+          })
+        } else {
+          setLastRun(null)
+        }
+
+        // Lock table based on snapshot version
+        try {
+          const snapshotRes = await fetch(`/api/history?quarter_id=${quarterId}&snapshot_version_only=true`)
+          if (snapshotRes.ok) {
+            const { maxSnapshotVersion } = await snapshotRes.json()
+            if (maxSnapshotVersion > 0) {
+              const maxClassUpdatedAt = classesData.reduce((max: number, c: { updated_at?: string; created_at?: string }) => {
+                const t = new Date(c.updated_at || c.created_at || 0).getTime()
+                return t > max ? t : max
+              }, 0)
+              const shouldLock = maxClassUpdatedAt <= maxSnapshotVersion
+              setTableLocked(shouldLock)
+              if (shouldLock) setLockReason('generation')
+            }
+          }
+        } catch {
+          // Ignore
+        }
+      } catch {
+        // Ignore history fetch errors
+      }
+    } catch (error) {
+      toast.error("Failed to load classes")
+    }
+  }
+
+  // Initial load of teachers, grades, subjects, and rules (quarters handled by hook)
   async function loadData() {
     try {
-      const [teachersRes, gradesRes, subjectsRes, quartersRes, rulesRes] = await Promise.all([
+      const [teachersRes, gradesRes, subjectsRes, rulesRes] = await Promise.all([
         fetch("/api/teachers"),
         fetch("/api/grades"),
         fetch("/api/subjects"),
-        fetch("/api/quarters"),
         fetch("/api/rules"),
       ])
 
-      const [teachersData, gradesData, subjectsData, quartersData, rulesData] = await Promise.all([
+      const [teachersData, gradesData, subjectsData, rulesData] = await Promise.all([
         teachersRes.json(),
         gradesRes.json(),
         subjectsRes.json(),
-        quartersRes.json(),
         rulesRes.json(),
       ])
 
       setTeachers(teachersData)
       setGrades(gradesData)
       setSubjects(subjectsData)
+
+      // Store rules for GenerateModal
+      setRules(rulesData.map((r: { rule_key: string; enabled: boolean; config?: Record<string, unknown> }) => ({
+        rule_key: r.rule_key,
+        enabled: r.enabled,
+        config: r.config,
+      })))
 
       // Extract study hall grades from rules config
       const studyHallRule = rulesData.find((r: { rule_key: string }) => r.rule_key === 'study_hall_grades')
@@ -193,90 +302,55 @@ export default function ClassesPage() {
         : []
       setStudyHallGrades(configuredStudyHallGrades)
 
-      const active = quartersData.find((q: Quarter) => q.is_active)
-      setActiveQuarter(active || null)
-
-      if (active) {
-        const classesRes = await fetch(`/api/classes?quarter_id=${active.id}`)
-        const classesData = await classesRes.json()
-        // Sort by teacher name on initial load to group classes by teacher
-        // Classes without teachers sort to the top for visibility
-        const sorted = [...classesData].sort((a: ClassEntry, b: ClassEntry) => {
-          const aName = a.teacher?.name || ''
-          const bName = b.teacher?.name || ''
-          if (!aName && bName) return -1
-          if (aName && !bName) return 1
-          return aName.localeCompare(bName)
-        })
-        setClasses(sorted)
-
-        // Fetch schedule generations: starred for display, most recent for locking
-        // Use summary=true to avoid loading heavy JSONB options column
-        try {
-          let displayGen = null
-          let mostRecentGen = null
-
-          // Fetch most recent (needed for lock comparison)
-          const historyRes = await fetch(`/api/history?quarter_id=${active.id}&limit=1&most_recent=true&summary=true`)
-          if (historyRes.ok) {
-            const historyData = await historyRes.json()
-            if (historyData.length > 0) mostRecentGen = historyData[0]
-          }
-
-          // Try starred for display preference
-          const starredRes = await fetch(`/api/history?quarter_id=${active.id}&limit=1&starred_only=true&summary=true`)
-          if (starredRes.ok) {
-            const starredData = await starredRes.json()
-            if (starredData.length > 0) displayGen = starredData[0]
-          }
-
-          // Fall back to most recent for display
-          if (!displayGen) displayGen = mostRecentGen
-
-          if (displayGen) {
-            // Stats now come directly from summary response (extracted from stats column)
-            setLastRun({
-              historyId: displayGen.id,
-              timestamp: displayGen.generated_at,
-              quarterId: active.id,
-              quarterName: active.name,
-              studyHallsPlaced: displayGen.studyHallsPlaced ?? 0,
-              backToBackIssues: displayGen.backToBackIssues ?? 0,
-              starred: displayGen.is_starred ?? false,
-            })
-          }
-
-          // Lock table based on when any classes snapshot was last saved
-          // Use lightweight endpoint to get max snapshotVersion across all generations
-          try {
-            const snapshotRes = await fetch(`/api/history?quarter_id=${active.id}&snapshot_version_only=true`)
-            if (snapshotRes.ok) {
-              const { maxSnapshotVersion } = await snapshotRes.json()
-
-              if (maxSnapshotVersion > 0) {
-                const maxClassUpdatedAt = classesData.reduce((max: number, c: { updated_at?: string; created_at?: string }) => {
-                  const t = new Date(c.updated_at || c.created_at || 0).getTime()
-                  return t > max ? t : max
-                }, 0)
-
-                // Lock if classes haven't been modified since any snapshot was saved
-                const shouldLock = maxClassUpdatedAt <= maxSnapshotVersion
-                setTableLocked(shouldLock)
-                if (shouldLock) setLockReason('generation')
-              }
-            }
-          } catch {
-            // Ignore - table will remain unlocked if query fails
-          }
-        } catch (e) {
-          // Ignore history fetch errors
-        }
-      }
     } catch (error) {
       toast.error("Failed to load data")
     } finally {
       setLoading(false)
       initialLoadDone.current = true
+    }
+  }
+
+  // Load classes when activeQuarter becomes available (from hook)
+  useEffect(() => {
+    if (activeQuarter?.id && !quartersLoading) {
+      loadClassesForQuarter(activeQuarter.id)
+    }
+  }, [activeQuarter?.id, quartersLoading])
+
+  async function fetchDeletedClasses() {
+    if (!activeQuarter?.id) return
+    try {
+      const res = await fetch(`/api/classes/deleted?quarter_id=${activeQuarter.id}`)
+      if (res.ok) {
+        const data = await res.json()
+        setDeletedClasses(data)
+      }
+    } catch (error) {
+      console.error("Failed to fetch deleted classes", error)
+    }
+  }
+
+  async function restoreClass(id: string) {
+    setRestoringIds(prev => new Set(prev).add(id))
+    try {
+      const res = await fetch(`/api/classes/${id}/restore`, { method: "POST" })
+      if (res.ok) {
+        // Remove from deleted list
+        setDeletedClasses(prev => prev.filter(c => c.id !== id))
+        // Reload classes to get the restored one
+        loadClassesForQuarter(activeQuarter!.id)
+        toast.success("Class restored")
+      } else {
+        toast.error("Failed to restore class")
+      }
+    } catch (error) {
+      toast.error("Failed to restore class")
+    } finally {
+      setRestoringIds(prev => {
+        const next = new Set(prev)
+        next.delete(id)
+        return next
+      })
     }
   }
 
@@ -468,6 +542,30 @@ export default function ClassesPage() {
       if (res.ok) {
         const created = await res.json()
         setClasses((prev) => [...prev, created])
+
+        // Check for potential co-taught situation: other classes with same grade+subject but different teacher
+        // that aren't already marked as co-taught
+        if (!data.is_cotaught && data.subject_id) {
+          const createdGradeIds = data.grade_ids?.length ? [...data.grade_ids].sort() : (data.grade_id ? [data.grade_id] : [])
+          const createdGradeKey = createdGradeIds.join(',')
+
+          const matchingClasses = classes.filter(cls => {
+            if (cls.is_cotaught) return false // Already co-taught
+            if (cls.subject_id !== data.subject_id) return false
+            if (cls.teacher_id === data.teacher_id) return false // Same teacher
+
+            const clsGradeIds = cls.grade_ids?.length ? [...cls.grade_ids].sort() : (cls.grade_id ? [cls.grade_id] : [])
+            const clsGradeKey = clsGradeIds.join(',')
+            return clsGradeKey === createdGradeKey
+          })
+
+          if (matchingClasses.length > 0) {
+            // Show suggestion dialog with the new class + matching classes
+            setCotaughtSuggestionClasses([created, ...matchingClasses])
+            setShowCotaughtSuggestion(true)
+          }
+        }
+
         return created
       } else {
         const error = await res.json()
@@ -479,7 +577,29 @@ export default function ClassesPage() {
     return null
   }
 
-  function deleteClass(id: string) {
+  async function markClassesAsCotaught(classIds: string[]) {
+    // Update all classes to have is_cotaught = true
+    const updates = classIds.map(id =>
+      fetch(`/api/classes/${id}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ is_cotaught: true }),
+      })
+    )
+
+    try {
+      await Promise.all(updates)
+      // Update local state
+      setClasses(prev =>
+        prev.map(c => classIds.includes(c.id) ? { ...c, is_cotaught: true } : c)
+      )
+      toast.success(`Marked ${classIds.length} classes as co-taught`)
+    } catch {
+      toast.error("Failed to update classes")
+    }
+  }
+
+  async function deleteClass(id: string) {
     const deletedIndex = classes.findIndex((c) => c.id === id)
     const deletedClass = classes[deletedIndex]
     if (!deletedClass) return
@@ -491,77 +611,78 @@ export default function ClassesPage() {
     // Remove from UI immediately
     setClasses((prev) => prev.filter((c) => c.id !== id))
 
+    // Soft delete immediately (can be undone via restore API)
+    try {
+      await fetch(`/api/classes/${id}`, { method: "DELETE" })
+    } catch (error) {
+      // If delete fails, restore the class
+      setClasses((prev) => {
+        const newClasses = [...prev]
+        let insertIndex = deletedIndex
+        if (previousItemId) {
+          const prevIdx = newClasses.findIndex((c) => c.id === previousItemId)
+          if (prevIdx !== -1) {
+            insertIndex = prevIdx + 1
+          }
+        } else {
+          insertIndex = 0
+        }
+        insertIndex = Math.min(insertIndex, newClasses.length)
+        newClasses.splice(insertIndex, 0, deletedClass)
+        return newClasses
+      })
+      toast.error("Failed to delete")
+      return
+    }
+
     // Dismiss previous undo toast
     if (undoToastId.current) toast.dismiss(undoToastId.current)
 
-    // Show toast with undo
+    // Show toast with undo - works even after delete because it's a soft delete
+    let isRestoring = false
     const toastId = toast((t) => (
       <div className="flex items-center gap-3">
         <span className="text-sm">Row {rowNumber} deleted</span>
         <button
-          onClick={() => {
-            // Cancel the pending delete
-            const timeout = pendingDeletes.current.get(id)
-            if (timeout) {
-              clearTimeout(timeout)
-              pendingDeletes.current.delete(id)
-            }
-            // Restore the class at original position
-            setClasses((prev) => {
-              const newClasses = [...prev]
-              // Find position based on previous item, or use original index
-              let insertIndex = deletedIndex
-              if (previousItemId) {
-                const prevIdx = newClasses.findIndex((c) => c.id === previousItemId)
-                if (prevIdx !== -1) {
-                  insertIndex = prevIdx + 1
+          onClick={async () => {
+            // Prevent double-click
+            if (isRestoring) return
+            isRestoring = true
+            // Restore the soft-deleted class
+            try {
+              await fetch(`/api/classes/${id}/restore`, { method: "POST" })
+              // Restore the class at original position in UI
+              setClasses((prev) => {
+                const newClasses = [...prev]
+                // Find position based on previous item, or use original index
+                let insertIndex = deletedIndex
+                if (previousItemId) {
+                  const prevIdx = newClasses.findIndex((c) => c.id === previousItemId)
+                  if (prevIdx !== -1) {
+                    insertIndex = prevIdx + 1
+                  }
+                } else {
+                  insertIndex = 0 // Was first item
                 }
-              } else {
-                insertIndex = 0 // Was first item
-              }
-              // Clamp to valid range
-              insertIndex = Math.min(insertIndex, newClasses.length)
-              newClasses.splice(insertIndex, 0, deletedClass)
-              return newClasses
-            })
-            toast.dismiss(t.id)
-            undoToastId.current = null
+                // Clamp to valid range
+                insertIndex = Math.min(insertIndex, newClasses.length)
+                newClasses.splice(insertIndex, 0, deletedClass)
+                return newClasses
+              })
+              toast.dismiss(t.id)
+              undoToastId.current = null
+            } catch (error) {
+              toast.error("Failed to restore")
+              isRestoring = false
+            }
           }}
           className="px-2 py-1 text-sm font-medium text-violet-600 hover:text-violet-800 hover:bg-violet-50 rounded transition-colors"
         >
           Undo
         </button>
       </div>
-    ), { duration: 60000, icon: <Check className="h-4 w-4 text-emerald-600" /> })
+    ), { duration: 10000, icon: <Check className="h-4 w-4 text-emerald-600" /> })
     undoToastId.current = toastId
-
-    // Schedule actual deletion after 5 seconds
-    const timeout = setTimeout(async () => {
-      pendingDeletes.current.delete(id)
-      try {
-        await fetch(`/api/classes/${id}`, { method: "DELETE" })
-      } catch (error) {
-        // If delete fails, restore the class at original position
-        setClasses((prev) => {
-          const newClasses = [...prev]
-          let insertIndex = deletedIndex
-          if (previousItemId) {
-            const prevIdx = newClasses.findIndex((c) => c.id === previousItemId)
-            if (prevIdx !== -1) {
-              insertIndex = prevIdx + 1
-            }
-          } else {
-            insertIndex = 0
-          }
-          insertIndex = Math.min(insertIndex, newClasses.length)
-          newClasses.splice(insertIndex, 0, deletedClass)
-          return newClasses
-        })
-        toast.error("Failed to delete")
-      }
-    }, 5000)
-
-    pendingDeletes.current.set(id, timeout)
   }
 
   async function createSubject(name: string): Promise<Subject | null> {
@@ -981,11 +1102,9 @@ export default function ClassesPage() {
     setImportStep('input')
     setPendingImport([])
 
-    // Unlock table after import
-    if (lockReason === 'import') {
-      setTableLocked(false)
-      setLockReason(null)
-    }
+    // Always unlock table after successful import (loadData may have re-locked it)
+    setTableLocked(false)
+    setLockReason(null)
 
     if (created > 0) {
 
@@ -1290,6 +1409,10 @@ export default function ClassesPage() {
       setImporting(false)
       toast.dismiss(loadingToastId)
 
+      // Always unlock table after successful import (loadData may have re-locked it)
+      setTableLocked(false)
+      setLockReason(null)
+
       if (created > 0) {
         // Dismiss any previous undo toast
         if (undoToastId.current) {
@@ -1460,7 +1583,7 @@ export default function ClassesPage() {
     setShowExportDialog(false)
   }
 
-  if (loading) {
+  if (loading || quartersLoading) {
     return (
       <div className="flex items-center justify-center p-12">
         <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
@@ -1470,10 +1593,35 @@ export default function ClassesPage() {
 
   if (!activeQuarter) {
     return (
-      <div className="p-8">
-        <p className="text-muted-foreground">
-          Create a quarter using the dropdown in the navigation to get started.
-        </p>
+      <div className="p-6 max-w-6xl mx-auto">
+        <div className="flex items-center gap-4 mb-6">
+          <LocalQuarterSelector
+            quarters={quarters}
+            selectedQuarter={null}
+            onSelectQuarter={setSelectedQuarterId}
+            onQuarterCreated={refetchQuarters}
+          />
+          {quartersError && (
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => refetchQuarters()}
+              className="text-red-600 border-red-300 hover:bg-red-50"
+            >
+              Retry
+            </Button>
+          )}
+        </div>
+        {quartersError ? (
+          <div className="text-red-600 bg-red-50 border border-red-200 rounded-lg p-4">
+            <p className="font-medium">Failed to load quarters</p>
+            <p className="text-sm text-red-500 mt-1">{quartersError}</p>
+          </div>
+        ) : (
+          <p className="text-muted-foreground">
+            Select or create a quarter to get started.
+          </p>
+        )}
       </div>
     )
   }
@@ -1551,17 +1699,39 @@ export default function ClassesPage() {
   }))
 
   // Build per-class map of potential co-taught teacher names (for GradeSelector)
-  // Shows other teachers with same grade+subject, regardless of is_cotaught flag
+  // Shows OTHER teachers with same grade+subject (different teacher_id)
+  // This enables the co-taught checkbox when there's a matching class
   const cotaughtTeacherNames = new Map<string, string[]>()
-  for (const { classIds, teachers: teacherIds } of gradeSetSubjectTeachers.values()) {
-    if (teacherIds.size > 1) {
-      for (const classId of classIds) {
-        const cls = classes.find(c => c.id === classId)
-        if (!cls) continue
-        const otherNames = Array.from(teacherIds)
-          .filter(tid => tid !== cls.teacher_id)
-          .map(tid => teachers.find((t: Teacher) => t.id === tid)?.name || 'Unknown')
-        cotaughtTeacherNames.set(classId, otherNames)
+
+  // Group ALL classes by grade+subject (not just is_cotaught=true)
+  const gradeSubjectGroups = new Map<string, ClassEntry[]>()
+  for (const cls of classes) {
+    if (!cls.subject_id || !cls.teacher_id) continue
+    const gradeIds = cls.grade_ids?.length ? [...cls.grade_ids].sort() : (cls.grade_id ? [cls.grade_id] : [])
+    const key = `${gradeIds.join(',')}_${cls.subject_id}`
+    if (!gradeSubjectGroups.has(key)) {
+      gradeSubjectGroups.set(key, [])
+    }
+    gradeSubjectGroups.get(key)!.push(cls)
+  }
+
+  // For each group with multiple teachers, build the potential co-taught teacher names
+  for (const groupClasses of gradeSubjectGroups.values()) {
+    // Only show if there are multiple different teachers for same grade+subject
+    const uniqueTeachers = new Set(groupClasses.map(c => c.teacher_id))
+    if (uniqueTeachers.size > 1) {
+      for (const cls of groupClasses) {
+        const otherNames = groupClasses
+          .filter(c => c.id !== cls.id && c.teacher && c.teacher_id !== cls.teacher_id)
+          .map(c => {
+            const name = c.teacher?.name || 'Unknown'
+            return c.teacher_deleted ? `${name} (archived)` : name
+          })
+          // Remove duplicates (if same teacher teaches multiple sections)
+          .filter((name, index, self) => self.indexOf(name) === index)
+        if (otherNames.length > 0) {
+          cotaughtTeacherNames.set(cls.id, otherNames)
+        }
       }
     }
   }
@@ -1608,21 +1778,56 @@ export default function ClassesPage() {
     .sort((a, b) => a.sort_order - b.sort_order)
 
   return (
-    <div className="p-6 max-w-6xl mx-auto">
+    <div className="p-6 max-w-6xl mx-auto h-[calc(100vh-4rem)] flex flex-col overflow-hidden">
+      {/* Header with Quarter Selector and Generate Button */}
       <div className="flex items-center justify-between mb-4">
-        <div className="text-sm text-muted-foreground flex items-center gap-2">
-          <span>{activeQuarter.name} &middot; {classes.length} classes</span>
-          {incompleteCount > 0 && (
-            <span className="text-amber-600 font-medium">
-              ({incompleteCount} incomplete)
-            </span>
-          )}
+        <div className="flex items-center gap-4">
+          <LocalQuarterSelector
+            quarters={quarters}
+            selectedQuarter={activeQuarter}
+            onSelectQuarter={setSelectedQuarterId}
+            onQuarterCreated={refetchQuarters}
+          />
+          <div className="text-sm text-muted-foreground flex items-center gap-2">
+            <span>{classes.length} classes</span>
+            {incompleteCount > 0 && (
+              <span className="text-amber-600 font-medium">
+                ({incompleteCount} incomplete)
+              </span>
+            )}
+          </div>
         </div>
         <div className="flex items-center gap-2">
+          <Button
+            variant="outline"
+            onClick={() => setShowAddClassModal(true)}
+            className="gap-2 h-9"
+          >
+            <Plus className="h-4 w-4" />
+            Add Class
+          </Button>
+          <Button
+            onClick={() => {
+              if (classes.length === 0) {
+                toast.error("No classes configured for this quarter. Add classes first.")
+                return
+              }
+              if (incompleteCount > 0) {
+                toast.error(`${incompleteCount} class${incompleteCount > 1 ? 'es are' : ' is'} incomplete`)
+                return
+              }
+              setShowGenerateModal(true)
+            }}
+            disabled={incompleteCount > 0 || classes.length === 0}
+            className="gap-2 h-9 bg-emerald-500 hover:bg-emerald-600 text-white disabled:bg-slate-300"
+          >
+            <Play className="h-4 w-4" />
+            Generate Schedule
+          </Button>
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
-              <Button size="sm" variant="outline" className="h-7 text-xs">
-                <MoreVertical className="h-3.5 w-3.5" />
+              <Button variant="outline" className="h-9 w-9 p-0">
+                <MoreVertical className="h-4 w-4" />
               </Button>
             </DropdownMenuTrigger>
             <DropdownMenuContent align="end">
@@ -1641,18 +1846,30 @@ export default function ClassesPage() {
                 <Download className="h-4 w-4 mr-2" />
                 Export
               </DropdownMenuItem>
+              <DropdownMenuSeparator />
+              <DropdownMenuItem onClick={() => {
+                fetchDeletedClasses()
+                setShowDeletedDialog(true)
+              }}>
+                <Trash2 className="h-4 w-4 mr-2" />
+                Recently Deleted
+              </DropdownMenuItem>
             </DropdownMenuContent>
           </DropdownMenu>
-          <Button
-            size="sm"
-            onClick={() => setShowAddClassModal(true)}
-            className="h-7 text-xs gap-1 bg-emerald-500 hover:bg-emerald-600 text-white"
-          >
-            <Plus className="h-3 w-3" />
-            Add Class
-          </Button>
         </div>
       </div>
+
+      {/* Generate Modal */}
+      <GenerateModal
+        open={showGenerateModal}
+        onOpenChange={setShowGenerateModal}
+        quarterId={activeQuarter.id}
+        quarterName={activeQuarter.name}
+        classes={classes}
+        teachers={teachers}
+        grades={grades}
+        rules={rules}
+      />
 
       {/* Export Dialog */}
       <Dialog open={showExportDialog} onOpenChange={setShowExportDialog}>
@@ -1692,6 +1909,64 @@ export default function ClassesPage() {
         </DialogContent>
       </Dialog>
 
+      {/* Recently Deleted Dialog */}
+      <Dialog open={showDeletedDialog} onOpenChange={setShowDeletedDialog}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>Recently Deleted</DialogTitle>
+            <DialogDescription>
+              Classes deleted from {activeQuarter?.name}
+            </DialogDescription>
+          </DialogHeader>
+          <div className="py-2">
+            {deletedClasses.length === 0 ? (
+              <p className="text-sm text-muted-foreground text-center py-4">
+                No recently deleted classes
+              </p>
+            ) : (
+              <div className="space-y-2 max-h-[300px] overflow-auto">
+                {deletedClasses.map((c) => (
+                  <div
+                    key={c.id}
+                    className="flex items-center justify-between gap-2 p-2 rounded-md border bg-muted/30"
+                  >
+                    <div className="flex-1 min-w-0">
+                      <div className="text-sm truncate">{c.description}</div>
+                      <div className="text-xs text-muted-foreground">
+                        {(() => {
+                          const diff = Date.now() - new Date(c.deleted_at).getTime()
+                          const mins = Math.floor(diff / 60000)
+                          if (mins < 1) return "Just now"
+                          if (mins < 60) return `${mins} min ago`
+                          const hours = Math.floor(mins / 60)
+                          if (hours < 24) return `${hours} hour${hours > 1 ? "s" : ""} ago`
+                          const days = Math.floor(hours / 24)
+                          return `${days} day${days > 1 ? "s" : ""} ago`
+                        })()}
+                      </div>
+                    </div>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      onClick={() => restoreClass(c.id)}
+                      disabled={restoringIds.has(c.id)}
+                      className="gap-1.5 h-7 text-xs"
+                    >
+                      {restoringIds.has(c.id) ? (
+                        <Loader2 className="h-3 w-3 animate-spin" />
+                      ) : (
+                        <Undo2 className="h-3 w-3" />
+                      )}
+                      Restore
+                    </Button>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </DialogContent>
+      </Dialog>
+
       {/* Import from History Dialog */}
       <Dialog open={showImportFromHistoryDialog} onOpenChange={setShowImportFromHistoryDialog}>
         <DialogContent className="max-w-lg">
@@ -1717,7 +1992,7 @@ export default function ClassesPage() {
                   className="flex items-center justify-between p-3 rounded-lg border hover:bg-slate-50 transition-colors"
                 >
                   <div className="flex items-center gap-2 min-w-0">
-                    {item.is_starred && <Star className="h-3.5 w-3.5 text-amber-500 fill-amber-500 flex-shrink-0" />}
+                    {item.is_starred && <Star className="h-3.5 w-3.5 text-sky-500 fill-sky-500 flex-shrink-0" />}
                     <div className="min-w-0">
                       <div className="text-sm font-medium truncate">
                         {item.quarter?.name}
@@ -2014,6 +2289,59 @@ Maria\t6th-11th Elective\tSpanish 101\t1\tMon Block 5`}
         onCreateTeacher={createTeacher}
       />
 
+      {/* Co-taught Suggestion Dialog */}
+      <Dialog open={showCotaughtSuggestion} onOpenChange={setShowCotaughtSuggestion}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <Users className="h-5 w-5 text-purple-600" />
+              Mark as Co-taught?
+            </DialogTitle>
+            <DialogDescription>
+              These classes have the same grade and subject but different teachers. Should they be scheduled at the same time?
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="space-y-2 py-2">
+            {cotaughtSuggestionClasses.map(cls => {
+              const grade = cls.grades?.length
+                ? cls.grades.length === 1
+                  ? cls.grades[0].display_name
+                  : `${cls.grades[0].display_name.replace(' Grade', '')}-${cls.grades[cls.grades.length - 1].display_name.replace(' Grade', '')} Grades`
+                : cls.grade?.display_name || ''
+              return (
+                <div key={cls.id} className="flex items-center gap-2 text-sm p-2 bg-slate-50 rounded">
+                  <span className="font-medium">{cls.teacher?.name || '(no teacher)'}</span>
+                  <span className="text-slate-400">·</span>
+                  <span className="text-slate-600">{grade}</span>
+                  <span className="text-slate-400">·</span>
+                  <span className="text-slate-600">{cls.subject?.name}</span>
+                </div>
+              )
+            })}
+          </div>
+
+          <DialogFooter className="gap-2 sm:gap-0">
+            <Button
+              variant="outline"
+              onClick={() => setShowCotaughtSuggestion(false)}
+            >
+              No, Keep Separate
+            </Button>
+            <Button
+              className="bg-purple-600 hover:bg-purple-700 text-white"
+              onClick={() => {
+                markClassesAsCotaught(cotaughtSuggestionClasses.map(c => c.id))
+                setShowCotaughtSuggestion(false)
+              }}
+            >
+              <Users className="h-4 w-4 mr-2" />
+              Mark as Co-taught
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
       {/* Grade Capacity & Status Indicator */}
       <div className="mb-4 rounded-lg bg-slate-50 border border-slate-200">
         <div className="flex items-center gap-1.5 px-3 py-2 overflow-x-auto">
@@ -2087,20 +2415,20 @@ Maria\t6th-11th Elective\tSpanish 101\t1\tMon Block 5`}
 
       {showLastRunNotice ? (
         lastRun.starred ? (
-          <div className="mb-4 flex items-center gap-2 px-3 py-2 rounded-lg bg-amber-50 border border-amber-200 text-sm text-amber-700">
-            <Star className="h-4 w-4 flex-shrink-0 fill-amber-400 text-amber-400" />
+          <div className="mb-4 flex items-center gap-2 px-3 py-2 rounded-lg bg-sky-50 border border-sky-200 text-sm text-sky-700">
+            <Star className="h-4 w-4 flex-shrink-0 fill-sky-400 text-sky-400" />
             <span>You have a starred schedule for these classes.</span>
             <div className="ml-auto flex items-center gap-2">
-              <Link
-                href="/generate"
-                className="px-2 py-1 rounded text-amber-600 hover:bg-amber-100 transition-colors"
+              <button
+                onClick={() => setShowGenerateModal(true)}
+                className="px-2 py-1 rounded text-sky-600 hover:bg-sky-100 transition-colors"
               >
                 Generate new
-              </Link>
-              <span className="text-amber-300">|</span>
+              </button>
+              <span className="text-sky-300">|</span>
               <Link
                 href={`/history/${lastRun.historyId}`}
-                className="px-2 py-1 rounded bg-amber-600 text-white hover:bg-amber-700 transition-colors font-medium"
+                className="px-2 py-1 rounded bg-sky-600 text-white hover:bg-sky-700 transition-colors font-medium"
               >
                 View results →
               </Link>
@@ -2114,12 +2442,12 @@ Maria\t6th-11th Elective\tSpanish 101\t1\tMon Block 5`}
               <span className="font-medium">{formatTimeAgo(lastRun.timestamp)}</span>.
             </span>
             <div className="ml-auto flex items-center gap-2">
-              <Link
-                href="/generate"
+              <button
+                onClick={() => setShowGenerateModal(true)}
                 className="px-2 py-1 rounded text-sky-600 hover:bg-sky-100 transition-colors"
               >
                 Generate new
-              </Link>
+              </button>
               <span className="text-sky-300">|</span>
               <Link
                 href={`/history/${lastRun.historyId}`}
@@ -2130,18 +2458,7 @@ Maria\t6th-11th Elective\tSpanish 101\t1\tMon Block 5`}
             </div>
           </div>
         )
-      ) : activeQuarter && classes.length > 0 && (
-        <div className="mb-4 flex items-center gap-2 px-3 py-2 rounded-lg bg-emerald-50 border border-emerald-200 text-sm text-emerald-700">
-          <Play className="h-4 w-4 flex-shrink-0" />
-          <span>Ready to generate a schedule for these {classes.length} classes?</span>
-          <Link
-            href="/generate"
-            className="ml-auto px-3 py-1 rounded bg-emerald-600 text-white hover:bg-emerald-700 transition-colors font-medium"
-          >
-            Generate schedule →
-          </Link>
-        </div>
-      )}
+      ) : null}
 
 
       {/* Import warnings notice */}
@@ -2168,24 +2485,44 @@ Maria\t6th-11th Elective\tSpanish 101\t1\tMon Block 5`}
         </div>
       )}
 
-      <div className="relative border rounded-lg overflow-hidden bg-white shadow-sm">
+      <div className="relative border rounded-lg overflow-hidden bg-white shadow-sm flex-1 flex flex-col min-h-[600px]">
         {tableLocked && (
-          <div className="absolute inset-0 z-20 bg-white/40 flex items-center justify-center">
-            <div className="flex flex-col items-center gap-3 bg-white/90 rounded-xl px-8 py-6 shadow-sm max-w-sm text-center">
+          <div className="absolute inset-0 z-20 bg-white/40 flex justify-center pt-[15%]">
+            <div className="flex flex-col items-center gap-3 bg-white/90 rounded-xl px-8 py-6 shadow-sm max-w-sm text-center h-fit">
               <Lock className="h-8 w-8 text-slate-400" />
               <p className="text-sm font-medium text-slate-600">Classes are locked</p>
               <p className="text-xs text-slate-500">
                 {lockReason === 'import'
                   ? 'Please wait.. Import is currently in progress.'
-                  : 'A schedule has been generated with these classes. Editing may require regenerating the schedule.'}
+                  : lastRun
+                    ? `A schedule was generated for ${activeQuarter?.name} on ${new Date(lastRun.timestamp).toLocaleDateString()}. Editing may require regenerating.`
+                    : 'A schedule has been generated with these classes. Editing may require regenerating the schedule.'}
               </p>
-              <Button variant="outline" size="sm" onClick={() => setTableLocked(false)}>
-                Unlock
-              </Button>
+              <div className="flex items-center gap-2">
+                <Button variant="outline" size="sm" onClick={() => setTableLocked(false)}>
+                  Unlock
+                </Button>
+                {lockReason === 'generation' && quarters.length > 1 && (
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="text-slate-500"
+                    onClick={() => {
+                      // Find a different quarter to suggest
+                      const otherQuarter = quarters.find(q => q.id !== activeQuarter?.id)
+                      if (otherQuarter) {
+                        setSelectedQuarterId(otherQuarter.id)
+                      }
+                    }}
+                  >
+                    Switch Quarter
+                  </Button>
+                )}
+              </div>
             </div>
           </div>
         )}
-        <div className="max-h-[calc(100vh-12rem)] overflow-auto">
+        <div className="flex-1 overflow-auto min-h-0">
           <table className="w-full text-sm border-collapse">
           <thead className="sticky top-0 bg-slate-50 z-10">
             <tr className="border-b border-slate-200">
@@ -2227,6 +2564,17 @@ Maria\t6th-11th Elective\tSpanish 101\t1\tMon Block 5`}
           </tbody>
         </table>
         </div>
+        <div className="sticky bottom-0 py-3 border-t border-slate-100 bg-white flex justify-center">
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => setShowAddClassModal(true)}
+            className="h-8 text-slate-600"
+          >
+            <Plus className="h-4 w-4 mr-1.5" />
+            Add Class
+          </Button>
+        </div>
       </div>
     </div>
   )
@@ -2260,14 +2608,15 @@ function ClassRow({
   onCreateTeacher,
 }: ClassRowProps) {
   const isIncomplete = !cls.teacher_id || !cls.grade_id || !cls.subject_id
+  const hasDeletedTeacher = cls.teacher_deleted === true
   return (
     <tr className={cn(
       "border-b border-slate-100 hover:bg-blue-50/50 group",
-      isIncomplete && "bg-amber-50/50"
+      (isIncomplete || hasDeletedTeacher) && "bg-amber-50/50"
     )}>
       <td className="px-3 py-1 text-slate-400 text-xs w-10">
-        {isIncomplete ? (
-          <span className="text-amber-500" title="Missing required fields">!</span>
+        {(isIncomplete || hasDeletedTeacher) ? (
+          <span className="text-amber-500" title={hasDeletedTeacher ? "Teacher was archived" : "Missing required fields"}>!</span>
         ) : index}
       </td>
       <td className="px-1 py-1">
@@ -2285,6 +2634,7 @@ function ClassRow({
             if (teacher) onUpdate(cls.id, "teacher_id", teacher.id)
           }}
           placeholder="Select teacher"
+          warning={hasDeletedTeacher ? "Teacher was archived" : undefined}
         />
       </td>
       <td className="px-1 py-1">
@@ -2487,6 +2837,7 @@ interface SelectCellProps {
   onChange: (id: string) => void
   onCreateNew?: (name: string) => void
   placeholder?: string
+  warning?: string
 }
 
 function SelectCell({
@@ -2496,6 +2847,7 @@ function SelectCell({
   onChange,
   onCreateNew,
   placeholder,
+  warning,
 }: SelectCellProps) {
   const [open, setOpen] = useState(false)
   const [search, setSearch] = useState("")
@@ -2560,11 +2912,14 @@ function SelectCell({
             setTimeout(() => inputRef.current?.focus(), 0)
           }}
           className={cn(
-            "h-6 px-2 flex items-center rounded cursor-pointer hover:bg-muted text-sm",
-            !displayValue && "text-muted-foreground"
+            "h-6 px-2 flex items-center gap-1.5 rounded cursor-pointer hover:bg-muted text-sm",
+            !displayValue && "text-muted-foreground",
+            warning && "text-amber-600"
           )}
+          title={warning}
         >
           {displayValue || placeholder}
+          {warning && <UserX className="h-3.5 w-3.5 text-amber-500 flex-shrink-0" />}
         </div>
       )}
       {open && (
@@ -2652,6 +3007,8 @@ function RestrictionsCell({ restrictions, onChange }: RestrictionsCellProps) {
   const [editing, setEditing] = useState(false)
   const [selectedDays, setSelectedDays] = useState<string[]>([])
   const [selectedBlocks, setSelectedBlocks] = useState<number[]>([])
+  const [availableDaysOnly, setAvailableDaysOnly] = useState<string[]>([])
+  const [dropUp, setDropUp] = useState(false)
   const containerRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
@@ -2663,6 +3020,16 @@ function RestrictionsCell({ restrictions, onChange }: RestrictionsCellProps) {
     document.addEventListener("mousedown", handleClickOutside)
     return () => document.removeEventListener("mousedown", handleClickOutside)
   }, [])
+
+  // Check if dropdown should appear above (when near bottom of viewport)
+  useEffect(() => {
+    if (editing && containerRef.current) {
+      const rect = containerRef.current.getBoundingClientRect()
+      const spaceBelow = window.innerHeight - rect.bottom
+      const dropdownHeight = 320 // approx height of the restrictions popup
+      setDropUp(spaceBelow < dropdownHeight)
+    }
+  }, [editing])
 
   function openEditor() {
     // Preselect existing fixed_slot restrictions
@@ -2676,6 +3043,11 @@ function RestrictionsCell({ restrictions, onChange }: RestrictionsCellProps) {
     })
     setSelectedDays(days)
     setSelectedBlocks(blocks)
+
+    // Preselect existing available_days restrictions
+    const availDays = restrictions.find((r) => r.restriction_type === "available_days")
+    setAvailableDaysOnly(availDays ? (availDays.value as string[]) : [])
+
     setEditing(true)
   }
 
@@ -2700,11 +3072,38 @@ function RestrictionsCell({ restrictions, onChange }: RestrictionsCellProps) {
   }
 
   function saveRestrictions() {
-    // Replace all restrictions with selected slots
-    const newRestrictions: Restriction[] = selectedDays.map((day, i) => ({
-      restriction_type: "fixed_slot",
-      value: { day, block: selectedBlocks[i] },
-    }))
+    const newRestrictions: Restriction[] = []
+
+    // Check which days have all 5 blocks selected (should become available_days)
+    const daysWithAllBlocks: string[] = []
+    DAYS.forEach((day) => {
+      const blocksForDay = selectedDays
+        .map((d, i) => d === day ? selectedBlocks[i] : null)
+        .filter((b): b is number => b !== null)
+      if (blocksForDay.length === 5) {
+        daysWithAllBlocks.push(day)
+      }
+    })
+
+    // Combine explicit available days with days that have all blocks selected
+    const allAvailableDays = [...new Set([...availableDaysOnly, ...daysWithAllBlocks])]
+    if (allAvailableDays.length > 0) {
+      newRestrictions.push({
+        restriction_type: "available_days",
+        value: allAvailableDays,
+      })
+    }
+
+    // Add fixed_slots only for days that don't have all 5 blocks selected
+    selectedDays.forEach((day, i) => {
+      if (!daysWithAllBlocks.includes(day)) {
+        newRestrictions.push({
+          restriction_type: "fixed_slot",
+          value: { day, block: selectedBlocks[i] },
+        })
+      }
+    })
+
     onChange(newRestrictions)
     setEditing(false)
   }
@@ -2741,18 +3140,78 @@ function RestrictionsCell({ restrictions, onChange }: RestrictionsCellProps) {
       </div>
 
       {editing && (
-        <div className="absolute z-50 top-full left-0 mt-1 bg-popover border rounded-md shadow-lg p-2">
-          <div className="space-y-2">
+        <div className={cn(
+          "absolute z-50 left-0 bg-popover border rounded-md shadow-lg p-2",
+          dropUp ? "bottom-full mb-1" : "top-full mt-1"
+        )}>
+          <div className="space-y-3">
+            {/* Available Days Only */}
+            <div className="space-y-1.5">
+              <div className="text-xs font-medium text-muted-foreground">Available Days</div>
+              <div className="flex gap-1">
+                {DAYS.map((day) => {
+                  const isSelected = availableDaysOnly.includes(day)
+                  return (
+                    <button
+                      key={day}
+                      onClick={() => {
+                        let newAvailDays: string[]
+                        if (isSelected) {
+                          newAvailDays = availableDaysOnly.filter((d) => d !== day)
+                        } else {
+                          newAvailDays = [...availableDaysOnly, day]
+                        }
+                        setAvailableDaysOnly(newAvailDays)
+                        // Clear fixed slots that are no longer on available days
+                        if (newAvailDays.length > 0) {
+                          const indicesToKeep = selectedDays.map((d, i) => newAvailDays.includes(d) ? i : -1).filter(i => i >= 0)
+                          setSelectedDays(indicesToKeep.map(i => selectedDays[i]))
+                          setSelectedBlocks(indicesToKeep.map(i => selectedBlocks[i]))
+                        }
+                      }}
+                      className={cn(
+                        "px-2 py-1 text-xs rounded transition-colors",
+                        isSelected
+                          ? "bg-sky-500 text-white hover:bg-sky-600"
+                          : "bg-slate-100 text-slate-600 hover:bg-sky-50 hover:text-sky-600"
+                      )}
+                    >
+                      {day}
+                    </button>
+                  )
+                })}
+              </div>
+              {availableDaysOnly.length > 0 && (
+                <p className="text-[10px] text-muted-foreground">Class can only be scheduled on selected days</p>
+              )}
+            </div>
+
+            {/* Divider */}
+            <div className="border-t border-slate-200" />
+
+            {/* Fixed Time Slots Grid */}
+            <div className="space-y-1.5">
             <div className="text-xs font-medium text-muted-foreground">Fixed Time Slots</div>
+            <p className="text-[10px] text-muted-foreground">
+              {availableDaysOnly.length > 0
+                ? "Lock to exact slots on available days"
+                : "Lock class to specific time slots"}
+            </p>
             <table className="text-xs border rounded-md border-separate border-spacing-0">
               <thead>
                 <tr className="bg-muted/50">
                   <th className="w-7 h-7 border-r border-b"></th>
-                  {DAYS.map((day) => (
-                    <th key={day} className="w-7 h-7 text-center border-r border-b last:border-r-0 text-muted-foreground font-medium">
-                      {day.slice(0, 2)}
-                    </th>
-                  ))}
+                  {DAYS.map((day) => {
+                    const isDayAvailable = availableDaysOnly.length === 0 || availableDaysOnly.includes(day)
+                    return (
+                      <th key={day} className={cn(
+                        "w-7 h-7 text-center border-r border-b last:border-r-0 font-medium",
+                        isDayAvailable ? "text-muted-foreground" : "text-slate-300"
+                      )}>
+                        {day.slice(0, 2)}
+                      </th>
+                    )
+                  })}
                 </tr>
               </thead>
               <tbody>
@@ -2762,28 +3221,62 @@ function RestrictionsCell({ restrictions, onChange }: RestrictionsCellProps) {
                     <tr key={block}>
                       <td className={cn("w-7 h-7 text-center border-r font-medium bg-muted/50 text-muted-foreground", !isLastRow && "border-b")}>B{block}</td>
                       {DAYS.map((day) => {
-                        const isSelected = selectedDays.some((d, i) => d === day && selectedBlocks[i] === block)
+                        const isExplicitlySelected = selectedDays.some((d, i) => d === day && selectedBlocks[i] === block)
+                        const isDayInAvailable = availableDaysOnly.includes(day)
+                        const dayHasExplicitSlots = selectedDays.some((d) => d === day)
+                        // If day is available and has no explicit slots, all blocks are implicitly selected
+                        const isImplicitlySelected = isDayInAvailable && !dayHasExplicitSlots
+                        const isSelected = isExplicitlySelected || isImplicitlySelected
+                        const isDayAvailable = availableDaysOnly.length === 0 || isDayInAvailable
                         return (
                           <td
                             key={day}
                             onClick={() => {
-                              if (isSelected) {
-                                const idx = selectedDays.findIndex((d, i) => d === day && selectedBlocks[i] === block)
-                                if (idx >= 0) {
-                                  setSelectedDays(selectedDays.filter((_, i) => i !== idx))
-                                  setSelectedBlocks(selectedBlocks.filter((_, i) => i !== idx))
+                              if (!isDayAvailable) return // Can't select slots on unavailable days
+
+                              if (isDayInAvailable) {
+                                // Day is in available days
+                                if (isImplicitlySelected) {
+                                  // All blocks implicitly selected - add OTHER blocks explicitly (unselect this one)
+                                  const otherBlocks = BLOCKS.filter((b) => b !== block)
+                                  const newDays = [...selectedDays.filter((d) => d !== day), ...otherBlocks.map(() => day)]
+                                  const newBlocks = [...selectedBlocks.filter((_, i) => selectedDays[i] !== day), ...otherBlocks]
+                                  setSelectedDays(newDays)
+                                  setSelectedBlocks(newBlocks)
+                                } else if (isExplicitlySelected) {
+                                  // Explicitly selected - remove it
+                                  const idx = selectedDays.findIndex((d, i) => d === day && selectedBlocks[i] === block)
+                                  if (idx >= 0) {
+                                    setSelectedDays(selectedDays.filter((_, i) => i !== idx))
+                                    setSelectedBlocks(selectedBlocks.filter((_, i) => i !== idx))
+                                  }
+                                } else {
+                                  // Not selected - add it
+                                  setSelectedDays([...selectedDays, day])
+                                  setSelectedBlocks([...selectedBlocks, block])
                                 }
                               } else {
-                                setSelectedDays([...selectedDays, day])
-                                setSelectedBlocks([...selectedBlocks, block])
+                                // Day not in available days (no days selected = all available)
+                                if (isExplicitlySelected) {
+                                  const idx = selectedDays.findIndex((d, i) => d === day && selectedBlocks[i] === block)
+                                  if (idx >= 0) {
+                                    setSelectedDays(selectedDays.filter((_, i) => i !== idx))
+                                    setSelectedBlocks(selectedBlocks.filter((_, i) => i !== idx))
+                                  }
+                                } else {
+                                  setSelectedDays([...selectedDays, day])
+                                  setSelectedBlocks([...selectedBlocks, block])
+                                }
                               }
                             }}
                             className={cn(
-                              "w-7 h-7 text-center border-r last:border-r-0 cursor-pointer transition-colors",
+                              "w-7 h-7 text-center border-r last:border-r-0 transition-colors",
                               !isLastRow && "border-b",
                               isSelected
-                                ? "bg-emerald-500 text-white hover:bg-emerald-600"
-                                : "hover:bg-emerald-50"
+                                ? "bg-violet-500 text-white hover:bg-violet-600 cursor-pointer"
+                                : isDayAvailable
+                                  ? "hover:bg-violet-50 cursor-pointer"
+                                  : "bg-slate-100 cursor-not-allowed"
                             )}
                           >
                             {isSelected && <Check className="h-3.5 w-3.5 mx-auto" />}
@@ -2795,6 +3288,7 @@ function RestrictionsCell({ restrictions, onChange }: RestrictionsCellProps) {
                 })}
               </tbody>
             </table>
+            </div>
 
             <div className="flex gap-2">
               <Button

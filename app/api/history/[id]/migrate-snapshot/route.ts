@@ -62,7 +62,7 @@ export async function POST(
         LEFT JOIN teachers t ON c.teacher_id = t.id
         LEFT JOIN grades g ON c.grade_id = g.id
         LEFT JOIN subjects s ON c.subject_id = s.id
-        WHERE c.quarter_id = ${quarterId}
+        WHERE c.quarter_id = ${quarterId} AND c.deleted_at IS NULL
       `,
       sql`
         SELECT id, name, status, can_supervise_study_hall

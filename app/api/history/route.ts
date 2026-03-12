@@ -9,6 +9,7 @@ export async function GET(request: NextRequest) {
   const limit = searchParams.get("limit")
   const snapshotVersionOnly = searchParams.get("snapshot_version_only") === "true"
   const summaryOnly = searchParams.get("summary") === "true"
+  const showDeleted = searchParams.get("show_deleted") === "true"
 
   try {
     // Lightweight query for just snapshot versions (used for class locking)
@@ -16,7 +17,7 @@ export async function GET(request: NextRequest) {
       const data = await sql`
         SELECT generated_at, stats->'snapshotVersion' as snapshot_version
         FROM schedule_generations
-        WHERE quarter_id = ${quarterId}
+        WHERE quarter_id = ${quarterId} AND deleted_at IS NULL
       `
 
       // Find max snapshot version
@@ -30,58 +31,189 @@ export async function GET(request: NextRequest) {
     }
 
     // Summary mode - lightweight list without heavy JSONB columns
-    // Includes lightweight stats (studyHallsPlaced, backToBackIssues) extracted from stats column
+    // Includes lightweight stats extracted from stats column
     if (summaryOnly) {
       const parsedLimit = limit ? parseInt(limit) : null
+      const before = searchParams.get("before") // For pagination - get items before this timestamp
+
       let data
-      if (quarterId && parsedLimit) {
-        data = await sql`
-          SELECT sg.id, sg.quarter_id, sg.generated_at, sg.selected_option,
-                 sg.notes, sg.is_starred,
-                 (sg.stats->>'studyHallsPlaced')::int as study_halls_placed,
-                 (sg.stats->>'backToBackIssues')::int as back_to_back_issues,
-                 q.id as quarter_id_ref, q.name as quarter_name
-          FROM schedule_generations sg
-          LEFT JOIN quarters q ON sg.quarter_id = q.id
-          WHERE sg.quarter_id = ${quarterId}
-          ORDER BY sg.is_starred DESC, sg.generated_at DESC
-          LIMIT ${parsedLimit}
-        `
+      // With pagination (before timestamp)
+      if (before && parsedLimit) {
+        if (quarterId) {
+          data = showDeleted
+            ? await sql`
+              SELECT sg.id, sg.quarter_id, sg.generated_at, sg.selected_option,
+                     sg.notes, sg.is_starred, sg.deleted_at,
+                     (sg.stats->>'studyHallsPlaced')::int as study_halls_placed,
+                     (sg.stats->>'backToBackIssues')::int as back_to_back_issues,
+                     jsonb_array_length(sg.stats->'classes_snapshot') as classes_count,
+                     jsonb_array_length(sg.stats->'teachers_snapshot') as teachers_count,
+                     q.id as quarter_id_ref, q.name as quarter_name
+              FROM schedule_generations sg
+              LEFT JOIN quarters q ON sg.quarter_id = q.id
+              WHERE sg.quarter_id = ${quarterId} AND sg.generated_at < ${before}
+              ORDER BY sg.generated_at DESC
+              LIMIT ${parsedLimit}
+            `
+            : await sql`
+              SELECT sg.id, sg.quarter_id, sg.generated_at, sg.selected_option,
+                     sg.notes, sg.is_starred, sg.deleted_at,
+                     (sg.stats->>'studyHallsPlaced')::int as study_halls_placed,
+                     (sg.stats->>'backToBackIssues')::int as back_to_back_issues,
+                     jsonb_array_length(sg.stats->'classes_snapshot') as classes_count,
+                     jsonb_array_length(sg.stats->'teachers_snapshot') as teachers_count,
+                     q.id as quarter_id_ref, q.name as quarter_name
+              FROM schedule_generations sg
+              LEFT JOIN quarters q ON sg.quarter_id = q.id
+              WHERE sg.quarter_id = ${quarterId} AND sg.generated_at < ${before} AND sg.deleted_at IS NULL
+              ORDER BY sg.generated_at DESC
+              LIMIT ${parsedLimit}
+            `
+        } else {
+          data = showDeleted
+            ? await sql`
+              SELECT sg.id, sg.quarter_id, sg.generated_at, sg.selected_option,
+                     sg.notes, sg.is_starred, sg.deleted_at,
+                     (sg.stats->>'studyHallsPlaced')::int as study_halls_placed,
+                     (sg.stats->>'backToBackIssues')::int as back_to_back_issues,
+                     jsonb_array_length(sg.stats->'classes_snapshot') as classes_count,
+                     jsonb_array_length(sg.stats->'teachers_snapshot') as teachers_count,
+                     q.id as quarter_id_ref, q.name as quarter_name
+              FROM schedule_generations sg
+              LEFT JOIN quarters q ON sg.quarter_id = q.id
+              WHERE sg.generated_at < ${before}
+              ORDER BY sg.generated_at DESC
+              LIMIT ${parsedLimit}
+            `
+            : await sql`
+              SELECT sg.id, sg.quarter_id, sg.generated_at, sg.selected_option,
+                     sg.notes, sg.is_starred, sg.deleted_at,
+                     (sg.stats->>'studyHallsPlaced')::int as study_halls_placed,
+                     (sg.stats->>'backToBackIssues')::int as back_to_back_issues,
+                     jsonb_array_length(sg.stats->'classes_snapshot') as classes_count,
+                     jsonb_array_length(sg.stats->'teachers_snapshot') as teachers_count,
+                     q.id as quarter_id_ref, q.name as quarter_name
+              FROM schedule_generations sg
+              LEFT JOIN quarters q ON sg.quarter_id = q.id
+              WHERE sg.generated_at < ${before} AND sg.deleted_at IS NULL
+              ORDER BY sg.generated_at DESC
+              LIMIT ${parsedLimit}
+            `
+        }
+      } else if (quarterId && parsedLimit) {
+        data = showDeleted
+          ? await sql`
+            SELECT sg.id, sg.quarter_id, sg.generated_at, sg.selected_option,
+                   sg.notes, sg.is_starred, sg.deleted_at,
+                   (sg.stats->>'studyHallsPlaced')::int as study_halls_placed,
+                   (sg.stats->>'backToBackIssues')::int as back_to_back_issues,
+                   jsonb_array_length(sg.stats->'classes_snapshot') as classes_count,
+                   jsonb_array_length(sg.stats->'teachers_snapshot') as teachers_count,
+                   q.id as quarter_id_ref, q.name as quarter_name
+            FROM schedule_generations sg
+            LEFT JOIN quarters q ON sg.quarter_id = q.id
+            WHERE sg.quarter_id = ${quarterId}
+            ORDER BY sg.is_starred DESC, sg.generated_at DESC
+            LIMIT ${parsedLimit}
+          `
+          : await sql`
+            SELECT sg.id, sg.quarter_id, sg.generated_at, sg.selected_option,
+                   sg.notes, sg.is_starred, sg.deleted_at,
+                   (sg.stats->>'studyHallsPlaced')::int as study_halls_placed,
+                   (sg.stats->>'backToBackIssues')::int as back_to_back_issues,
+                   jsonb_array_length(sg.stats->'classes_snapshot') as classes_count,
+                   jsonb_array_length(sg.stats->'teachers_snapshot') as teachers_count,
+                   q.id as quarter_id_ref, q.name as quarter_name
+            FROM schedule_generations sg
+            LEFT JOIN quarters q ON sg.quarter_id = q.id
+            WHERE sg.quarter_id = ${quarterId} AND sg.deleted_at IS NULL
+            ORDER BY sg.is_starred DESC, sg.generated_at DESC
+            LIMIT ${parsedLimit}
+          `
       } else if (quarterId) {
-        data = await sql`
-          SELECT sg.id, sg.quarter_id, sg.generated_at, sg.selected_option,
-                 sg.notes, sg.is_starred,
-                 (sg.stats->>'studyHallsPlaced')::int as study_halls_placed,
-                 (sg.stats->>'backToBackIssues')::int as back_to_back_issues,
-                 q.id as quarter_id_ref, q.name as quarter_name
-          FROM schedule_generations sg
-          LEFT JOIN quarters q ON sg.quarter_id = q.id
-          WHERE sg.quarter_id = ${quarterId}
-          ORDER BY sg.is_starred DESC, sg.generated_at DESC
-        `
+        data = showDeleted
+          ? await sql`
+            SELECT sg.id, sg.quarter_id, sg.generated_at, sg.selected_option,
+                   sg.notes, sg.is_starred, sg.deleted_at,
+                   (sg.stats->>'studyHallsPlaced')::int as study_halls_placed,
+                   (sg.stats->>'backToBackIssues')::int as back_to_back_issues,
+                   jsonb_array_length(sg.stats->'classes_snapshot') as classes_count,
+                   jsonb_array_length(sg.stats->'teachers_snapshot') as teachers_count,
+                   q.id as quarter_id_ref, q.name as quarter_name
+            FROM schedule_generations sg
+            LEFT JOIN quarters q ON sg.quarter_id = q.id
+            WHERE sg.quarter_id = ${quarterId}
+            ORDER BY sg.is_starred DESC, sg.generated_at DESC
+          `
+          : await sql`
+            SELECT sg.id, sg.quarter_id, sg.generated_at, sg.selected_option,
+                   sg.notes, sg.is_starred, sg.deleted_at,
+                   (sg.stats->>'studyHallsPlaced')::int as study_halls_placed,
+                   (sg.stats->>'backToBackIssues')::int as back_to_back_issues,
+                   jsonb_array_length(sg.stats->'classes_snapshot') as classes_count,
+                   jsonb_array_length(sg.stats->'teachers_snapshot') as teachers_count,
+                   q.id as quarter_id_ref, q.name as quarter_name
+            FROM schedule_generations sg
+            LEFT JOIN quarters q ON sg.quarter_id = q.id
+            WHERE sg.quarter_id = ${quarterId} AND sg.deleted_at IS NULL
+            ORDER BY sg.is_starred DESC, sg.generated_at DESC
+          `
       } else if (parsedLimit) {
-        data = await sql`
-          SELECT sg.id, sg.quarter_id, sg.generated_at, sg.selected_option,
-                 sg.notes, sg.is_starred,
-                 (sg.stats->>'studyHallsPlaced')::int as study_halls_placed,
-                 (sg.stats->>'backToBackIssues')::int as back_to_back_issues,
-                 q.id as quarter_id_ref, q.name as quarter_name
-          FROM schedule_generations sg
-          LEFT JOIN quarters q ON sg.quarter_id = q.id
-          ORDER BY sg.is_starred DESC, sg.generated_at DESC
-          LIMIT ${parsedLimit}
-        `
+        data = showDeleted
+          ? await sql`
+            SELECT sg.id, sg.quarter_id, sg.generated_at, sg.selected_option,
+                   sg.notes, sg.is_starred, sg.deleted_at,
+                   (sg.stats->>'studyHallsPlaced')::int as study_halls_placed,
+                   (sg.stats->>'backToBackIssues')::int as back_to_back_issues,
+                   jsonb_array_length(sg.stats->'classes_snapshot') as classes_count,
+                   jsonb_array_length(sg.stats->'teachers_snapshot') as teachers_count,
+                   q.id as quarter_id_ref, q.name as quarter_name
+            FROM schedule_generations sg
+            LEFT JOIN quarters q ON sg.quarter_id = q.id
+            ORDER BY sg.is_starred DESC, sg.generated_at DESC
+            LIMIT ${parsedLimit}
+          `
+          : await sql`
+            SELECT sg.id, sg.quarter_id, sg.generated_at, sg.selected_option,
+                   sg.notes, sg.is_starred, sg.deleted_at,
+                   (sg.stats->>'studyHallsPlaced')::int as study_halls_placed,
+                   (sg.stats->>'backToBackIssues')::int as back_to_back_issues,
+                   jsonb_array_length(sg.stats->'classes_snapshot') as classes_count,
+                   jsonb_array_length(sg.stats->'teachers_snapshot') as teachers_count,
+                   q.id as quarter_id_ref, q.name as quarter_name
+            FROM schedule_generations sg
+            LEFT JOIN quarters q ON sg.quarter_id = q.id
+            WHERE sg.deleted_at IS NULL
+            ORDER BY sg.is_starred DESC, sg.generated_at DESC
+            LIMIT ${parsedLimit}
+          `
       } else {
-        data = await sql`
-          SELECT sg.id, sg.quarter_id, sg.generated_at, sg.selected_option,
-                 sg.notes, sg.is_starred,
-                 (sg.stats->>'studyHallsPlaced')::int as study_halls_placed,
-                 (sg.stats->>'backToBackIssues')::int as back_to_back_issues,
-                 q.id as quarter_id_ref, q.name as quarter_name
-          FROM schedule_generations sg
-          LEFT JOIN quarters q ON sg.quarter_id = q.id
-          ORDER BY sg.is_starred DESC, sg.generated_at DESC
-        `
+        data = showDeleted
+          ? await sql`
+            SELECT sg.id, sg.quarter_id, sg.generated_at, sg.selected_option,
+                   sg.notes, sg.is_starred, sg.deleted_at,
+                   (sg.stats->>'studyHallsPlaced')::int as study_halls_placed,
+                   (sg.stats->>'backToBackIssues')::int as back_to_back_issues,
+                   jsonb_array_length(sg.stats->'classes_snapshot') as classes_count,
+                   jsonb_array_length(sg.stats->'teachers_snapshot') as teachers_count,
+                   q.id as quarter_id_ref, q.name as quarter_name
+            FROM schedule_generations sg
+            LEFT JOIN quarters q ON sg.quarter_id = q.id
+            ORDER BY sg.is_starred DESC, sg.generated_at DESC
+          `
+          : await sql`
+            SELECT sg.id, sg.quarter_id, sg.generated_at, sg.selected_option,
+                   sg.notes, sg.is_starred, sg.deleted_at,
+                   (sg.stats->>'studyHallsPlaced')::int as study_halls_placed,
+                   (sg.stats->>'backToBackIssues')::int as back_to_back_issues,
+                   jsonb_array_length(sg.stats->'classes_snapshot') as classes_count,
+                   jsonb_array_length(sg.stats->'teachers_snapshot') as teachers_count,
+                   q.id as quarter_id_ref, q.name as quarter_name
+            FROM schedule_generations sg
+            LEFT JOIN quarters q ON sg.quarter_id = q.id
+            WHERE sg.deleted_at IS NULL
+            ORDER BY sg.is_starred DESC, sg.generated_at DESC
+          `
       }
 
       const result = data.map((row: {
@@ -91,8 +223,11 @@ export async function GET(request: NextRequest) {
         selected_option: number
         notes: string | null
         is_starred: boolean
+        deleted_at: string | null
         study_halls_placed: number | null
         back_to_back_issues: number | null
+        classes_count: number | null
+        teachers_count: number | null
         quarter_id_ref: string
         quarter_name: string
       }) => ({
@@ -102,8 +237,11 @@ export async function GET(request: NextRequest) {
         selected_option: row.selected_option,
         notes: row.notes,
         is_starred: row.is_starred,
+        deleted_at: row.deleted_at,
         studyHallsPlaced: row.study_halls_placed ?? 0,
         backToBackIssues: row.back_to_back_issues ?? 0,
+        classesCount: row.classes_count ?? 0,
+        teachersCount: row.teachers_count ?? 0,
         options: null, // Not loaded in summary mode
         quarter: row.quarter_id_ref ? { id: row.quarter_id_ref, name: row.quarter_name } : null,
       }))
@@ -123,7 +261,7 @@ export async function GET(request: NextRequest) {
     let data
     const parsedLimit = limit ? parseInt(limit) : null
 
-    // Query based on conditions
+    // Query based on conditions (always exclude deleted)
     if (quarterId && starredOnly) {
       if (parsedLimit) {
         data = await sql`
@@ -132,7 +270,7 @@ export async function GET(request: NextRequest) {
                  q.id as quarter_id_ref, q.name as quarter_name
           FROM schedule_generations sg
           LEFT JOIN quarters q ON sg.quarter_id = q.id
-          WHERE sg.quarter_id = ${quarterId} AND sg.is_starred = true
+          WHERE sg.quarter_id = ${quarterId} AND sg.is_starred = true AND sg.deleted_at IS NULL
           ORDER BY sg.generated_at DESC
           LIMIT ${parsedLimit}
         `
@@ -143,7 +281,7 @@ export async function GET(request: NextRequest) {
                  q.id as quarter_id_ref, q.name as quarter_name
           FROM schedule_generations sg
           LEFT JOIN quarters q ON sg.quarter_id = q.id
-          WHERE sg.quarter_id = ${quarterId} AND sg.is_starred = true
+          WHERE sg.quarter_id = ${quarterId} AND sg.is_starred = true AND sg.deleted_at IS NULL
           ORDER BY sg.generated_at DESC
         `
       }
@@ -155,7 +293,7 @@ export async function GET(request: NextRequest) {
                  q.id as quarter_id_ref, q.name as quarter_name
           FROM schedule_generations sg
           LEFT JOIN quarters q ON sg.quarter_id = q.id
-          WHERE sg.quarter_id = ${quarterId}
+          WHERE sg.quarter_id = ${quarterId} AND sg.deleted_at IS NULL
           ORDER BY sg.is_starred DESC, sg.generated_at DESC
           LIMIT ${parsedLimit}
         `
@@ -166,7 +304,7 @@ export async function GET(request: NextRequest) {
                  q.id as quarter_id_ref, q.name as quarter_name
           FROM schedule_generations sg
           LEFT JOIN quarters q ON sg.quarter_id = q.id
-          WHERE sg.quarter_id = ${quarterId}
+          WHERE sg.quarter_id = ${quarterId} AND sg.deleted_at IS NULL
           ORDER BY sg.is_starred DESC, sg.generated_at DESC
         `
       }
@@ -178,7 +316,7 @@ export async function GET(request: NextRequest) {
                  q.id as quarter_id_ref, q.name as quarter_name
           FROM schedule_generations sg
           LEFT JOIN quarters q ON sg.quarter_id = q.id
-          WHERE sg.is_starred = true
+          WHERE sg.is_starred = true AND sg.deleted_at IS NULL
           ORDER BY sg.generated_at DESC
           LIMIT ${parsedLimit}
         `
@@ -189,7 +327,7 @@ export async function GET(request: NextRequest) {
                  q.id as quarter_id_ref, q.name as quarter_name
           FROM schedule_generations sg
           LEFT JOIN quarters q ON sg.quarter_id = q.id
-          WHERE sg.is_starred = true
+          WHERE sg.is_starred = true AND sg.deleted_at IS NULL
           ORDER BY sg.generated_at DESC
         `
       }
@@ -201,6 +339,7 @@ export async function GET(request: NextRequest) {
                  q.id as quarter_id_ref, q.name as quarter_name
           FROM schedule_generations sg
           LEFT JOIN quarters q ON sg.quarter_id = q.id
+          WHERE sg.deleted_at IS NULL
           ORDER BY sg.is_starred DESC, sg.generated_at DESC
           LIMIT ${parsedLimit}
         `
@@ -211,6 +350,7 @@ export async function GET(request: NextRequest) {
                  q.id as quarter_id_ref, q.name as quarter_name
           FROM schedule_generations sg
           LEFT JOIN quarters q ON sg.quarter_id = q.id
+          WHERE sg.deleted_at IS NULL
           ORDER BY sg.is_starred DESC, sg.generated_at DESC
         `
       }

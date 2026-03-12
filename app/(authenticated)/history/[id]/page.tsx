@@ -7253,12 +7253,12 @@ export default function HistoryDetailPage() {
                 disabled={saving}
                 className={`p-1.5 rounded-md transition-colors no-print ${
                   generation.is_starred
-                    ? 'text-amber-500 hover:text-amber-600 hover:bg-amber-50'
-                    : 'text-slate-300 hover:text-amber-500 hover:bg-amber-50'
+                    ? 'text-sky-500 hover:text-sky-600 hover:bg-sky-50'
+                    : 'text-slate-300 hover:text-sky-500 hover:bg-sky-50'
                 }`}
                 title={generation.is_starred ? "Unstar schedule" : "Star schedule"}
               >
-                <Star className={`h-5 w-5 ${generation.is_starred ? 'fill-amber-500' : ''}`} />
+                <Star className={`h-5 w-5 ${generation.is_starred ? 'fill-sky-500' : ''}`} />
               </button>
             </h1>
           </div>
@@ -7435,7 +7435,7 @@ export default function HistoryDetailPage() {
                   <AlertTriangle className="h-3.5 w-3.5" />
                   <span className="text-xs">
                     {snapshotNeedsUpdate
-                      ? `${classChanges?.affectedTeachers.length || 0} changed`
+                      ? `${classChanges?.changes.length || 0} class${(classChanges?.changes.length || 0) !== 1 ? 'es' : ''} changed`
                       : `${generation?.stats?.snapshotAffectedTeachers?.length || 0} need alignment`}
                   </span>
                 </Button>
@@ -7451,7 +7451,7 @@ export default function HistoryDetailPage() {
                   title={teacherChanges.summary}
                 >
                   <UserCog className="h-3.5 w-3.5" />
-                  <span className="text-xs">{teacherChanges.changes.length} teacher change{teacherChanges.changes.length !== 1 ? 's' : ''}</span>
+                  <span className="text-xs">{teacherChanges.changes.length} teacher{teacherChanges.changes.length !== 1 ? 's' : ''} changed</span>
                 </Button>
               )}
 
@@ -9747,7 +9747,7 @@ export default function HistoryDetailPage() {
             <Button
               onClick={isEditingNote ? handleUpdateNote : handleStar}
               disabled={saving}
-              className="bg-amber-500 hover:bg-amber-600"
+              className="bg-sky-500 hover:bg-sky-600"
             >
               {saving ? (
                 <>
