@@ -192,10 +192,10 @@ export async function generateSchedulesRemote(
     };
 
     // Start simulated progress (since we can't get real progress from the API)
-    let simulatedProgress = 1;
+    // Base progress on time, not attempts, since solver runs for maxTimeSeconds
+    const startTime = Date.now();
     let progressInterval: ReturnType<typeof setInterval> | null = null;
     let completed = false;
-    let reachedEnd = false;
 
     const stopProgress = () => {
       completed = true;
@@ -209,18 +209,15 @@ export async function generateSchedulesRemote(
           return;
         }
 
-        if (!reachedEnd) {
-          // Logarithmic progress that reaches 100%
-          simulatedProgress = Math.min(simulatedProgress + Math.max(1, Math.floor((numAttempts - simulatedProgress) / 20)), numAttempts);
-          const elapsed = Math.floor((simulatedProgress / numAttempts) * maxTimeSeconds);
-          onProgress?.(simulatedProgress, numAttempts, `Solving with OR-Tools CP-SAT... (~${elapsed}s)`);
+        const elapsedSeconds = Math.floor((Date.now() - startTime) / 1000);
+        // Progress reaches ~95% at maxTimeSeconds, leaving room for post-processing
+        const progressPercent = Math.min(95, (elapsedSeconds / maxTimeSeconds) * 100);
+        const displayProgress = Math.floor((progressPercent / 100) * numAttempts);
 
-          // Once we reach 100%, switch to "finishing up" message
-          if (simulatedProgress >= numAttempts) {
-            reachedEnd = true;
-          }
+        if (elapsedSeconds < maxTimeSeconds) {
+          onProgress?.(displayProgress, numAttempts, `Solving with OR-Tools CP-SAT... (~${elapsedSeconds}s)`);
         } else {
-          // Show "finishing up" message - use -1 to signal UI to show activity indicator instead of counter
+          // Past expected time, show "finishing up" message
           onProgress?.(-1, numAttempts, 'Finishing up and gathering results...');
         }
       }, 1000);
