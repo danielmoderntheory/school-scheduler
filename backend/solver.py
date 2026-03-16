@@ -623,6 +623,7 @@ def suggest_teachers_to_unlock(
     if not single_feasible and len(affecting) >= 2:
         # Only try pairs of top 3 candidates (to limit trials)
         top_candidates = affecting[:3]
+        found_pair = False
         for i, teacher1 in enumerate(top_candidates):
             for teacher2 in top_candidates[i+1:]:
                 # Create a copy without both teachers
@@ -651,15 +652,45 @@ def suggest_teachers_to_unlock(
                         'is_pair': True,
                         'teachers': [teacher1, teacher2],
                     })
+                    found_pair = True
                     break
-            # Stop if we found a feasible pair
-            if any(s.get('is_pair') and s['feasible'] for s in suggestions):
+            if found_pair:
                 break
 
-    # Sort: feasible first, then by shared sessions
-    suggestions.sort(key=lambda x: (-x['feasible'], -x['shared_sessions']))
+        # If no pair worked and we have 3+ candidates, try all top candidates together
+        if not found_pair and len(top_candidates) >= 3:
+            trial_locked = {k: v for k, v in locked_teachers.items()
+                           if k not in set(top_candidates)}
 
-    return suggestions[:max_suggestions]
+            trial_result = _quick_feasibility_check(
+                teachers=teachers,
+                classes=classes,
+                rules=rules,
+                locked_teachers=trial_locked,
+                grades=grades,
+                timeout=trial_timeout,
+            )
+
+            is_feasible = trial_result.get('status') == 'success' and len(trial_result.get('options', [])) > 0
+
+            if is_feasible:
+                combined_shared = sum(teacher_shared.get(t, 0) for t in top_candidates)
+                suggestions.append({
+                    'teacher': ' + '.join(top_candidates),
+                    'shared_sessions': combined_shared,
+                    'feasible': True,
+                    'options_found': len(trial_result.get('options', [])),
+                    'impact': 'high',
+                    'is_pair': True,  # Reuse pair handling in frontend
+                    'teachers': top_candidates,
+                })
+
+    # Only return suggestions that have been verified to help (feasible)
+    # Non-feasible suggestions with just overlap counts are misleading
+    verified = [s for s in suggestions if s['feasible']]
+    verified.sort(key=lambda x: (-x['shared_sessions'],))
+
+    return verified[:max_suggestions]
 
 
 def _quick_feasibility_check(

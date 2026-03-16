@@ -1,6 +1,7 @@
 "use client"
 
 import { useState, useEffect, useRef, useCallback } from "react"
+import { useSearchParams } from "next/navigation"
 import Link from "next/link"
 import { Input } from "@/components/ui/input"
 import { Badge } from "@/components/ui/badge"
@@ -20,7 +21,7 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
-import { AlertTriangle, ChevronDown, ChevronUp, Loader2, Plus, X, Clock, Users, UserX, Upload, Download, Check, History, Star, Lock, Play, MoreVertical, Settings2, Trash2, Undo2 } from "lucide-react"
+import { AlertTriangle, ChevronDown, ChevronUp, Loader2, Plus, X, Clock, Users, UserX, Upload, Download, Check, History, Star, Lock, Play, MoreVertical, Pencil, Settings2, Trash2, Undo2 } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { GradeSelector, formatGradeDisplay } from "@/components/GradeSelector"
 import { AddClassModal } from "@/components/AddClassModal"
@@ -108,6 +109,7 @@ function formatTimeAgo(timestamp: string): string {
 }
 
 export default function ClassesPage() {
+  const searchParams = useSearchParams()
   const [classes, setClasses] = useState<ClassEntry[]>([])
   const [teachers, setTeachers] = useState<Teacher[]>([])
   const [grades, setGrades] = useState<Grade[]>([])
@@ -131,6 +133,7 @@ export default function ClassesPage() {
       loadClassesForQuarter(quarterId)
     },
   })
+
   const [lastRun, setLastRun] = useState<LastRun | null>(null)
   const [tableLocked, setTableLocked] = useState(true)
   const [lockReason, setLockReason] = useState<'generation' | 'import' | null>(null)
@@ -241,19 +244,14 @@ export default function ClassesPage() {
           setLastRun(null)
         }
 
-        // Lock table based on snapshot version
+        // Lock table if any schedule generation exists for this quarter
         try {
           const snapshotRes = await fetch(`/api/history?quarter_id=${quarterId}&snapshot_version_only=true`)
           if (snapshotRes.ok) {
             const { maxSnapshotVersion } = await snapshotRes.json()
             if (maxSnapshotVersion > 0) {
-              const maxClassUpdatedAt = classesData.reduce((max: number, c: { updated_at?: string; created_at?: string }) => {
-                const t = new Date(c.updated_at || c.created_at || 0).getTime()
-                return t > max ? t : max
-              }, 0)
-              const shouldLock = maxClassUpdatedAt <= maxSnapshotVersion
-              setTableLocked(shouldLock)
-              if (shouldLock) setLockReason('generation')
+              setTableLocked(true)
+              setLockReason('generation')
             }
           }
         } catch {
@@ -1777,8 +1775,17 @@ export default function ClassesPage() {
     .filter(g => !g.display_name.includes('Elective'))
     .sort((a, b) => a.sort_order - b.sort_order)
 
+  const fromSchedule = searchParams.get('from') === 'schedule'
+
   return (
     <div className="p-6 max-w-6xl mx-auto h-[calc(100vh-4rem)] flex flex-col overflow-hidden">
+      {/* Page title with quarter context */}
+      <div className="flex items-center gap-3 mb-3">
+        <h1 className="text-lg font-semibold">Class Setup</h1>
+        {activeQuarter && (
+          <span className="text-lg text-muted-foreground font-normal">— {activeQuarter.name}</span>
+        )}
+      </div>
       {/* Header with Quarter Selector and Generate Button */}
       <div className="flex items-center justify-between mb-4">
         <div className="flex items-center gap-4">
@@ -1806,24 +1813,26 @@ export default function ClassesPage() {
             <Plus className="h-4 w-4" />
             Add Class
           </Button>
-          <Button
-            onClick={() => {
-              if (classes.length === 0) {
-                toast.error("No classes configured for this quarter. Add classes first.")
-                return
-              }
-              if (incompleteCount > 0) {
-                toast.error(`${incompleteCount} class${incompleteCount > 1 ? 'es are' : ' is'} incomplete`)
-                return
-              }
-              setShowGenerateModal(true)
-            }}
-            disabled={incompleteCount > 0 || classes.length === 0}
-            className="gap-2 h-9 bg-emerald-500 hover:bg-emerald-600 text-white disabled:bg-slate-300"
-          >
-            <Play className="h-4 w-4" />
-            Generate Schedule
-          </Button>
+          {!showLastRunNotice && !fromSchedule && (
+            <Button
+              onClick={() => {
+                if (classes.length === 0) {
+                  toast.error("No classes configured for this quarter. Add classes first.")
+                  return
+                }
+                if (incompleteCount > 0) {
+                  toast.error(`${incompleteCount} class${incompleteCount > 1 ? 'es are' : ' is'} incomplete`)
+                  return
+                }
+                setShowGenerateModal(true)
+              }}
+              disabled={incompleteCount > 0 || classes.length === 0}
+              className="gap-2 h-9 bg-emerald-500 hover:bg-emerald-600 text-white disabled:bg-slate-300"
+            >
+              <Play className="h-4 w-4" />
+              Generate Schedule
+            </Button>
+          )}
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
               <Button variant="outline" className="h-9 w-9 p-0">
@@ -1831,6 +1840,24 @@ export default function ClassesPage() {
               </Button>
             </DropdownMenuTrigger>
             <DropdownMenuContent align="end">
+              <DropdownMenuItem
+                onClick={() => {
+                  if (classes.length === 0) {
+                    toast.error("No classes configured for this quarter. Add classes first.")
+                    return
+                  }
+                  if (incompleteCount > 0) {
+                    toast.error(`${incompleteCount} class${incompleteCount > 1 ? 'es are' : ' is'} incomplete`)
+                    return
+                  }
+                  setShowGenerateModal(true)
+                }}
+                disabled={incompleteCount > 0 || classes.length === 0}
+              >
+                <Play className="h-4 w-4 mr-2" />
+                Generate Schedule
+              </DropdownMenuItem>
+              <DropdownMenuSeparator />
               <DropdownMenuItem onClick={() => {
                 setShowImportFromHistoryDialog(true)
                 loadHistoryForImport()
@@ -2413,7 +2440,20 @@ Maria\t6th-11th Elective\tSpanish 101\t1\tMon Block 5`}
         )}
       </div>
 
-      {showLastRunNotice ? (
+      {fromSchedule && searchParams.get('schedule_id') ? (
+        <div className="mb-4 flex items-center gap-2 px-3 py-2 rounded-lg bg-sky-50 border border-sky-200 text-sm text-sky-700">
+          <Settings2 className="h-4 w-4 flex-shrink-0 text-sky-500" />
+          <span>
+            Editing classes for <span className="font-medium">{activeQuarter?.name || 'this quarter'}</span>. Changes will be detected when you return to the schedule.
+          </span>
+          <Link
+            href={`/history/${searchParams.get('schedule_id')}${searchParams.get('version') ? `#${searchParams.get('version')}` : ''}`}
+            className="ml-auto px-2 py-1 rounded bg-sky-600 text-white hover:bg-sky-700 transition-colors font-medium whitespace-nowrap"
+          >
+            ← Back to schedule
+          </Link>
+        </div>
+      ) : showLastRunNotice ? (
         lastRun.starred ? (
           <div className="mb-4 flex items-center gap-2 px-3 py-2 rounded-lg bg-sky-50 border border-sky-200 text-sm text-sky-700">
             <Star className="h-4 w-4 flex-shrink-0 fill-sky-400 text-sky-400" />
@@ -2487,11 +2527,11 @@ Maria\t6th-11th Elective\tSpanish 101\t1\tMon Block 5`}
 
       <div className="relative border rounded-lg overflow-hidden bg-white shadow-sm flex-1 flex flex-col min-h-[600px]">
         {tableLocked && (
-          <div className="absolute inset-0 z-20 bg-white/40 flex justify-center pt-[15%]">
-            <div className="flex flex-col items-center gap-3 bg-white/90 rounded-xl px-8 py-6 shadow-sm max-w-sm text-center h-fit">
+          <div className="absolute inset-0 z-20 bg-slate-800/20 flex justify-center pt-[15%]">
+            <div className="flex flex-col items-center gap-3 bg-slate-700/95 rounded-xl px-8 py-6 shadow-lg max-w-sm text-center h-fit">
               <Lock className="h-8 w-8 text-slate-400" />
-              <p className="text-sm font-medium text-slate-600">Classes are locked</p>
-              <p className="text-xs text-slate-500">
+              <p className="text-sm font-medium text-slate-200">Classes are locked</p>
+              <p className="text-xs text-slate-400">
                 {lockReason === 'import'
                   ? 'Please wait.. Import is currently in progress.'
                   : lastRun
@@ -2499,14 +2539,14 @@ Maria\t6th-11th Elective\tSpanish 101\t1\tMon Block 5`}
                     : 'A schedule has been generated with these classes. Editing may require regenerating the schedule.'}
               </p>
               <div className="flex items-center gap-2">
-                <Button variant="outline" size="sm" onClick={() => setTableLocked(false)}>
+                <Button size="sm" className="bg-white text-slate-800 hover:bg-slate-100" onClick={() => setTableLocked(false)}>
                   Unlock
                 </Button>
                 {lockReason === 'generation' && quarters.length > 1 && (
                   <Button
                     variant="ghost"
                     size="sm"
-                    className="text-slate-500"
+                    className="text-slate-400 hover:text-slate-200 hover:bg-slate-600"
                     onClick={() => {
                       // Find a different quarter to suggest
                       const otherQuarter = quarters.find(q => q.id !== activeQuarter?.id)

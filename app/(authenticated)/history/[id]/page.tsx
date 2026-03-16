@@ -41,7 +41,7 @@ import { Label } from "@/components/ui/label"
 import Link from "next/link"
 import type { ScheduleOption, TeacherSchedule, GradeSchedule, Teacher, FloatingBlock, PendingPlacement, ValidationError, CellLocation, ClassEntry, OpenBlockLabels, PendingTransfer, TimetableTemplate } from "@/lib/types"
 import { resolveRowsForGrade } from "@/lib/timetable-utils"
-import { parseClassesFromSnapshot, parseTeachersFromSnapshot, parseRulesFromSnapshot, hasValidSnapshots, detectClassChanges, detectTeacherChanges, applyTeacherRenames, applyTeacherChangesToSnapshot, computeExpectedTeachingSessions, type GenerationStats, type ChangeDetectionResult, type CurrentClass, type ClassSnapshot, type TeacherSnapshot, type TeacherChangeResult } from "@/lib/snapshot-utils"
+import { parseClassesFromSnapshot, parseTeachersFromSnapshot, parseRulesFromSnapshot, hasValidSnapshots, detectClassChanges, detectTeacherChanges, applyTeacherRenames, applyTeacherChangesToSnapshot, computeExpectedTeachingSessions, findMismatchedTeachers, type GenerationStats, type ChangeDetectionResult, type CurrentClass, type ClassSnapshot, type TeacherSnapshot, type TeacherChangeResult } from "@/lib/snapshot-utils"
 import { parseGradeDisplayToNumbers, parseGradeDisplayToNames, gradesOverlap, gradesEqual, gradeNumToDisplay, isClassElective, isClassCotaught, shouldIgnoreGradeConflict, formatGradeDisplayCompact } from "@/lib/grade-utils"
 import { BLOCK_TYPE_OPEN, BLOCK_TYPE_STUDY_HALL, isOpenBlock, isStudyHall, isScheduledClass, isOccupiedBlock, entryIsOpen, entryIsOccupied, entryIsScheduledClass, isFullTime, setOpenBlockLabel, recalculateOptionStats, getFirstGradeEntry, isMultipleEntryCell } from "@/lib/schedule-utils"
 import toast, { successIcon, errorIcon, warningIcon } from "@/lib/toast"
@@ -6991,6 +6991,15 @@ export default function HistoryDetailPage() {
   })()
   const optionNeedsChanges = snapshotNeedsUpdate || optionNeedsAlignment
 
+  // Dynamically compute which teachers differ between this option's schedule and the snapshot.
+  // This is more accurate than snapshotAffectedTeachers which only tracks the LAST snapshot update
+  // and misses cumulative changes when an option is multiple updates behind.
+  const alignmentAffectedTeachers = useMemo(() => {
+    if (!optionNeedsAlignment || snapshotNeedsUpdate) return []
+    if (!savedOption?.teacherSchedules || !generation?.stats?.classes_snapshot) return []
+    return findMismatchedTeachers(savedOption.teacherSchedules, generation.stats.classes_snapshot)
+  }, [optionNeedsAlignment, snapshotNeedsUpdate, savedOption?.teacherSchedules, generation?.stats?.classes_snapshot])
+
   // Determine if we should create a new revision or update existing
   // forceCreateNew: null = auto (create if only 1 revision), true = always create, false = always update
   const shouldCreateNew = forceCreateNew !== null
@@ -7436,7 +7445,7 @@ export default function HistoryDetailPage() {
                   <span className="text-xs">
                     {snapshotNeedsUpdate
                       ? `${classChanges?.changes.length || 0} class${(classChanges?.changes.length || 0) !== 1 ? 'es' : ''} changed`
-                      : `${generation?.stats?.snapshotAffectedTeachers?.length || 0} need alignment`}
+                      : `${alignmentAffectedTeachers.length} need alignment`}
                   </span>
                 </Button>
               )}
@@ -7480,6 +7489,21 @@ export default function HistoryDetailPage() {
                     <DropdownMenuItem onClick={() => enterStudyHallMode()} disabled={regenMode || swapMode || freeformMode || studyHallMode}>
                       <Shuffle className="h-4 w-4 mr-2" />
                       Reassign Study Halls
+                    </DropdownMenuItem>
+                    <DropdownMenuSeparator />
+                    <DropdownMenuItem asChild>
+                      <Link
+                        href={`/classes?from=schedule&schedule_id=${generation.id}&version=${(generation.options[parseInt(viewingOption) - 1]?.label || viewingOption).toLowerCase()}`}
+                        onClick={() => {
+                          // Pre-select the schedule's quarter in localStorage so the classes page opens to it
+                          if (generation.quarter_id) {
+                            localStorage.setItem('scheduler_selected_quarter', generation.quarter_id)
+                          }
+                        }}
+                      >
+                        <Pencil className="h-4 w-4 mr-2" />
+                        Edit Classes
+                      </Link>
                     </DropdownMenuItem>
                     <DropdownMenuSeparator />
                     <DropdownMenuSub>
@@ -8619,51 +8643,35 @@ export default function HistoryDetailPage() {
                             <div className="flex-1">
                               <div className="text-sm font-medium">Schedule not possible with current selection</div>
                               <div className="text-xs mt-1">
-                                {unlockSuggestions.some(s => s.feasible) ? (
-                                  <>
-                                    <span>Try also selecting: </span>
-                                    {unlockSuggestions.filter(s => s.feasible).map((s, i) => (
-                                      <span key={s.teacher}>
-                                        {i > 0 && ', '}
-                                        <button
-                                          onClick={() => {
-                                            const newSelection = new Set(selectedForRegen)
-                                            // Handle pairs (teachers array) or single teacher
-                                            if (s.teachers && s.teachers.length > 0) {
-                                              s.teachers.forEach(t => newSelection.add(t))
-                                            } else {
-                                              newSelection.add(s.teacher)
-                                            }
-                                            setSelectedForRegen(newSelection)
-                                            setUnlockSuggestions(prev => prev?.filter(x => x.teacher !== s.teacher) || null)
-                                          }}
-                                          className="font-medium text-red-800 hover:text-red-900 underline underline-offset-2"
-                                        >
-                                          {s.teacher}
-                                        </button>
-                                        <span className="text-red-600"> ({s.shared_sessions} shared)</span>
-                                      </span>
-                                    ))}
-                                  </>
-                                ) : (
-                                  <>
-                                    <span>Teachers with most schedule overlap: </span>
-                                    {unlockSuggestions.slice(0, 3).map((s, i) => (
-                                      <span key={s.teacher}>
-                                        {i > 0 && ', '}
-                                        <span className="font-medium">{s.teacher}</span>
-                                        <span className="text-red-600"> ({s.shared_sessions} shared)</span>
-                                      </span>
-                                    ))}
-                                  </>
-                                )}
+                                <span>Try also selecting: </span>
+                                {unlockSuggestions.map((s, i) => (
+                                  <span key={s.teacher}>
+                                    {i > 0 && ', '}
+                                    <button
+                                      onClick={() => {
+                                        const newSelection = new Set(selectedForRegen)
+                                        // Handle pairs/groups (teachers array) or single teacher
+                                        if (s.teachers && s.teachers.length > 0) {
+                                          s.teachers.forEach(t => newSelection.add(t))
+                                        } else {
+                                          newSelection.add(s.teacher)
+                                        }
+                                        setSelectedForRegen(newSelection)
+                                        setUnlockSuggestions(prev => prev?.filter(x => x.teacher !== s.teacher) || null)
+                                      }}
+                                      className="font-medium text-red-800 hover:text-red-900 underline underline-offset-2"
+                                    >
+                                      {s.teacher}
+                                    </button>
+                                    <span className="text-red-600"> ({s.shared_sessions} shared)</span>
+                                  </span>
+                                ))}
                               </div>
-                              {unlockSuggestions.some(s => s.feasible) && (
+                              {unlockSuggestions.length > 1 && (
                                 <button
                                   onClick={() => {
                                     const newSelection = new Set(selectedForRegen)
-                                    unlockSuggestions.filter(s => s.feasible).forEach(s => {
-                                      // Handle pairs (teachers array) or single teacher
+                                    unlockSuggestions.forEach(s => {
                                       if (s.teachers && s.teachers.length > 0) {
                                         s.teachers.forEach(t => newSelection.add(t))
                                       } else {
@@ -9145,9 +9153,9 @@ export default function HistoryDetailPage() {
                     <p>
                       Another version has been updated with the latest class configuration. This version still uses the older configuration.
                     </p>
-                    {generation?.stats?.snapshotAffectedTeachers && generation.stats.snapshotAffectedTeachers.length > 0 && (
+                    {alignmentAffectedTeachers.length > 0 && (
                       <p className="text-sm">
-                        Affected teacher{generation.stats.snapshotAffectedTeachers.length !== 1 ? 's' : ''}: {generation.stats.snapshotAffectedTeachers.join(', ')}
+                        Affected teacher{alignmentAffectedTeachers.length !== 1 ? 's' : ''}: {alignmentAffectedTeachers.join(', ')}
                       </p>
                     )}
                   </>
@@ -9183,7 +9191,7 @@ export default function HistoryDetailPage() {
                 // For alignment: use stored affected teachers and keep existing snapshot
                 const teachersToSelect = snapshotNeedsUpdate
                   ? (classChanges?.affectedTeachers || [])
-                  : (generation?.stats?.snapshotAffectedTeachers || [])
+                  : alignmentAffectedTeachers
                 setSelectedForRegen(new Set(teachersToSelect))
                 setUseCurrentClasses(snapshotNeedsUpdate) // Only rebuild from DB when DB has actually changed
                 setRegenMode(true)

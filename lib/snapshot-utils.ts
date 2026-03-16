@@ -440,6 +440,68 @@ export function revisionMatchesSnapshot(
   return true // All counts match
 }
 
+/**
+ * Find teachers whose schedules don't match the classes_snapshot.
+ * Unlike revisionMatchesSnapshot (boolean), this returns the list of
+ * affected teacher names — useful for pre-selecting teachers for alignment regen.
+ */
+export function findMismatchedTeachers(
+  teacherSchedules: Record<string, Record<string, Record<number, [string, string] | null>>>,
+  classesSnapshot: ClassSnapshot[]
+): string[] {
+  // Count expected class sessions per teacher+subject from snapshot
+  const expectedCounts = new Map<string, number>()
+  for (const cls of classesSnapshot) {
+    if (!cls.teacher_name || !cls.subject_name) continue
+    const key = `${cls.teacher_name}|${cls.subject_name}`
+    expectedCounts.set(key, (expectedCounts.get(key) || 0) + cls.days_per_week)
+  }
+
+  // Count actual class sessions in the revision's schedules
+  const actualCounts = new Map<string, number>()
+  for (const [teacher, schedule] of Object.entries(teacherSchedules)) {
+    for (const day of Object.values(schedule)) {
+      for (const entry of Object.values(day)) {
+        if (entry && entry[1] && entry[1] !== 'OPEN' && entry[1] !== 'Study Hall') {
+          const subject = entry[1]
+          const key = `${teacher}|${subject}`
+          actualCounts.set(key, (actualCounts.get(key) || 0) + 1)
+        }
+      }
+    }
+  }
+
+  const affectedTeachers = new Set<string>()
+
+  // Check expected vs actual
+  for (const [key, expectedCount] of expectedCounts) {
+    const actualCount = actualCounts.get(key) || 0
+    if (actualCount !== expectedCount) {
+      const teacher = key.split('|')[0]
+      affectedTeachers.add(teacher)
+    }
+  }
+
+  // Check for extra classes in actual that aren't in expected
+  for (const [key] of actualCounts) {
+    if (!expectedCounts.has(key)) {
+      const teacher = key.split('|')[0]
+      affectedTeachers.add(teacher)
+    }
+  }
+
+  // Also check for teachers in snapshot but missing from schedules entirely
+  const snapshotTeachers = new Set(classesSnapshot.map(c => c.teacher_name).filter(Boolean) as string[])
+  const scheduleTeachers = new Set(Object.keys(teacherSchedules))
+  for (const teacher of snapshotTeachers) {
+    if (!scheduleTeachers.has(teacher)) {
+      affectedTeachers.add(teacher)
+    }
+  }
+
+  return Array.from(affectedTeachers).sort()
+}
+
 // =============================================================================
 // Teacher Rename Detection
 // =============================================================================
