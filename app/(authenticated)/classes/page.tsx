@@ -1,6 +1,6 @@
 "use client"
 
-import { useState, useEffect, useRef, useCallback } from "react"
+import { useState, useEffect, useRef, useCallback, Suspense } from "react"
 import { useSearchParams } from "next/navigation"
 import Link from "next/link"
 import { Input } from "@/components/ui/input"
@@ -109,6 +109,14 @@ function formatTimeAgo(timestamp: string): string {
 }
 
 export default function ClassesPage() {
+  return (
+    <Suspense>
+      <ClassesPageContent />
+    </Suspense>
+  )
+}
+
+function ClassesPageContent() {
   const searchParams = useSearchParams()
   const [classes, setClasses] = useState<ClassEntry[]>([])
   const [teachers, setTeachers] = useState<Teacher[]>([])
