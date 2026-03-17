@@ -143,8 +143,9 @@ function ClassesPageContent() {
   })
 
   const [lastRun, setLastRun] = useState<LastRun | null>(null)
-  const [tableLocked, setTableLocked] = useState(true)
+  const [tableLocked, setTableLocked] = useState(false)
   const [lockReason, setLockReason] = useState<'generation' | 'import' | null>(null)
+  const [classesLoading, setClassesLoading] = useState(true)
   const [showImportDialog, setShowImportDialog] = useState(false)
   const [showAddClassModal, setShowAddClassModal] = useState(false)
   const [showCotaughtSuggestion, setShowCotaughtSuggestion] = useState(false)
@@ -189,9 +190,14 @@ function ClassesPageContent() {
   const [restoringIds, setRestoringIds] = useState<Set<string>>(new Set())
   const undoToastId = useRef<string | null>(null)
   const initialLoadDone = useRef(false)
+  const skipNextClassesUnlock = useRef(false)
 
-  // Unlock table when classes are modified after initial load
+  // Unlock table when classes are modified after initial load (not during loads)
   useEffect(() => {
+    if (skipNextClassesUnlock.current) {
+      skipNextClassesUnlock.current = false
+      return
+    }
     if (initialLoadDone.current) {
       setTableLocked(false)
     }
@@ -205,8 +211,16 @@ function ClassesPageContent() {
   async function loadClassesForQuarter(quarterId: string) {
     if (!quarterId) return
 
+    setClassesLoading(true)
     try {
-      const classesRes = await fetch(`/api/classes?quarter_id=${quarterId}`)
+      // Fetch classes and lock state in parallel
+      const [classesRes, snapshotRes, historyRes, starredRes] = await Promise.all([
+        fetch(`/api/classes?quarter_id=${quarterId}`),
+        fetch(`/api/history?quarter_id=${quarterId}&snapshot_version_only=true`).catch(() => null),
+        fetch(`/api/history?quarter_id=${quarterId}&limit=1&most_recent=true&summary=true`).catch(() => null),
+        fetch(`/api/history?quarter_id=${quarterId}&limit=1&starred_only=true&summary=true`).catch(() => null),
+      ])
+
       const classesData = await classesRes.json()
       // Sort by teacher name
       const sorted = [...classesData].sort((a: ClassEntry, b: ClassEntry) => {
@@ -216,21 +230,31 @@ function ClassesPageContent() {
         if (aName && !bName) return 1
         return aName.localeCompare(bName)
       })
-      setClasses(sorted)
+
+      // Determine lock state before setting classes (avoids flash)
+      let shouldLock = false
+      try {
+        if (snapshotRes?.ok) {
+          const { maxSnapshotVersion } = await snapshotRes.json()
+          if (maxSnapshotVersion > 0) {
+            shouldLock = true
+          }
+        }
+      } catch {
+        // Ignore
+      }
 
       // Fetch schedule generations for display
       try {
         let displayGen = null
         let mostRecentGen = null
 
-        const historyRes = await fetch(`/api/history?quarter_id=${quarterId}&limit=1&most_recent=true&summary=true`)
-        if (historyRes.ok) {
+        if (historyRes?.ok) {
           const historyData = await historyRes.json()
           if (historyData.length > 0) mostRecentGen = historyData[0]
         }
 
-        const starredRes = await fetch(`/api/history?quarter_id=${quarterId}&limit=1&starred_only=true&summary=true`)
-        if (starredRes.ok) {
+        if (starredRes?.ok) {
           const starredData = await starredRes.json()
           if (starredData.length > 0) displayGen = starredData[0]
         }
@@ -251,25 +275,19 @@ function ClassesPageContent() {
         } else {
           setLastRun(null)
         }
-
-        // Lock table if any schedule generation exists for this quarter
-        try {
-          const snapshotRes = await fetch(`/api/history?quarter_id=${quarterId}&snapshot_version_only=true`)
-          if (snapshotRes.ok) {
-            const { maxSnapshotVersion } = await snapshotRes.json()
-            if (maxSnapshotVersion > 0) {
-              setTableLocked(true)
-              setLockReason('generation')
-            }
-          }
-        } catch {
-          // Ignore
-        }
       } catch {
         // Ignore history fetch errors
       }
+
+      // Set classes and lock state together to avoid flashing
+      skipNextClassesUnlock.current = true
+      setClasses(sorted)
+      setTableLocked(shouldLock)
+      setLockReason(shouldLock ? 'generation' : null)
     } catch (error) {
       toast.error("Failed to load classes")
+    } finally {
+      setClassesLoading(false)
     }
   }
 
@@ -2534,7 +2552,12 @@ Maria\t6th-11th Elective\tSpanish 101\t1\tMon Block 5`}
       )}
 
       <div className="relative border rounded-lg overflow-hidden bg-white shadow-sm flex-1 flex flex-col min-h-[600px]">
-        {tableLocked && (
+        {classesLoading && (
+          <div className="absolute inset-0 z-20 bg-white/60 flex justify-center pt-[15%]">
+            <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
+          </div>
+        )}
+        {tableLocked && !classesLoading && (
           <div className="absolute inset-0 z-20 bg-slate-800/20 flex justify-center pt-[15%]">
             <div className="flex flex-col items-center gap-3 bg-slate-700/95 rounded-xl px-8 py-6 shadow-lg max-w-sm text-center h-fit">
               <Lock className="h-8 w-8 text-slate-400" />
