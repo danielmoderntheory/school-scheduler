@@ -223,7 +223,17 @@ export function GenerateModal({
       name: t.name,
       status: t.status,
       canSuperviseStudyHall: t.can_supervise_study_hall ?? t.canSuperviseStudyHall,
+      availableDays: t.available_days ?? t.availableDays ?? null,
+      availableBlocks: t.available_blocks ?? t.availableBlocks ?? null,
     }))
+
+    // Build teacher availability lookup for intersecting with class restrictions
+    const teacherAvailMap = new Map<string, { days: string[] | null; blocks: number[] | null }>()
+    for (const t of teacherList) {
+      if (t.availableDays || t.availableBlocks) {
+        teacherAvailMap.set(t.name, { days: t.availableDays ?? null, blocks: t.availableBlocks ?? null })
+      }
+    }
 
     const classList: ClassEntry[] = classes.map((c) => {
       // Build grades array - prefer new grades field, fall back to single grade
@@ -269,6 +279,21 @@ export function GenerateModal({
           entry.fixedSlots.push([slot.day, slot.block])
         }
       })
+
+      // Intersect with teacher availability
+      const teacherAvail = teacherAvailMap.get(entry.teacher)
+      if (teacherAvail) {
+        if (teacherAvail.days) {
+          entry.availableDays = entry.availableDays
+            ? entry.availableDays.filter((d) => teacherAvail.days!.includes(d))
+            : [...teacherAvail.days]
+        }
+        if (teacherAvail.blocks) {
+          entry.availableBlocks = entry.availableBlocks
+            ? entry.availableBlocks.filter((b) => teacherAvail.blocks!.includes(b))
+            : [...teacherAvail.blocks]
+        }
+      }
 
       return entry
     })
@@ -437,6 +462,8 @@ export function GenerateModal({
             name: t.name,
             status: t.status,
             canSuperviseStudyHall: t.can_supervise_study_hall ?? t.canSuperviseStudyHall ?? true,
+            availableDays: t.available_days ?? t.availableDays ?? null,
+            availableBlocks: t.available_blocks ?? t.availableBlocks ?? null,
           }))
 
           const gradesSnapshot = grades.map((g) => ({

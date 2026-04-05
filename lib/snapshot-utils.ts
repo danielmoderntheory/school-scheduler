@@ -35,6 +35,8 @@ export interface TeacherSnapshot {
   name: string
   status: 'full-time' | 'part-time'
   canSuperviseStudyHall: boolean
+  availableDays?: string[] | null
+  availableBlocks?: number[] | null
 }
 
 export interface RuleSnapshot {
@@ -147,6 +149,8 @@ export function parseTeachersFromSnapshot(snapshot: TeacherSnapshot[]): Teacher[
     name: t.name,
     status: t.status,
     canSuperviseStudyHall: t.canSuperviseStudyHall,
+    availableDays: t.availableDays ?? null,
+    availableBlocks: t.availableBlocks ?? null,
   }))
 }
 
@@ -510,7 +514,7 @@ export function findMismatchedTeachers(
  * Describes a detected change in teacher data between snapshot and current state
  */
 export interface TeacherChange {
-  type: 'renamed' | 'status_changed' | 'eligibility_changed'
+  type: 'renamed' | 'status_changed' | 'eligibility_changed' | 'availability_changed'
   teacherId: string
   oldName: string
   newName: string
@@ -524,6 +528,7 @@ export interface TeacherChangeResult {
   hasChanges: boolean
   renames: Array<{ id: string; oldName: string; newName: string }>
   eligibilityChanges: Array<{ id: string; name: string; oldValue: boolean; newValue: boolean }>
+  availabilityChanges: Array<{ id: string; name: string; details: string; availableDays?: string[] | null; availableBlocks?: number[] | null }>
   changes: TeacherChange[]
   summary: string
 }
@@ -536,11 +541,12 @@ export interface TeacherChangeResult {
  */
 export function detectTeacherChanges(
   snapshot: TeacherSnapshot[],
-  currentTeachers: Array<{ id: string; name: string; status: string; can_supervise_study_hall?: boolean }>
+  currentTeachers: Array<{ id: string; name: string; status: string; can_supervise_study_hall?: boolean; available_days?: string[] | null; available_blocks?: number[] | null }>
 ): TeacherChangeResult {
   const changes: TeacherChange[] = []
   const renames: Array<{ id: string; oldName: string; newName: string }> = []
   const eligibilityChanges: Array<{ id: string; name: string; oldValue: boolean; newValue: boolean }> = []
+  const availabilityChanges: Array<{ id: string; name: string; details: string; availableDays?: string[] | null; availableBlocks?: number[] | null }> = []
 
   // Build map of current teachers by ID
   const currentById = new Map(currentTeachers.map(t => [t.id, t]))
@@ -580,6 +586,32 @@ export function detectTeacherChanges(
         details: currentEligibility ? 'now eligible for study hall' : 'now excluded from study hall',
       })
     }
+
+    // Detect availability changes
+    const snapDays = JSON.stringify(snap.availableDays ?? null)
+    const currentDays = JSON.stringify(current.available_days ?? null)
+    const snapBlocks = JSON.stringify(snap.availableBlocks ?? null)
+    const currentBlocks = JSON.stringify(current.available_blocks ?? null)
+
+    if (snapDays !== currentDays || snapBlocks !== currentBlocks) {
+      const details: string[] = []
+      if (snapDays !== currentDays) details.push('available days changed')
+      if (snapBlocks !== currentBlocks) details.push('available blocks changed')
+      availabilityChanges.push({
+        id: snap.id,
+        name: current.name,
+        details: details.join(', '),
+        availableDays: current.available_days ?? null,
+        availableBlocks: current.available_blocks ?? null,
+      })
+      changes.push({
+        type: 'availability_changed',
+        teacherId: snap.id,
+        oldName: snap.name,
+        newName: current.name,
+        details: details.join(', '),
+      })
+    }
   }
 
   // Build summary
@@ -590,11 +622,15 @@ export function detectTeacherChanges(
   if (eligibilityChanges.length > 0) {
     parts.push(`${eligibilityChanges.length} eligibility changed`)
   }
+  if (availabilityChanges.length > 0) {
+    parts.push(`${availabilityChanges.length} availability changed`)
+  }
 
   return {
-    hasChanges: renames.length > 0 || eligibilityChanges.length > 0,
+    hasChanges: renames.length > 0 || eligibilityChanges.length > 0 || availabilityChanges.length > 0,
     renames,
     eligibilityChanges,
+    availabilityChanges,
     changes,
     summary: parts.join(', '),
   }
@@ -656,14 +692,18 @@ export function applyTeacherRenamesToSnapshot(
 export function applyTeacherChangesToSnapshot(
   snapshot: TeacherSnapshot[],
   renames: Array<{ oldName: string; newName: string }>,
-  eligibilityChanges: Array<{ id: string; newValue: boolean }>
+  eligibilityChanges: Array<{ id: string; newValue: boolean }>,
+  availabilityChanges?: Array<{ id: string; availableDays?: string[] | null; availableBlocks?: number[] | null }>
 ): TeacherSnapshot[] {
   const renameMap = new Map(renames.map(r => [r.oldName, r.newName]))
   const eligibilityMap = new Map(eligibilityChanges.map(e => [e.id, e.newValue]))
+  const availabilityMap = new Map(availabilityChanges?.map(a => [a.id, a]) || [])
 
   return snapshot.map(t => ({
     ...t,
     name: renameMap.get(t.name) ?? t.name,
     canSuperviseStudyHall: eligibilityMap.has(t.id) ? eligibilityMap.get(t.id)! : t.canSuperviseStudyHall,
+    availableDays: availabilityMap.has(t.id) ? availabilityMap.get(t.id)!.availableDays : t.availableDays,
+    availableBlocks: availabilityMap.has(t.id) ? availabilityMap.get(t.id)!.availableBlocks : t.availableBlocks,
   }))
 }

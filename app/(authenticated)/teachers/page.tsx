@@ -44,6 +44,7 @@ import {
 import { Trash2, Loader2, RotateCcw, ChevronDown, Archive } from "lucide-react"
 import toast from "@/lib/toast"
 import { TEACHER_STATUS_FULL_TIME, TEACHER_STATUS_PART_TIME, type TeacherStatus } from "@/lib/schedule-utils"
+import { TeacherAvailabilityPopover } from "@/components/TeacherAvailabilityPopover"
 
 interface Teacher {
   id: string
@@ -51,6 +52,8 @@ interface Teacher {
   status: TeacherStatus
   can_supervise_study_hall: boolean
   notes: string | null
+  available_days: string[] | null
+  available_blocks: number[] | null
 }
 
 interface ArchiveStatus {
@@ -158,6 +161,38 @@ export default function TeachersPage() {
     }
   }
 
+  async function updateTeacherAvailability(
+    id: string,
+    days: string[] | null,
+    blocks: number[] | null
+  ) {
+    setSavingId(id)
+    try {
+      const res = await fetch(`/api/teachers/${id}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          available_days: days,
+          available_blocks: blocks,
+        }),
+      })
+      if (res.ok) {
+        const updated = await res.json()
+        setTeachers((prev) =>
+          prev.map((t) => (t.id === id ? updated : t))
+        )
+        toast.success("Availability saved")
+      } else {
+        const error = await res.json()
+        toast.error(error.error || "Failed to save availability")
+      }
+    } catch (error) {
+      toast.error("Failed to save availability")
+    } finally {
+      setSavingId(null)
+    }
+  }
+
   async function createTeacher() {
     if (!newTeacherName.trim()) return
 
@@ -240,6 +275,7 @@ export default function TeachersPage() {
                 <TableHead className="w-[250px]">Name</TableHead>
                 <TableHead className="w-[150px]">Status</TableHead>
                 <TableHead className="w-[140px]">Exclude from Study Hall</TableHead>
+                <TableHead className="w-[100px]">Availability</TableHead>
                 <TableHead>Notes</TableHead>
                 <TableHead className="w-[60px]"></TableHead>
               </TableRow>
@@ -283,6 +319,15 @@ export default function TeachersPage() {
                             "can_supervise_study_hall",
                             !checked  // checked = excluded, so can_supervise = !checked
                           )
+                        }
+                      />
+                    </TableCell>
+                    <TableCell>
+                      <TeacherAvailabilityPopover
+                        availableDays={teacher.available_days}
+                        availableBlocks={teacher.available_blocks}
+                        onSave={(days, blocks) =>
+                          updateTeacherAvailability(teacher.id, days, blocks)
                         }
                       />
                     </TableCell>

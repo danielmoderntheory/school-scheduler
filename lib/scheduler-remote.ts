@@ -160,6 +160,8 @@ export async function generateSchedulesRemote(
         name: t.name,
         status: t.status,
         canSuperviseStudyHall: t.canSuperviseStudyHall,  // null = eligible, false = excluded
+        availableDays: t.availableDays || null,
+        availableBlocks: t.availableBlocks || null,
       })),
       classes: classes.map(c => ({
         teacher: c.teacher,

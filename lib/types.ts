@@ -8,6 +8,8 @@ export interface Teacher {
   status: EmploymentStatus;
   canSuperviseStudyHall?: boolean;
   notes?: string;
+  availableDays?: string[] | null;
+  availableBlocks?: number[] | null;
 }
 
 export interface Restriction {

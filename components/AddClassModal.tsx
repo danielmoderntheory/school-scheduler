@@ -43,6 +43,8 @@ interface Teacher {
   id: string
   name: string
   status: string
+  available_days?: string[] | null
+  available_blocks?: number[] | null
 }
 
 interface Grade {
@@ -666,6 +668,31 @@ export function AddClassModal({
     return renderRegularAssign()
   }
 
+  // Compute combined teacher availability (intersection of all assigned teachers)
+  function getCombinedTeacherAvailability(): { days: string[] | null; blocks: number[] | null } {
+    const assignedTeacherIds = assignments.map(a => a.teacherId).filter(Boolean)
+    if (assignedTeacherIds.length === 0) return { days: null, blocks: null }
+
+    let combinedDays: string[] | null = null
+    let combinedBlocks: number[] | null = null
+
+    for (const tid of assignedTeacherIds) {
+      const t = teachers.find(t => t.id === tid)
+      if (!t) continue
+      if (t.available_days) {
+        combinedDays = combinedDays
+          ? combinedDays.filter(d => t.available_days!.includes(d))
+          : [...t.available_days]
+      }
+      if (t.available_blocks) {
+        combinedBlocks = combinedBlocks
+          ? combinedBlocks.filter(b => t.available_blocks!.includes(b))
+          : [...t.available_blocks]
+      }
+    }
+    return { days: combinedDays, blocks: combinedBlocks }
+  }
+
   function renderRegularAssign() {
     const isCotaught = assignments.length > 1
     // Use the first assignment's restrictions as the shared restrictions
@@ -775,6 +802,8 @@ export function AddClassModal({
                   assignments.map((a) => ({ ...a, restrictions }))
                 )
               }}
+              teacherAvailableDays={getCombinedTeacherAvailability().days}
+              teacherAvailableBlocks={getCombinedTeacherAvailability().blocks}
             />
           </div>
           <p className="text-xs text-muted-foreground">
@@ -1023,6 +1052,8 @@ export function AddClassModal({
             <RestrictionEditor
               restrictions={sharedRestrictions}
               onSave={setSharedRestrictions}
+              teacherAvailableDays={getCombinedTeacherAvailability().days}
+              teacherAvailableBlocks={getCombinedTeacherAvailability().blocks}
             />
           </div>
           <p className="text-xs text-muted-foreground">
@@ -1564,9 +1595,11 @@ function TeacherSelect({ teachers, value, onChange, onCreatePending, onUpdatePen
 interface RestrictionEditorProps {
   restrictions: Restriction[]
   onSave: (restrictions: Restriction[]) => void
+  teacherAvailableDays?: string[] | null
+  teacherAvailableBlocks?: number[] | null
 }
 
-function RestrictionEditor({ restrictions, onSave }: RestrictionEditorProps) {
+function RestrictionEditor({ restrictions, onSave, teacherAvailableDays, teacherAvailableBlocks }: RestrictionEditorProps) {
   const [open, setOpen] = useState(false)
   const [fixedSlots, setFixedSlots] = useState<{ day: string; block: number }[]>([])
   const [availableDaysOnly, setAvailableDaysOnly] = useState<string[]>([])
@@ -1696,10 +1729,11 @@ function RestrictionEditor({ restrictions, onSave }: RestrictionEditorProps) {
                   <th className="w-7 h-7 border-r border-b"></th>
                   {DAYS.map((day) => {
                     const isDayAvailable = availableDaysOnly.length === 0 || availableDaysOnly.includes(day)
+                    const teacherDayAvailable = !teacherAvailableDays || teacherAvailableDays.includes(day)
                     return (
                       <th key={day} className={cn(
                         "w-7 h-7 text-center border-r border-b last:border-r-0 font-medium",
-                        isDayAvailable ? "text-muted-foreground" : "text-slate-300"
+                        isDayAvailable && teacherDayAvailable ? "text-muted-foreground" : "text-slate-300"
                       )}>
                         {day.slice(0, 2)}
                       </th>
@@ -1723,11 +1757,15 @@ function RestrictionEditor({ restrictions, onSave }: RestrictionEditorProps) {
                         const isImplicitlySelected = isDayInAvailable && !dayHasExplicitSlots
                         const isSelected = isExplicitlySelected || isImplicitlySelected
                         const isDayAvailable = availableDaysOnly.length === 0 || isDayInAvailable
+                        // Check teacher availability
+                        const teacherDayOk = !teacherAvailableDays || teacherAvailableDays.includes(day)
+                        const teacherBlockOk = !teacherAvailableBlocks || teacherAvailableBlocks.includes(block)
+                        const teacherSlotAvailable = teacherDayOk && teacherBlockOk
                         return (
                           <td
                             key={day}
                             onClick={() => {
-                              if (!isDayAvailable) return // Can't select slots on unavailable days
+                              if (!isDayAvailable || !teacherSlotAvailable) return // Can't select slots on unavailable days/blocks
 
                               if (isDayInAvailable) {
                                 // Day is in available days
@@ -1758,11 +1796,13 @@ function RestrictionEditor({ restrictions, onSave }: RestrictionEditorProps) {
                             className={cn(
                               "w-7 h-7 text-center border-r last:border-r-0 transition-colors",
                               !isLastRow && "border-b",
-                              isSelected
-                                ? "bg-violet-500 text-white hover:bg-violet-600 cursor-pointer"
-                                : isDayAvailable
-                                  ? "hover:bg-violet-50 cursor-pointer"
-                                  : "bg-slate-100 cursor-not-allowed"
+                              !teacherSlotAvailable
+                                ? "bg-orange-50 cursor-not-allowed"
+                                : isSelected
+                                  ? "bg-violet-500 text-white hover:bg-violet-600 cursor-pointer"
+                                  : isDayAvailable
+                                    ? "hover:bg-violet-50 cursor-pointer"
+                                    : "bg-slate-100 cursor-not-allowed"
                             )}
                           >
                             {isSelected && <Check className="h-3.5 w-3.5 mx-auto" />}

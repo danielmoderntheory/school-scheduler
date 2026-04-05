@@ -1040,7 +1040,7 @@ export default function HistoryDetailPage() {
         // Detect teacher renames first
         let teacherResult: TeacherChangeResult | null = null
         if (teachersRes.ok && generation.stats?.teachers_snapshot) {
-          const currentTeachers: Array<{ id: string; name: string; status: string; can_supervise_study_hall?: boolean }> = await teachersRes.json()
+          const currentTeachers: Array<{ id: string; name: string; status: string; can_supervise_study_hall?: boolean; available_days?: string[] | null; available_blocks?: number[] | null }> = await teachersRes.json()
           teacherResult = detectTeacherChanges(generation.stats.teachers_snapshot, currentTeachers)
           setTeacherChanges(teacherResult)
         } else {
@@ -1162,7 +1162,8 @@ export default function HistoryDetailPage() {
         teachers_snapshot: applyTeacherChangesToSnapshot(
           generation.stats!.teachers_snapshot!,
           teacherChanges.renames,
-          teacherChanges.eligibilityChanges
+          teacherChanges.eligibilityChanges,
+          teacherChanges.availabilityChanges
         ),
         classes_snapshot: teacherChanges.renames.length > 0
           ? generation.stats!.classes_snapshot!.map(c => ({

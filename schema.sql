@@ -14,6 +14,8 @@ CREATE TABLE teachers (
     status TEXT NOT NULL CHECK (status IN ('full-time', 'part-time')),
     can_supervise_study_hall BOOLEAN DEFAULT false,
     notes TEXT,
+    available_days JSONB DEFAULT NULL,
+    available_blocks JSONB DEFAULT NULL,
     created_at TIMESTAMPTZ DEFAULT NOW(),
     updated_at TIMESTAMPTZ DEFAULT NOW(),
     deleted_at TIMESTAMPTZ DEFAULT NULL

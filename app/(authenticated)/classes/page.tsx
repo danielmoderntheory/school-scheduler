@@ -21,14 +21,15 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
-import { AlertTriangle, ChevronDown, ChevronUp, Loader2, Plus, X, Clock, Users, UserX, Upload, Download, Check, History, Star, Lock, Play, MoreVertical, Pencil, Settings2, Trash2, Undo2 } from "lucide-react"
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
+import { AlertTriangle, ChevronDown, ChevronUp, Loader2, Plus, X, Clock, Users, UserX, Upload, Download, Check, History, Star, Lock, Play, MoreVertical, Pencil, Settings2, Trash2, Undo2, User } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { GradeSelector, formatGradeDisplay } from "@/components/GradeSelector"
 import { AddClassModal } from "@/components/AddClassModal"
 import { LocalQuarterSelector } from "@/components/LocalQuarterSelector"
 import { GenerateModal } from "@/components/GenerateModal"
 import { useQuarterSelection } from "@/lib/hooks/useQuarterSelection"
-import { TEACHER_STATUS_FULL_TIME, isPartTime, calculateGradeBlocks, buildCotaughtGroups, type TeacherStatus } from "@/lib/schedule-utils"
+import { TEACHER_STATUS_FULL_TIME, isPartTime, isFullTime, calculateGradeBlocks, buildCotaughtGroups, type TeacherStatus } from "@/lib/schedule-utils"
 import type { SchedulingRule } from "@/lib/scheduler-remote"
 import toast from "@/lib/toast"
 
@@ -46,6 +47,8 @@ interface Teacher {
   id: string
   name: string
   status: TeacherStatus
+  available_days?: string[] | null
+  available_blocks?: number[] | null
 }
 
 interface Grade {
@@ -1839,8 +1842,9 @@ function ClassesPageContent() {
             <Plus className="h-4 w-4" />
             Add Class
           </Button>
-          {!showLastRunNotice && !fromSchedule && (
+          {!fromSchedule && (
             <Button
+              variant={showLastRunNotice ? "outline" : "default"}
               onClick={() => {
                 if (classes.length === 0) {
                   toast.error("No classes configured for this quarter. Add classes first.")
@@ -1853,10 +1857,10 @@ function ClassesPageContent() {
                 setShowGenerateModal(true)
               }}
               disabled={incompleteCount > 0 || classes.length === 0}
-              className="gap-2 h-9 bg-emerald-500 hover:bg-emerald-600 text-white disabled:bg-slate-300"
+              className={cn("gap-2 h-9", !showLastRunNotice && "bg-emerald-500 hover:bg-emerald-600 text-white disabled:bg-slate-300")}
             >
               <Play className="h-4 w-4" />
-              Generate Schedule
+              {showLastRunNotice ? "Generate New" : "Generate Schedule"}
             </Button>
           )}
           <DropdownMenu>
@@ -2406,29 +2410,173 @@ Maria\t6th-11th Elective\tSpanish 101\t1\tMon Block 5`}
             const isUnder = count < 25
             const shortName = grade.display_name.replace(' Grade', '').replace('Kindergarten', 'K')
 
+            // Get classes for this grade
+            const gradeClasses = classes.filter(cls => {
+              const classGradeIds = cls.grade_ids?.length ? cls.grade_ids : (cls.grade_id ? [cls.grade_id] : [])
+              return classGradeIds.includes(grade.id)
+            })
+
             return (
-              <div
-                key={grade.id}
-                title={`${grade.display_name}: ${count}/25 blocks${studyHallGrades.includes(grade.display_name) ? ' (includes study hall)' : ''}`}
-                className={cn(
-                  "flex items-center gap-1 px-2 py-0.5 rounded text-xs font-medium flex-shrink-0",
-                  isOver && "bg-red-100 text-red-700",
-                  isFull && "bg-emerald-100 text-emerald-700",
-                  isUnder && "bg-amber-50 text-amber-600"
-                )}
-              >
-                <span>{shortName}</span>
-                <span className={cn(
-                  "text-[10px]",
-                  isOver && "text-red-500",
-                  isFull && "text-emerald-500",
-                  isUnder && "text-amber-400"
-                )}>
-                  {count}
-                </span>
-              </div>
+              <Popover key={grade.id}>
+                <PopoverTrigger asChild>
+                  <button
+                    title={`${grade.display_name}: ${count}/25 blocks${studyHallGrades.includes(grade.display_name) ? ' (includes study hall)' : ''}`}
+                    className={cn(
+                      "flex items-center gap-1 px-2 py-0.5 rounded text-xs font-medium flex-shrink-0 cursor-pointer hover:ring-1 hover:ring-slate-300 transition-all",
+                      isOver && "bg-red-100 text-red-700",
+                      isFull && "bg-emerald-100 text-emerald-700",
+                      isUnder && "bg-amber-50 text-amber-600"
+                    )}
+                  >
+                    <span>{shortName}</span>
+                    <span className={cn(
+                      "text-[10px]",
+                      isOver && "text-red-500",
+                      isFull && "text-emerald-500",
+                      isUnder && "text-amber-400"
+                    )}>
+                      {count}
+                    </span>
+                  </button>
+                </PopoverTrigger>
+                <PopoverContent align="start" className="w-64 p-0">
+                  <div className="px-3 py-2 border-b border-slate-100">
+                    <div className="flex items-center justify-between">
+                      <span className="text-xs font-semibold text-slate-700">{grade.display_name}</span>
+                      <span className={cn(
+                        "text-xs font-medium",
+                        isOver && "text-red-600",
+                        isFull && "text-emerald-600",
+                        isUnder && "text-amber-600"
+                      )}>
+                        {count}/25 blocks
+                      </span>
+                    </div>
+                  </div>
+                  <div className="max-h-60 overflow-y-auto">
+                    {gradeClasses.length === 0 ? (
+                      <div className="px-3 py-3 text-xs text-slate-400 text-center">No classes assigned</div>
+                    ) : (
+                      <div className="py-1">
+                        {gradeClasses.map(cls => {
+                          const teacher = teachers.find(t => t.id === cls.teacher_id)
+                          const subject = subjects.find(s => s.id === cls.subject_id)
+                          return (
+                            <div key={cls.id} className="px-3 py-1.5 flex items-center justify-between text-xs hover:bg-slate-50">
+                              <div className="min-w-0">
+                                <span className="font-medium text-slate-700">{subject?.name || '—'}</span>
+                                <span className="text-slate-400 ml-1.5">{teacher?.name || '(unassigned)'}</span>
+                              </div>
+                              <span className="text-slate-400 ml-2 flex-shrink-0">{cls.days_per_week}×</span>
+                            </div>
+                          )
+                        })}
+                        {studyHallGrades.includes(grade.display_name) && (
+                          <div className="px-3 py-1.5 flex items-center justify-between text-xs text-slate-400 italic">
+                            <span>Study Hall</span>
+                            <span className="ml-2 flex-shrink-0">1×</span>
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                </PopoverContent>
+              </Popover>
             )
           })}
+
+          {/* Teacher allocation check */}
+          {(() => {
+            const teacherBlocks = new Map<string, number>()
+            for (const cls of classes) {
+              if (!cls.teacher_id) continue
+              teacherBlocks.set(cls.teacher_id, (teacherBlocks.get(cls.teacher_id) || 0) + cls.days_per_week)
+            }
+            const fullTimeTeachers = teachers.filter(t => isFullTime(t.status))
+            const hasIssue = fullTimeTeachers.some(t => {
+              const maxBlocks = (t.available_days?.length ?? 5) * (t.available_blocks?.length ?? 5)
+              const blocks = teacherBlocks.get(t.id) || 0
+              return blocks > maxBlocks || blocks < maxBlocks - 5
+            })
+
+            return (
+              <>
+                <div className="w-px h-4 bg-slate-300 mx-2 flex-shrink-0" />
+                <Popover>
+                  <PopoverTrigger asChild>
+                    <button
+                      className={cn(
+                        "flex items-center gap-1.5 px-2 py-0.5 rounded text-xs font-medium transition-colors flex-shrink-0",
+                        hasIssue
+                          ? "bg-amber-50 text-amber-600 hover:bg-amber-100"
+                          : "bg-slate-100 text-slate-600 hover:bg-slate-200"
+                      )}
+                      title="Teacher block allocation"
+                    >
+                      <User className="h-3 w-3" />
+                      <span>Teachers</span>
+                      {hasIssue && <AlertTriangle className="h-3 w-3" />}
+                    </button>
+                  </PopoverTrigger>
+                  <PopoverContent align="end" className="w-72 p-0">
+                    <div className="px-3 py-2 border-b border-slate-100">
+                      <span className="text-xs font-semibold text-slate-700">Teacher Block Allocation</span>
+                    </div>
+                    <div className="max-h-72 overflow-y-auto">
+                      {fullTimeTeachers.length > 0 && (
+                        <div className="py-1">
+                          <div className="px-3 py-1 text-[10px] font-semibold text-slate-400 uppercase tracking-wider">Full-time</div>
+                          {fullTimeTeachers
+                            .sort((a, b) => a.name.localeCompare(b.name))
+                            .map(t => {
+                              const blocks = teacherBlocks.get(t.id) || 0
+                              const maxBlocks = (t.available_days?.length ?? 5) * (t.available_blocks?.length ?? 5)
+                              const isOver = blocks > maxBlocks
+                              const isUnderAllocated = blocks < maxBlocks - 5
+                              return (
+                                <div key={t.id} className="px-3 py-1.5 flex items-center justify-between text-xs hover:bg-slate-50">
+                                  <span className="text-slate-700 truncate">{t.name}</span>
+                                  <div className="flex items-center gap-1.5 ml-2 flex-shrink-0">
+                                    <span className={cn(
+                                      "font-medium",
+                                      isOver && "text-red-600",
+                                      isUnderAllocated && "text-amber-600",
+                                      !isOver && !isUnderAllocated && "text-emerald-600"
+                                    )}>
+                                      {blocks}/{maxBlocks}
+                                    </span>
+                                    {isOver && <span className="text-red-500 text-[10px]">over</span>}
+                                    {isUnderAllocated && <span className="text-amber-500 text-[10px]">low</span>}
+                                  </div>
+                                </div>
+                              )
+                            })}
+                        </div>
+                      )}
+                      {teachers.filter(t => isPartTime(t.status)).length > 0 && (
+                        <div className="py-1 border-t border-slate-100">
+                          <div className="px-3 py-1 text-[10px] font-semibold text-slate-400 uppercase tracking-wider">Part-time</div>
+                          {teachers
+                            .filter(t => isPartTime(t.status))
+                            .sort((a, b) => a.name.localeCompare(b.name))
+                            .map(t => {
+                              const blocks = teacherBlocks.get(t.id) || 0
+                              const maxBlocks = (t.available_days?.length ?? 5) * (t.available_blocks?.length ?? 5)
+                              return (
+                                <div key={t.id} className="px-3 py-1.5 flex items-center justify-between text-xs hover:bg-slate-50">
+                                  <span className="text-slate-500 truncate">{t.name}</span>
+                                  <span className="text-slate-400 font-medium ml-2 flex-shrink-0">{blocks}/{maxBlocks}</span>
+                                </div>
+                              )
+                            })}
+                        </div>
+                      )}
+                    </div>
+                  </PopoverContent>
+                </Popover>
+              </>
+            )
+          })()}
 
           {/* Co-taught indicator */}
           {cotaughtGroups.length > 0 && (
@@ -2551,7 +2699,7 @@ Maria\t6th-11th Elective\tSpanish 101\t1\tMon Block 5`}
         </div>
       )}
 
-      <div className="relative border rounded-lg overflow-hidden bg-white shadow-sm flex-1 flex flex-col min-h-[600px]">
+      <div className="relative border rounded-lg overflow-hidden bg-white shadow-sm flex-1 flex flex-col min-h-0">
         {classesLoading && (
           <div className="absolute inset-0 z-20 bg-white/60 flex justify-center pt-[15%]">
             <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
@@ -2757,6 +2905,8 @@ function ClassRow({
         <RestrictionsCell
           restrictions={cls.restrictions}
           onChange={(r) => onUpdateRestrictions(cls.id, r)}
+          teacherAvailableDays={teachers.find(t => t.id === cls.teacher_id)?.available_days}
+          teacherAvailableBlocks={teachers.find(t => t.id === cls.teacher_id)?.available_blocks}
         />
       </td>
       <td className="px-1 py-1">
@@ -3072,9 +3222,11 @@ function NumberCell({ value, onChange, min = 1, max = 5 }: NumberCellProps) {
 interface RestrictionsCellProps {
   restrictions: Restriction[]
   onChange: (restrictions: Restriction[]) => void
+  teacherAvailableDays?: string[] | null
+  teacherAvailableBlocks?: number[] | null
 }
 
-function RestrictionsCell({ restrictions, onChange }: RestrictionsCellProps) {
+function RestrictionsCell({ restrictions, onChange, teacherAvailableDays, teacherAvailableBlocks }: RestrictionsCellProps) {
   const [editing, setEditing] = useState(false)
   const [selectedDays, setSelectedDays] = useState<string[]>([])
   const [selectedBlocks, setSelectedBlocks] = useState<number[]>([])
@@ -3274,10 +3426,11 @@ function RestrictionsCell({ restrictions, onChange }: RestrictionsCellProps) {
                   <th className="w-7 h-7 border-r border-b"></th>
                   {DAYS.map((day) => {
                     const isDayAvailable = availableDaysOnly.length === 0 || availableDaysOnly.includes(day)
+                    const teacherDayAvailable = !teacherAvailableDays || teacherAvailableDays.includes(day)
                     return (
                       <th key={day} className={cn(
                         "w-7 h-7 text-center border-r border-b last:border-r-0 font-medium",
-                        isDayAvailable ? "text-muted-foreground" : "text-slate-300"
+                        isDayAvailable && teacherDayAvailable ? "text-muted-foreground" : "text-slate-300"
                       )}>
                         {day.slice(0, 2)}
                       </th>
@@ -3299,11 +3452,15 @@ function RestrictionsCell({ restrictions, onChange }: RestrictionsCellProps) {
                         const isImplicitlySelected = isDayInAvailable && !dayHasExplicitSlots
                         const isSelected = isExplicitlySelected || isImplicitlySelected
                         const isDayAvailable = availableDaysOnly.length === 0 || isDayInAvailable
+                        // Check teacher availability
+                        const teacherDayOk = !teacherAvailableDays || teacherAvailableDays.includes(day)
+                        const teacherBlockOk = !teacherAvailableBlocks || teacherAvailableBlocks.includes(block)
+                        const teacherSlotAvailable = teacherDayOk && teacherBlockOk
                         return (
                           <td
                             key={day}
                             onClick={() => {
-                              if (!isDayAvailable) return // Can't select slots on unavailable days
+                              if (!isDayAvailable || !teacherSlotAvailable) return // Can't select slots on unavailable days/blocks
 
                               if (isDayInAvailable) {
                                 // Day is in available days
@@ -3343,11 +3500,13 @@ function RestrictionsCell({ restrictions, onChange }: RestrictionsCellProps) {
                             className={cn(
                               "w-7 h-7 text-center border-r last:border-r-0 transition-colors",
                               !isLastRow && "border-b",
-                              isSelected
-                                ? "bg-violet-500 text-white hover:bg-violet-600 cursor-pointer"
-                                : isDayAvailable
-                                  ? "hover:bg-violet-50 cursor-pointer"
-                                  : "bg-slate-100 cursor-not-allowed"
+                              !teacherSlotAvailable
+                                ? "bg-orange-50 cursor-not-allowed"
+                                : isSelected
+                                  ? "bg-violet-500 text-white hover:bg-violet-600 cursor-pointer"
+                                  : isDayAvailable
+                                    ? "hover:bg-violet-50 cursor-pointer"
+                                    : "bg-slate-100 cursor-not-allowed"
                             )}
                           >
                             {isSelected && <Check className="h-3.5 w-3.5 mx-auto" />}

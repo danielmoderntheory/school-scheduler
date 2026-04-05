@@ -21,12 +21,14 @@ export async function POST(request: NextRequest) {
 
   try {
     const [data] = await sql`
-      INSERT INTO teachers (name, status, can_supervise_study_hall, notes)
+      INSERT INTO teachers (name, status, can_supervise_study_hall, notes, available_days, available_blocks)
       VALUES (
         ${body.name},
         ${body.status || TEACHER_STATUS_FULL_TIME},
         ${body.can_supervise_study_hall || false},
-        ${body.notes || null}
+        ${body.notes || null},
+        ${body.available_days !== undefined ? JSON.stringify(body.available_days) : null},
+        ${body.available_blocks !== undefined ? JSON.stringify(body.available_blocks) : null}
       )
       RETURNING *
     `

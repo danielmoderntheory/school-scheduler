@@ -57,6 +57,8 @@ class Teacher(BaseModel):
     name: str
     status: str = "full-time"
     canSuperviseStudyHall: Optional[bool] = None  # None = eligible, False = excluded
+    availableDays: Optional[list[str]] = None
+    availableBlocks: Optional[list[int]] = None
 
 
 class ClassEntry(BaseModel):

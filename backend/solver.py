@@ -93,6 +93,8 @@ class Teacher:
     name: str
     status: str  # 'full-time' or 'part-time'
     can_supervise_study_hall: Optional[bool] = None  # None/True = eligible, False = excluded
+    available_days: Optional[list] = None   # None = all days available
+    available_blocks: Optional[list] = None  # None = all blocks available
 
 
 @dataclass
@@ -269,7 +271,8 @@ def build_sessions(
     classes: list[ClassEntry],
     locked_grade_slots: dict[str, set[int]] = None,
     grades: list[str] = None,
-    locked_grade_subject_days: dict[tuple[str, str], set[int]] = None
+    locked_grade_subject_days: dict[tuple[str, str], set[int]] = None,
+    teachers: list[Teacher] = None
 ) -> list[Session]:
     """Convert classes to sessions (one per day of instruction).
 
@@ -279,6 +282,7 @@ def build_sessions(
         grades: List of grade names from database (for grade_blocked_slots initialization)
         locked_grade_subject_days: Dict mapping (grade, subject) to set of day indices where
             that subject is already taught by a locked teacher (to prevent duplicate subjects per day)
+        teachers: List of Teacher objects (used to intersect teacher availability into valid slots)
 
     Sessions are sorted by constraint level (most constrained first):
     1. Fixed slots first (only 1 valid slot)
@@ -300,6 +304,16 @@ def build_sessions(
     """
     sessions = []
     session_id = 0
+
+    # Build teacher availability lookup: teacher_name -> set of valid slot indices
+    # This ensures teacher-level availability is intersected with class-level restrictions
+    teacher_valid_slots: dict[str, set[int]] = {}
+    if teachers:
+        for t in teachers:
+            if t.available_days or t.available_blocks:
+                days = t.available_days or DAYS
+                blocks = t.available_blocks or BLOCKS
+                teacher_valid_slots[t.name] = set(get_valid_slots(days, blocks))
 
     # First pass: count sessions per teacher (teacher load)
     teacher_session_count: dict[str, int] = {}
@@ -367,6 +381,12 @@ def build_sessions(
                     session_id += 1
         else:
             valid_slots = get_valid_slots(cls.available_days, cls.available_blocks)
+
+            # Intersect with teacher-level availability (defense-in-depth:
+            # frontend also pre-intersects, but solver should be self-contained)
+            if cls.teacher in teacher_valid_slots:
+                teacher_slots = teacher_valid_slots[cls.teacher]
+                valid_slots = [s for s in valid_slots if s in teacher_slots]
 
             # For regular (non-elective) classes, remove slots blocked by:
             # 1. Electives with fixed slots
@@ -1355,7 +1375,8 @@ def add_study_halls(teacher_schedules: dict, grade_schedules: dict,
                     eligible_teachers: list[str],
                     preserve_existing: bool = True,
                     rules: list[dict] = None,
-                    grades: list[str] = None) -> list[StudyHallAssignment]:
+                    grades: list[str] = None,
+                    teacher_availability: dict = None) -> list[StudyHallAssignment]:
     """Assign study halls to eligible teachers with open blocks.
 
     Strategy:
@@ -1445,6 +1466,12 @@ def add_study_halls(teacher_schedules: dict, grade_schedules: dict,
                     # Teacher must be free
                     if teacher_schedules[teacher][day][block] is not None:
                         continue
+
+                    # Teacher must be available on this day/block
+                    if teacher_availability and teacher in teacher_availability:
+                        slot = day_block_to_slot(DAYS.index(day), BLOCKS.index(block))
+                        if slot not in teacher_availability[teacher]:
+                            continue
 
                     # All grades in group must be free
                     grades_free = all(
@@ -1669,10 +1696,20 @@ def generate_schedules(
         Teacher(
             name=t['name'],
             status=t.get('status', 'full-time'),
-            can_supervise_study_hall=t.get('canSuperviseStudyHall')  # Keep None as-is
+            can_supervise_study_hall=t.get('canSuperviseStudyHall'),  # Keep None as-is
+            available_days=t.get('availableDays'),
+            available_blocks=t.get('availableBlocks'),
         )
         for t in teachers
     ]
+
+    # Build teacher availability lookup for study hall filtering
+    teacher_availability = {}
+    for t in teacher_objs:
+        if t.available_days or t.available_blocks:
+            days = t.available_days or DAYS
+            blocks = t.available_blocks or BLOCKS
+            teacher_availability[t.name] = set(get_valid_slots(days, blocks))
 
     def make_grade_display(grades_list: list) -> str:
         """Create a display name from a list of grades."""
@@ -1791,7 +1828,8 @@ def generate_schedules(
         classes_to_schedule,
         locked_grade_slots if is_partial_regen else None,
         active_grades,
-        locked_grade_subject_days if is_partial_regen else None
+        locked_grade_subject_days if is_partial_regen else None,
+        teacher_objs
     )
 
 
@@ -1973,7 +2011,7 @@ def generate_schedules(
             # Add study halls (only if study_hall_distribution rule is enabled and not skipped)
             # skip_study_halls=True means skip entirely (user will reassign after saving)
             if is_rule_enabled(rules, 'study_hall_distribution') and not skip_study_halls:
-                sh_assignments = add_study_halls(ts, gs, eligible, preserve_existing=True, rules=rules, grades=active_grades)
+                sh_assignments = add_study_halls(ts, gs, eligible, preserve_existing=True, rules=rules, grades=active_grades, teacher_availability=teacher_availability)
                 sh_placed = sum(1 for sh in sh_assignments if sh.teacher is not None)
             else:
                 sh_assignments = []

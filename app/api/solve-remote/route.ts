@@ -21,6 +21,8 @@ interface SolveRequest {
     name: string
     status: string
     canSuperviseStudyHall?: boolean
+    availableDays?: string[] | null
+    availableBlocks?: number[] | null
   }>
   classes: Array<{
     teacher: string

@@ -111,9 +111,31 @@ interface Session {
   cotaughtGroupId?: string; // Sessions with same grade+subject but different teachers
 }
 
-function buildSessions(classes: ClassEntry[]): Session[] {
+function buildSessions(classes: ClassEntry[], teachers?: Teacher[]): Session[] {
   const sessions: Session[] = [];
   let id = 0;
+
+  // Build teacher availability lookup for intersecting with class valid slots
+  const teacherValidSlots = new Map<string, Set<number>>();
+  if (teachers) {
+    for (const t of teachers) {
+      if (t.availableDays || t.availableBlocks) {
+        const days = t.availableDays || [...DAYS];
+        const blocks = t.availableBlocks || [...BLOCKS];
+        const slots = new Set<number>();
+        for (const day of days) {
+          const dayIdx = DAYS.indexOf(day);
+          if (dayIdx === -1) continue;
+          for (const block of blocks) {
+            const blockIdx = BLOCKS.indexOf(block);
+            if (blockIdx === -1) continue;
+            slots.add(dayIdx * BLOCKS.length + blockIdx);
+          }
+        }
+        teacherValidSlots.set(t.name, slots);
+      }
+    }
+  }
 
   classes.forEach(cls => {
     if (cls.fixedSlots && cls.fixedSlots.length > 0) {
@@ -133,10 +155,18 @@ function buildSessions(classes: ClassEntry[]): Session[] {
         });
       });
     } else {
-      const validSlots = getValidSlots(
+      let validSlots = getValidSlots(
         cls.availableDays || DAYS,
         cls.availableBlocks || BLOCKS
       );
+
+      // Intersect with teacher-level availability (defense-in-depth:
+      // frontend also pre-intersects, but solver should be self-contained)
+      const tSlots = teacherValidSlots.get(cls.teacher);
+      if (tSlots) {
+        validSlots = validSlots.filter(s => tSlots.has(s));
+      }
+
       for (let i = 0; i < cls.daysPerWeek; i++) {
         sessions.push({
           id: id++,
@@ -682,6 +712,7 @@ function addStudyHalls(
     shuffleAssignments?: boolean; // Randomize teacher/slot order for variety
     seed?: number; // Seed for reproducible randomization
     rules?: SchedulingRule[]; // Scheduling rules (for study_hall_grades config)
+    teacherAvailability?: Map<string, Set<number>>; // Teacher name → set of valid slot numbers
   }
 ): StudyHallAssignment[] {
   const {
@@ -690,7 +721,8 @@ function addStudyHalls(
     existingGradeStudyHallDays = new Map<string, Set<string>>(),
     shuffleAssignments = false,
     seed,
-    rules
+    rules,
+    teacherAvailability,
   } = options || {};
 
   // Get configured study hall grades from rules
@@ -784,6 +816,14 @@ function addStudyHalls(
 
         for (const block of blocksToTry) {
           if (teacherSchedules[teacher]?.[day]?.[block] !== null) continue;
+
+          // Check teacher availability
+          if (teacherAvailability?.has(teacher)) {
+            const dayIdx = DAYS.indexOf(day);
+            const blockIdx = BLOCKS.indexOf(block);
+            const slot = dayIdx * BLOCKS.length + blockIdx;
+            if (!teacherAvailability.get(teacher)!.has(slot)) continue;
+          }
 
           // Check if all grades are free using teacherSchedules (source of truth)
           const allFree = group.grades.every(g => isGradeFreeAtSlot(g, day, block));
@@ -1231,7 +1271,27 @@ export async function generateSchedules(
   // Teachers who had study halls before regeneration are automatically eligible
   const eligible = [...new Set([...baseEligible, ...teachersNeedingStudyHalls])];
 
-  const sessions = buildSessions(classesToSchedule);
+  // Build teacher availability lookup for study hall filtering
+  const teacherAvailability = new Map<string, Set<number>>();
+  for (const t of teachers) {
+    if (t.availableDays || t.availableBlocks) {
+      const days = t.availableDays || [...DAYS];
+      const blocks = t.availableBlocks || [...BLOCKS];
+      const validSlots = new Set<number>();
+      for (const day of days) {
+        const dayIdx = DAYS.indexOf(day);
+        if (dayIdx === -1) continue;
+        for (const block of blocks) {
+          const blockIdx = BLOCKS.indexOf(block);
+          if (blockIdx === -1) continue;
+          validSlots.add(dayIdx * BLOCKS.length + blockIdx);
+        }
+      }
+      teacherAvailability.set(t.name, validSlots);
+    }
+  }
+
+  const sessions = buildSessions(classesToSchedule, teachers);
 
   // Identify co-taught classes (same grade+subject, different teachers)
   // These must be scheduled at the same time slot
@@ -1449,6 +1509,7 @@ export async function generateSchedules(
         alreadyCoveredGroups,
         existingGradeStudyHallDays,
         rules,
+        teacherAvailability,
       });
 
       // Combine locked and new study hall assignments
@@ -1661,6 +1722,26 @@ export function reassignStudyHalls(
     };
   }
 
+  // Build teacher availability lookup for study hall filtering
+  const teacherAvailability = new Map<string, Set<number>>();
+  for (const t of teachers) {
+    if (t.availableDays || t.availableBlocks) {
+      const days = t.availableDays || [...DAYS];
+      const blocks = t.availableBlocks || [...BLOCKS];
+      const validSlots = new Set<number>();
+      for (const day of days) {
+        const dayIdx = DAYS.indexOf(day);
+        if (dayIdx === -1) continue;
+        for (const block of blocks) {
+          const blockIdx = BLOCKS.indexOf(block);
+          if (blockIdx === -1) continue;
+          validSlots.add(dayIdx * BLOCKS.length + blockIdx);
+        }
+      }
+      teacherAvailability.set(t.name, validSlots);
+    }
+  }
+
   // Try multiple seeds to find a different arrangement
   const maxAttempts = 10;
   const baseSeed = seed ?? Math.floor(Math.random() * 2147483647);
@@ -1702,6 +1783,7 @@ export function reassignStudyHalls(
       shuffleAssignments: true,
       seed: currentSeed,
       rules,
+      teacherAvailability,
     });
     const shPlaced = shAssignments.filter(sh => sh.teacher !== null).length;
     const shTotal = shAssignments.length;

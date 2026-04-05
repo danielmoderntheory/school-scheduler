@@ -8,44 +8,39 @@ export async function PUT(
   const { id } = await params
   const body = await request.json()
 
-  // Build dynamic update query
-  const updates: string[] = []
-  const values: unknown[] = []
+  const knownFields = ['name', 'status', 'can_supervise_study_hall', 'notes', 'available_days', 'available_blocks']
+  const hasUpdates = knownFields.some(f => body[f] !== undefined)
 
-  if (body.name !== undefined) {
-    updates.push("name")
-    values.push(body.name)
-  }
-  if (body.status !== undefined) {
-    updates.push("status")
-    values.push(body.status)
-  }
-  if (body.can_supervise_study_hall !== undefined) {
-    updates.push("can_supervise_study_hall")
-    values.push(body.can_supervise_study_hall)
-  }
-  if (body.notes !== undefined) {
-    updates.push("notes")
-    values.push(body.notes)
-  }
-
-  if (updates.length === 0) {
+  if (!hasUpdates) {
     return NextResponse.json({ error: "No fields to update" }, { status: 400 })
   }
 
   try {
-    // Use conditional updates with COALESCE pattern
-    const [data] = await sql`
-      UPDATE teachers
-      SET
-        name = COALESCE(${body.name ?? null}, name),
-        status = COALESCE(${body.status ?? null}, status),
-        can_supervise_study_hall = COALESCE(${body.can_supervise_study_hall ?? null}, can_supervise_study_hall),
-        notes = ${body.notes !== undefined ? body.notes : null}
-      WHERE id = ${id}
-      RETURNING *
-    `
+    // Update each field individually to avoid overwriting unrelated fields.
+    // The COALESCE pattern doesn't work for nullable fields (notes, JSONB),
+    // and CASE WHEN with parameterized booleans isn't reliable with Neon.
+    if (body.name !== undefined) {
+      await sql`UPDATE teachers SET name = ${body.name} WHERE id = ${id}`
+    }
+    if (body.status !== undefined) {
+      await sql`UPDATE teachers SET status = ${body.status} WHERE id = ${id}`
+    }
+    if (body.can_supervise_study_hall !== undefined) {
+      await sql`UPDATE teachers SET can_supervise_study_hall = ${body.can_supervise_study_hall} WHERE id = ${id}`
+    }
+    if (body.notes !== undefined) {
+      await sql`UPDATE teachers SET notes = ${body.notes} WHERE id = ${id}`
+    }
+    if (body.available_days !== undefined) {
+      const json = body.available_days ? JSON.stringify(body.available_days) : null
+      await sql`UPDATE teachers SET available_days = ${json} WHERE id = ${id}`
+    }
+    if (body.available_blocks !== undefined) {
+      const json = body.available_blocks ? JSON.stringify(body.available_blocks) : null
+      await sql`UPDATE teachers SET available_blocks = ${json} WHERE id = ${id}`
+    }
 
+    const [data] = await sql`SELECT * FROM teachers WHERE id = ${id}`
     if (!data) {
       return NextResponse.json({ error: "Teacher not found" }, { status: 404 })
     }
