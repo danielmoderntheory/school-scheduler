@@ -1333,11 +1333,13 @@ export default function HistoryDetailPage() {
         const classesRaw = await classesRes.json()
         const gradesRaw = await gradesRes.json()
 
-        teachers = teachersRaw.map((t: { id: string; name: string; status: string; can_supervise_study_hall: boolean }) => ({
+        teachers = teachersRaw.map((t: { id: string; name: string; status: string; can_supervise_study_hall: boolean; available_days?: string[] | null; available_blocks?: number[] | null }) => ({
           id: t.id,
           name: t.name,
           status: t.status as 'full-time' | 'part-time',
           canSuperviseStudyHall: t.can_supervise_study_hall,
+          availableDays: t.available_days ?? null,
+          availableBlocks: t.available_blocks ?? null,
         }))
 
         // Get grade display names from database
@@ -1401,11 +1403,13 @@ export default function HistoryDetailPage() {
             })),
           }
         })
-        const teachersSnapshot = teachersRaw.map((t: { id: string; name: string; status: string; can_supervise_study_hall: boolean }) => ({
+        const teachersSnapshot = teachersRaw.map((t: { id: string; name: string; status: string; can_supervise_study_hall: boolean; available_days?: string[] | null; available_blocks?: number[] | null }) => ({
           id: t.id,
           name: t.name,
           status: t.status,
           canSuperviseStudyHall: t.can_supervise_study_hall,
+          availableDays: t.available_days ?? null,
+          availableBlocks: t.available_blocks ?? null,
         }))
         const gradesSnapshot = gradesRaw.map((g: { id: string; name: string; display_name: string }) => ({
           id: g.id,
@@ -1424,6 +1428,31 @@ export default function HistoryDetailPage() {
         classes = parseClassesFromSnapshot(generation.stats!.classes_snapshot!)
         // Parse grades from snapshot (grades_snapshot contains display_name)
         grades = (generation.stats!.grades_snapshot || []).map((g: { display_name: string }) => g.display_name)
+      }
+
+      // Intersect teacher availability with class restrictions
+      // (same logic as GenerateModal.convertToSchedulerFormat)
+      const teacherAvailMap = new Map<string, { days: string[] | null; blocks: number[] | null }>()
+      for (const t of teachers) {
+        if (t.availableDays || t.availableBlocks) {
+          teacherAvailMap.set(t.name, { days: t.availableDays ?? null, blocks: t.availableBlocks ?? null })
+        }
+      }
+      if (teacherAvailMap.size > 0) {
+        for (const entry of classes) {
+          const avail = teacherAvailMap.get(entry.teacher)
+          if (!avail) continue
+          if (avail.days) {
+            entry.availableDays = entry.availableDays
+              ? entry.availableDays.filter((d: string) => avail.days!.includes(d))
+              : [...avail.days]
+          }
+          if (avail.blocks) {
+            entry.availableBlocks = entry.availableBlocks
+              ? entry.availableBlocks.filter((b: number) => avail.blocks!.includes(b))
+              : [...avail.blocks]
+          }
+        }
       }
 
       // Get the ACTUAL original schedule from generation.options (NOT selectedResult which could be a preview)
@@ -1949,11 +1978,13 @@ export default function HistoryDetailPage() {
           }
         })
 
-        const teachersSnapshot = teachersRaw.map((t: { id: string; name: string; status: string; can_supervise_study_hall: boolean }) => ({
+        const teachersSnapshot = teachersRaw.map((t: { id: string; name: string; status: string; can_supervise_study_hall: boolean; available_days?: string[] | null; available_blocks?: number[] | null }) => ({
           id: t.id,
           name: t.name,
           status: t.status,
           canSuperviseStudyHall: t.can_supervise_study_hall,
+          availableDays: t.available_days ?? null,
+          availableBlocks: t.available_blocks ?? null,
         }))
 
         const gradesSnapshot = gradesRaw.map((g: { id: string; name: string; display_name: string }) => ({
