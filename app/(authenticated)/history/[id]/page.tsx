@@ -1684,58 +1684,6 @@ export default function HistoryDetailPage() {
         optionNumber: generation.options.length + 1,
       }
 
-      // Validate the full schedule to catch any logic errors
-      // Use statsForRegenValidation which has updated class config when using current classes.
-      // When using snapshot data (useCurrentClasses=false), the snapshot may be missing newly
-      // added classes or have stale elective flags. Augment it with class entries from the
-      // solver input so elective detection works correctly for both locked and unlocked teachers.
-      if (statsForRegenValidation?.classes_snapshot) {
-        const snapshotKeys = new Set(
-          statsForRegenValidation.classes_snapshot.map(
-            (c: { teacher_name: string | null; subject_name: string | null }) => `${c.teacher_name}|${c.subject_name}`
-          )
-        )
-        const missingEntries = classes
-          .filter(c => !snapshotKeys.has(`${c.teacher}|${c.subject}`))
-          .map(c => ({
-            teacher_id: null,
-            teacher_name: c.teacher,
-            grade_id: null,
-            grade_ids: [] as string[],
-            grades: [] as Array<{ id: string; name: string; display_name: string }>,
-            is_elective: c.isElective || false,
-            is_cotaught: c.isCotaught || false,
-            subject_id: null,
-            subject_name: c.subject,
-            days_per_week: c.daysPerWeek,
-            restrictions: [] as Array<{ restriction_type: 'fixed_slot' | 'available_days' | 'available_blocks'; value: unknown }>,
-          }))
-        if (missingEntries.length > 0) {
-          statsForRegenValidation = {
-            ...statsForRegenValidation,
-            classes_snapshot: [...statsForRegenValidation.classes_snapshot, ...missingEntries],
-          }
-        }
-        // Also update existing snapshot entries with current elective/cotaught flags from solver input
-        // (in case a class was changed to/from elective since the snapshot was taken)
-        const classLookup = new Map(classes.map(c => [`${c.teacher}|${c.subject}`, c]))
-        const updatedSnapshot = statsForRegenValidation.classes_snapshot!.map(snap => {
-          const cls = classLookup.get(`${snap.teacher_name}|${snap.subject_name}`)
-          if (cls) {
-            return {
-              ...snap,
-              is_elective: cls.isElective ?? snap.is_elective,
-              is_cotaught: cls.isCotaught ?? snap.is_cotaught,
-            }
-          }
-          return snap
-        })
-        statsForRegenValidation = {
-          ...statsForRegenValidation,
-          classes_snapshot: updatedSnapshot,
-        }
-      }
-
       const electiveClasses = statsForRegenValidation?.classes_snapshot?.filter(c => c.is_elective) || []
 
       const selectedTeacherSnapshotClasses = statsForRegenValidation?.classes_snapshot?.filter(
@@ -5221,7 +5169,7 @@ export default function HistoryDetailPage() {
     const gradeTeachers = new Map<number, Array<{ teacher: string; subject: string; gradeDisplay: string; isElective: boolean; isCotaught: boolean }>>()
 
     for (const cls of classesAtSlot) {
-      const isElective = cls.isElective ?? isClassElective(cls.teacher, cls.subject, classesSnapshot)
+      const isElective = cls.isElective ?? isClassElective(cls.teacher, cls.subject, classesSnapshot, cls.gradeDisplay)
       const isCotaught = isClassCotaught(cls.teacher, cls.subject, classesSnapshot)
       const gradeNums = parseGradeDisplayToNumbers(cls.gradeDisplay)
 
@@ -6381,7 +6329,7 @@ export default function HistoryDetailPage() {
         if (entry && entry[1] && entry[1] !== 'OPEN' && entry[1] !== 'Study Hall') {
           const gradeNums = parseGradeDisplayToNumbers(entry[0])
           // Check if this class is marked as elective (use shared helper)
-          const isElective = isClassElective(teacher, entry[1], stats?.classes_snapshot)
+          const isElective = isClassElective(teacher, entry[1], stats?.classes_snapshot, entry[0])
           classesAtSlot.push({
             teacher,
             gradeDisplay: entry[0],

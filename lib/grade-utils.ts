@@ -310,31 +310,57 @@ export interface ClassSnapshotEntry {
 /**
  * Check if a class is marked as an elective in the snapshot.
  *
- * First tries to match by teacher+subject. If not found (e.g., class was transferred
- * to a different teacher in Freeform mode), falls back to matching by subject only.
- * This ensures transferred electives are still recognized as electives.
+ * First tries to match by teacher+subject. If multiple matches exist
+ * (e.g., teacher teaches same subject as both regular and elective),
+ * uses gradeDisplay to disambiguate when available.
+ *
+ * Falls back to matching by subject only for transferred classes.
  *
  * @param teacher - Teacher name
  * @param subject - Subject name
  * @param classesSnapshot - Array of class entries from snapshot
+ * @param gradeDisplay - Optional grade display string from schedule entry for disambiguation
  * @returns true if the class is marked as an elective
  */
 export function isClassElective(
   teacher: string,
   subject: string,
-  classesSnapshot: ClassSnapshotEntry[] | undefined
+  classesSnapshot: ClassSnapshotEntry[] | undefined,
+  gradeDisplay?: string
 ): boolean {
   if (!classesSnapshot) return false
 
-  // First try exact match (teacher + subject)
-  const exactMatch = classesSnapshot.find(
+  // Find all matches for teacher + subject
+  const matches = classesSnapshot.filter(
     c => c.teacher_name === teacher && c.subject_name === subject
   )
-  if (exactMatch) {
-    return exactMatch.is_elective === true
+
+  if (matches.length === 1) {
+    return matches[0].is_elective === true
   }
 
-  // If no exact match, check if ANY class with this subject is an elective
+  if (matches.length > 1) {
+    // Multiple matches (e.g., same subject taught as both regular and elective).
+    // If gradeDisplay is provided, try to match by grade overlap to disambiguate.
+    if (gradeDisplay) {
+      const gradeNums = parseGradeDisplayToNumbers(gradeDisplay)
+      if (gradeNums.length > 0) {
+        for (const m of matches) {
+          if (!m.grade_ids || m.grade_ids.length === 0) continue
+          // Check if the snapshot entry's grade count matches - electives typically
+          // cover more grades than regular per-grade classes
+          const matchGradeCount = m.grade_ids.length
+          if (matchGradeCount === gradeNums.length) {
+            return m.is_elective === true
+          }
+        }
+      }
+    }
+    // If we can't disambiguate, check if ANY match is elective
+    return matches.some(m => m.is_elective === true)
+  }
+
+  // No exact match - check if ANY class with this subject is an elective
   // This handles transfers where the teacher changed but the subject's elective nature didn't
   return classesSnapshot.some(
     c => c.subject_name === subject && c.is_elective === true
