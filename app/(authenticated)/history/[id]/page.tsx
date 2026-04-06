@@ -1685,10 +1685,11 @@ export default function HistoryDetailPage() {
       }
 
       // Validate the full schedule to catch any logic errors
-      // Use statsForRegenValidation which has updated class config when using current classes
+      // Use statsForRegenValidation which has updated class config when using current classes.
       // When using snapshot data (useCurrentClasses=false), the snapshot may be missing newly
-      // added classes. Augment it with class entries from the solver input so elective detection works.
-      if (!useCurrentClasses && statsForRegenValidation?.classes_snapshot) {
+      // added classes or have stale elective flags. Augment it with class entries from the
+      // solver input so elective detection works correctly for both locked and unlocked teachers.
+      if (statsForRegenValidation?.classes_snapshot) {
         const snapshotKeys = new Set(
           statsForRegenValidation.classes_snapshot.map(
             (c: { teacher_name: string | null; subject_name: string | null }) => `${c.teacher_name}|${c.subject_name}`
@@ -1714,6 +1715,24 @@ export default function HistoryDetailPage() {
             ...statsForRegenValidation,
             classes_snapshot: [...statsForRegenValidation.classes_snapshot, ...missingEntries],
           }
+        }
+        // Also update existing snapshot entries with current elective/cotaught flags from solver input
+        // (in case a class was changed to/from elective since the snapshot was taken)
+        const classLookup = new Map(classes.map(c => [`${c.teacher}|${c.subject}`, c]))
+        const updatedSnapshot = statsForRegenValidation.classes_snapshot!.map(snap => {
+          const cls = classLookup.get(`${snap.teacher_name}|${snap.subject_name}`)
+          if (cls) {
+            return {
+              ...snap,
+              is_elective: cls.isElective ?? snap.is_elective,
+              is_cotaught: cls.isCotaught ?? snap.is_cotaught,
+            }
+          }
+          return snap
+        })
+        statsForRegenValidation = {
+          ...statsForRegenValidation,
+          classes_snapshot: updatedSnapshot,
         }
       }
 
