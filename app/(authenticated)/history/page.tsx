@@ -162,7 +162,8 @@ export default function HistoryPage() {
 
   function getOptionLabel(gen: Generation) {
     if (!gen.selected_option) return null
-    return `Revision ${gen.selected_option}`
+    const letter = String.fromCharCode(64 + gen.selected_option) // 1→A, 2→B, 3→C
+    return `Revision ${letter}`
   }
 
   // Starred are always non-deleted, recent includes deleted when showDeleted is true
