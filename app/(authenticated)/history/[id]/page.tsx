@@ -1686,6 +1686,36 @@ export default function HistoryDetailPage() {
 
       // Validate the full schedule to catch any logic errors
       // Use statsForRegenValidation which has updated class config when using current classes
+      // When using snapshot data (useCurrentClasses=false), the snapshot may be missing newly
+      // added classes. Augment it with class entries from the solver input so elective detection works.
+      if (!useCurrentClasses && statsForRegenValidation?.classes_snapshot) {
+        const snapshotKeys = new Set(
+          statsForRegenValidation.classes_snapshot.map(
+            (c: { teacher_name: string | null; subject_name: string | null }) => `${c.teacher_name}|${c.subject_name}`
+          )
+        )
+        const missingEntries = classes
+          .filter(c => !snapshotKeys.has(`${c.teacher}|${c.subject}`))
+          .map(c => ({
+            teacher_id: null,
+            teacher_name: c.teacher,
+            grade_id: null,
+            grade_ids: [] as string[],
+            grades: [] as Array<{ id: string; name: string; display_name: string }>,
+            is_elective: c.isElective || false,
+            is_cotaught: c.isCotaught || false,
+            subject_id: null,
+            subject_name: c.subject,
+            days_per_week: c.daysPerWeek,
+            restrictions: [] as Array<{ restriction_type: 'fixed_slot' | 'available_days' | 'available_blocks'; value: unknown }>,
+          }))
+        if (missingEntries.length > 0) {
+          statsForRegenValidation = {
+            ...statsForRegenValidation,
+            classes_snapshot: [...statsForRegenValidation.classes_snapshot, ...missingEntries],
+          }
+        }
+      }
 
       const electiveClasses = statsForRegenValidation?.classes_snapshot?.filter(c => c.is_elective) || []
 
