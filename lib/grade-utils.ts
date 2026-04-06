@@ -356,8 +356,9 @@ export function isClassElective(
         }
       }
     }
-    // If we can't disambiguate, check if ANY match is elective
-    return matches.some(m => m.is_elective === true)
+    // Can't disambiguate — conservatively treat as non-elective.
+    // This preserves old behavior for callers that don't pass gradeDisplay.
+    return false
   }
 
   // No exact match - check if ANY class with this subject is an elective
