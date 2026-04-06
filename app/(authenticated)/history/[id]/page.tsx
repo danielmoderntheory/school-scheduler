@@ -1494,7 +1494,11 @@ export default function HistoryDetailPage() {
         for (const teacher of selectedForRegen) {
           const a = scheduleA[teacher]
           const b = scheduleB[teacher]
-          if (!a || !b) continue
+          // If teacher exists in one but not the other, schedules don't match
+          // (e.g., a newly added teacher won't be in the original schedule)
+          if (!a && b) return false
+          if (a && !b) return false
+          if (!a && !b) continue
 
           for (const day of ['Mon', 'Tues', 'Wed', 'Thurs', 'Fri']) {
             for (const block of [1, 2, 3, 4, 5]) {
