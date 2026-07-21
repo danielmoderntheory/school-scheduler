@@ -179,6 +179,38 @@ The current grid uses **60-minute** blocks and aligns with *nothing* — zero ex
 
 Ordered so each phase ships independently. Phase 1 has no dependency on the solver and can start immediately.
 
+### Phase 0 — Harden elective detection (pre-work) — 0.5 d
+
+Not caused by this project, but it sits directly under the grade-conflict logic that Phases 2–4 build on. Worth doing first so a false-conflict report during migration isn't misattributed to the new block handling.
+
+**The issue.** `isClassElective(teacher, subject, snapshot, gradeDisplay?)` resolves by matching teacher + subject. When more than one class row matches, it needs `gradeDisplay` to disambiguate; without it, it returns `false` (as of `823e91d`, which correctly made this fail closed rather than fail silent).
+
+Only 2 of 7 call sites pass `gradeDisplay`. The one that affects correctness:
+
+```
+canClassesShareSlot()             grade-utils.ts:413-414   ← no gradeDisplay
+  ← shouldIgnoreGradeConflict()   grade-utils.ts:447
+      ← history/[id]/page.tsx:4551, :4694                  ← both have grade context in scope
+```
+
+The other three (`ScheduleGrid.tsx:528`, `:537`, `history/[id]/page.tsx:9058`) only drive elective badge styling — cosmetic.
+
+**Current risk: none, and that is the concern.** In the active quarter, 29 teacher+subject pairs hit the ambiguous branch (Oscar/Music has 10 rows, Isa/PE and Josh/Science 6 each) — but all 29 are entirely regular classes, so `false` is correct every time. All 6 electives have exactly one row each and never reach the fallback.
+
+They stay that way because electives are given **distinct subject names** — "Robotics A", "TedEd A", "TedEd B", "Art 101". Correctness here rests on a naming convention, not on code. The first time someone adds a regular class sharing a subject name with an elective, two genuine electives get reported as a grade conflict.
+
+**The work:**
+
+- Add optional `gradeDisplayA` / `gradeDisplayB` params to `canClassesShareSlot()` and `shouldIgnoreGradeConflict()`; pass what `history/[id]/page.tsx:4551` and `:4694` already have in scope.
+- Optionally pass `gradeDisplay` at the three cosmetic sites.
+- Replace the disambiguation heuristic. It currently matches on grade **count**:
+  ```ts
+  if (matchGradeCount === gradeNums.length) return m.is_elective === true
+  ```
+  Two classes with the same number of grades but different grades match the wrong row. Snapshot entries carry `grade_ids`, so exact matching is available and strictly better — and grade groups make displays more varied, which degrades a count-based match further.
+
+**Priority: low but cheap.** Zero triggering cases in any quarter today, and the failure mode is a visible false conflict rather than a silent bad schedule. Defensible to defer until something trips it — but it is an hour's work against a primitive that Phases 2–4 lean on heavily.
+
 ### Phase 1 — Timetable data model & display — 4–6 d
 
 The timetable feature is already closest to ready: `timetable_templates.rows` supports per-grade scoping via `grade_ids`, and `resolveRowsForGrade` filters per grade. Production already uses this for the 6th–11th lunch row.
@@ -232,7 +264,7 @@ Cross-band specialists are the cases that matter.
 
 `lib/scheduler.ts` (1,898 lines) duplicates the solver in JS. Porting it doubles the hardest work for a rarely-exercised path. **Recommend leaving it 5-block-only for legacy quarters and routing new work to Cloud Run.**
 
-### Total — 16–24 days ≈ **3–4 weeks**
+### Total — 16.5–24.5 days ≈ **3–4 weeks**
 
 > **Correction to an earlier estimate.** I previously quoted "1–1.5 weeks" for the aligned path. That figure covered the *solver* change alone (Phase 2). The full feature — timetable model, config UI, export, teacher view, migration — is 3–4 weeks. The 1-week figure was misleading and is withdrawn.
 
