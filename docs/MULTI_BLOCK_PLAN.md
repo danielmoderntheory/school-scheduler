@@ -1,18 +1,24 @@
 # Multi-Block Schedule Plan
 
 **Status:** Planning. No code changed.
-**Date:** 2026-07-21
+**Date:** 2026-07-21 (design refined 2026-07-24)
 **Supersedes:** `MULTI_BLOCK_SCOPE.md`
 
 ---
 
 ## Recommendation
 
-Adopt **one shared bell schedule** for the whole school — uniform 40-minute periods on common boundaries — where each group uses as many periods as it needs (Primaria 7, MS/HS 8, Kindergarten fewer).
+Adopt **one shared bell schedule** for the whole school — all groups' classes start and end on the same set of time boundaries ("shared windows") — where each group uses as many windows as it needs (Primaria 7 teaching periods, MS/HS 8, Kindergarten fewer).
 
-This costs **10 minutes of instruction per band and 5 minutes of lunch**. It returns roughly **24 hours a week of specialist teacher availability**, and it keeps the scheduler's conflict detection correct instead of silently wrong.
+The refined grid (§2, "Option A/B") **loses no instruction time** — it keeps two shared 45-minute windows so both bands preserve their exact current minutes (Primaria 290/day, MS/HS 330/day). The only costs are **dismissal at 2:40 instead of 2:30, and a 40-minute lunch instead of 45.**
+
+It returns roughly **24 hours a week of specialist teacher availability**, and it keeps the scheduler's conflict detection correct instead of silently wrong.
 
 It also cuts the software work from roughly **8–10 weeks to 3–4**.
+
+> **Note on an earlier figure.** Drafts of this doc quoted "10 minutes of instruction lost per band." That was an artifact of an intermediate all-40-minute grid (V2). The current design (§2) recovers it — zero instruction lost. Any remaining "−10 min" or "−5 min lunch" phrasing further down predates the refinement.
+
+**Two open design choices** (see §3): put MS and MS/HS on a shared lunch (collapses MS and HS into one identical grid — recommended), and pick lunch order A (Primaria eats first, recommended) vs B.
 
 If the school cannot align the bells, the work is still possible — see §5 — but it requires rewriting the solver's core constraint model.
 
@@ -82,75 +88,62 @@ With misaligned bells, each Primaria class a specialist teaches makes **two** MS
 
 ## 2. Recommended solution: one shared bell schedule
 
-The key arithmetic: **MS/HS teaches exactly 40 minutes more than Primaria, and Primaria breaks exactly 40 minutes more than MS/HS.** Both days total 390 minutes. Primaria's "missing" 8th period *is* its extra break time.
+**Terminology.** "Sn" = **shared window n** — a fixed block of time on one common clock. Every group's classes begin and end on these boundaries; that alignment is the entire mechanism that makes the scheduler's conflict detection correct. Each group then decides what to *use* each window for — teach, eat, or recess — and numbers its own periods however it likes. So one window can be "P3" for one group and "Lunch" for another.
 
-Nothing needs to be added or removed. That extra 40 minutes just has to be spent as **one whole period** instead of scattered in 15- and 20-minute pieces that push everything out of phase.
+Alignment requires periods to **start and end together**, NOT to be the same length. So we keep the two 45-minute windows both drafts already have (S6, S9) and make them shared — which is why **no instruction time is lost** (an earlier all-40-minute draft, V2, lost 10 min/band; this version does not).
 
-### 2.1 The shared grid
+### 2.1 The shared grid (final — Option A, Primaria eats first)
 
-Uniform 40-minute periods. Day still ends 2:30.
+Nine shared windows. MS/HS teaches in 8 and eats in 1. Primaria teaches in 7, eats in 1, and takes 1 for snack/recess. **Putting MS and HS on the same lunch collapses them into one identical grid** — the drafted P6/lunch swap disappears, so the school runs two patterns (Primaria, MS/HS) instead of three.
 
-| Time | Min | Window |
-|---|---|---|
-| 8:00–8:20 | 20 | **Morning Meeting** (all bands) |
-| 8:20–9:00 | 40 | S1 |
-| 9:00–9:40 | 40 | S2 |
-| 9:40–9:50 | 10 | *shared break* |
-| 9:50–10:30 | 40 | S3 |
-| 10:30–11:10 | 40 | S4 |
-| 11:10–11:50 | 40 | S5 |
-| 11:50–12:30 | 40 | S6 |
-| 12:30–1:10 | 40 | *lunch window* |
-| 1:10–1:50 | 40 | S7 |
-| 1:50–2:30 | 40 | S8 |
+| Time | Min | Window | Primaria | MS/HS |
+|---|---|---|---|---|
+| 8:00–8:20 | 20 | — | Morning Meeting | Morning Meeting |
+| 8:20–9:00 | 40 | S1 | P1 | P1 |
+| 9:00–9:40 | 40 | S2 | P2 | P2 |
+| 9:40–9:50 | 10 | — | break | break |
+| 9:50–10:30 | 40 | S3 | **snack + recess** | P3 |
+| 10:30–11:10 | 40 | S4 | P3 | P4 |
+| 11:10–11:50 | 40 | S5 | **LUNCH** | P5 |
+| 11:50–12:35 | 45 | S6 | P4 | P6 |
+| 12:35–1:15 | 40 | S7 | P5 | **LUNCH** |
+| 1:15–1:55 | 40 | S8 | P6 | P7 |
+| 1:55–2:40 | 45 | S9 | P7 | P8 |
 
-Eight teaching windows. MS/HS uses all 8. Primaria uses 7 and spends the spare one on snack/recess.
+**Option B** is the identical grid with the two lunches swapped: MS/HS eats at S5 (11:10–11:50), Primaria at S7 (12:35–1:15).
 
-### 2.2 Primaria's reading
-
-| Time | Min | |
-|---|---|---|
-| 8:00–8:20 | 20 | **Morning Meeting — unchanged** |
-| 8:20–9:00 | 40 | P1 |
-| 9:00–9:40 | 40 | P2 |
-| 9:40–9:50 | 10 | *shared break* |
-| 9:50–10:30 | 40 | P3 |
-| **10:30–11:10** | **40** | **Snack + recess** |
-| 11:10–11:50 | 40 | P4 |
-| 11:50–12:30 | 40 | Lunch |
-| 12:30–1:10 | 40 | P5 |
-| 1:10–1:50 | 40 | P6 |
-| 1:50–2:30 | 40 | P7 |
-
-Morning meeting stays at 20 minutes. The spare window becomes a real 40-minute snack and recess — *more* break time than today, in one usable chunk rather than a 20-minute snack plus a 15-minute afternoon break.
-
-### 2.3 What it costs
+### 2.2 What it costs
 
 | | Now | Proposed | Δ |
 |---|---|---|---|
+| Primaria instruction | 290 min | **290 min** | **0** |
+| MS/HS instruction | 330 min | **330 min** | **0** |
 | Primaria morning meeting | 20 min | 20 min | — |
-| Primaria instruction | 290 min | 280 min | **−10** |
-| Primaria snack / breaks | 35 min | 40 min | **+5** |
-| Primaria lunch | 45 min | 40 min | −5 |
-| MS/HS instruction | 330 min | 320 min | **−10** |
-| MS/HS morning meeting | 5 min | 20 min | +15 |
-| MS/HS lunch | 45 min | 40 min | −5 |
-| Day ends | 2:30 | 2:30 | — |
+| Primaria snack/recess | 35 min (20 + 15) | 40 min (one block) | +5 |
+| Lunch (all) | 45 min | 40 min | −5 |
+| Day ends | 2:30 | **2:40** | +10 |
 
-MS/HS moving to a 20-minute morning routine is not new: the **current live** 5-block template already runs an 8:00–8:05 morning meeting *plus* an 8:05–8:20 SEL / homeroom check-in. Twenty minutes is existing practice — only the new draft trimmed it to 5.
+**Nobody loses a minute of teaching.** The whole bill is: dismissal 2:40 instead of 2:30, and a 40-minute lunch instead of 45. (In Option A, MS/HS eats in a 40-min window and teaches a 45; the 5-min difference is a sitting-order choice, not a structural loss — swapping sittings moves it.)
 
-### 2.4 Variant — keep the 45-minute lunch
+MS/HS keeping a 20-minute morning routine is not new: the **current live** 5-block template already runs an 8:00–8:05 morning meeting *plus* an 8:05–8:20 SEL / homeroom check-in. Only the new draft trimmed it to 5.
 
-Identical grid with a 45-minute lunch window ends the day at **2:35** instead of 2:30. Everything else unchanged.
+### 2.3 Verified
 
-### 2.5 Verified
+With this grid, **no period on any band ever straddles two on another — overlap cost is exactly 1.00 across all bands.** A class blocks the one window it occupies and nothing else, so the scheduler's existing period-number conflict check becomes correct again.
 
-With this grid, **no period on any band ever straddles two on another — overlap cost is exactly 1.00 across all three bands.** A class blocks the one period it occupies and nothing else. The scheduler's existing period-number conflict check becomes correct again.
+### 2.4 Still Primaria's free choice
 
-### 2.6 Still Primaria's free choice
+- **Which window to give up for snack/recess.** Shown as S3 (mid-morning). Could equally be S9 — teaching ends 1:15 with an afternoon activity/early-dismissal block. Both align equally well; purely pedagogical.
+- **Lunch order A vs B** — see §3.
 
-- **Which window to give up.** Shown as S4 (mid-morning snack/recess). Could equally be S8 — teaching ends 1:50 with a 40-minute afternoon activity block. Both align equally well; purely pedagogical.
-- **Lunch sittings.** Primaria + MS at 11:50 with HS at 12:30, or any other split. The windows are shared, so the cafeteria can sequence however suits.
+### 2.5 Lunch order: A vs B
+
+| | Primaria lunch | MS/HS lunch |
+|---|---|---|
+| **A** (rec.) | 11:10 | 12:35 (HS ≈ drafted 12:20) |
+| **B** | 12:35 | 11:10 (MS ≈ drafted 11:35) |
+
+Recommend **A**: younger children eat first, cafeteria clears before older students, HS lands near where the draft put them. Argument for B: 11:10 is early for teenagers. Either way Primaria's snack is at 9:50 with two teaching windows between snack and lunch.
 
 ---
 
@@ -158,12 +151,14 @@ With this grid, **no period on any band ever straddles two on another — overla
 
 | # | Decision | Why it matters |
 |---|---|---|
-| 1 | **Adopt the shared grid?** | Drives everything below. Aligned ≈ 3–4 weeks of work; misaligned ≈ 8–10. |
-| 2 | 40-minute lunch (end 2:30) or 45-minute (end 2:35)? | Cosmetic to the software; real to families and buses. |
-| 3 | Which window does Primaria give up — mid-morning snack, or early finish? | Pedagogical only. No software impact. |
-| 4 | **Which grid does Kindergarten follow?** | K is at **25/25 — completely full** today. Isa, Oscar and Romina all teach K. See §3.1. |
-| 5 | Confirm MS vs HS differ only in the P6/lunch swap, not in any teaching constraint. | If so, they are one band for scheduling and differ only on the printout. |
+| 1 | **Adopt the shared grid?** (§2) | Drives everything below. Aligned ≈ 3–4 weeks of work; misaligned ≈ 8–10. |
+| 2 | **MS and HS on the same lunch?** (recommended) | Yes → MS and HS become one identical grid; school runs 2 patterns not 3. §2.1 assumes yes. |
+| 3 | **Lunch order A or B?** (§2.5) | A = Primaria eats first (recommended). Pedagogical/cafeteria only, no software impact. |
+| 4 | Which window does Primaria give up — mid-morning snack (S3), or early finish (S9)? | Pedagogical only. No software impact. |
+| 5 | **Which grid does Kindergarten follow?** | K is at **25/25 — completely full** today. Isa, Oscar and Romina all teach K. See §3.1. Recommend the shared grid. |
 | 6 | Should teacher availability be expressed in clock times or period numbers? | Affects how restrictions are stored and edited. |
+
+Confirmed 2026-07-24: MS vs HS differ only in the drafted P6/lunch swap, no teaching constraint — so a shared lunch merges them cleanly.
 
 ### 3.1 Kindergarten
 
