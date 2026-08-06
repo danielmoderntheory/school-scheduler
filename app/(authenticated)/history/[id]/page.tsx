@@ -40,7 +40,7 @@ import { Textarea } from "@/components/ui/textarea"
 import { Label } from "@/components/ui/label"
 import Link from "next/link"
 import type { ScheduleOption, TeacherSchedule, GradeSchedule, Teacher, FloatingBlock, PendingPlacement, ValidationError, CellLocation, ClassEntry, OpenBlockLabels, PendingTransfer, TimetableTemplate } from "@/lib/types"
-import { resolveRowsForGrade } from "@/lib/timetable-utils"
+import { resolveRowsForGrade, getTemplateBlocks, getTeachableBlocksForGrade } from "@/lib/timetable-utils"
 import { parseClassesFromSnapshot, parseTeachersFromSnapshot, parseRulesFromSnapshot, hasValidSnapshots, detectClassChanges, detectTeacherChanges, applyTeacherRenames, applyTeacherChangesToSnapshot, computeExpectedTeachingSessions, findMismatchedTeachers, type GenerationStats, type ChangeDetectionResult, type CurrentClass, type ClassSnapshot, type TeacherSnapshot, type TeacherChangeResult } from "@/lib/snapshot-utils"
 import { parseGradeDisplayToNumbers, parseGradeDisplayToNames, gradesOverlap, gradesEqual, gradeNumToDisplay, isClassElective, isClassCotaught, shouldIgnoreGradeConflict, formatGradeDisplayCompact } from "@/lib/grade-utils"
 import { BLOCK_TYPE_OPEN, BLOCK_TYPE_STUDY_HALL, isOpenBlock, isStudyHall, isScheduledClass, isOccupiedBlock, entryIsOpen, entryIsOccupied, entryIsScheduledClass, isFullTime, setOpenBlockLabel, recalculateOptionStats, getFirstGradeEntry, isMultipleEntryCell } from "@/lib/schedule-utils"
@@ -182,9 +182,12 @@ function rebuildGradeSchedules(
   // This ensures required single-grade classes take priority over electives
 
   // Pass 1: Multi-grade entries (electives) - accumulate into arrays when multiple share a cell
+  // Blocks are derived from the schedule data itself so both legacy 5-block and
+  // template-driven (e.g. 9-block) generations rebuild correctly.
   for (const [teacher, schedule] of Object.entries(teacherSchedules)) {
     for (const day of DAYS) {
-      for (let block = 1; block <= 5; block++) {
+      for (const blockKey of Object.keys(schedule[day] || {})) {
+        const block = Number(blockKey)
         const entry = schedule[day]?.[block]
         if (!entry || isOpenBlock(entry[1])) continue
 
@@ -216,7 +219,8 @@ function rebuildGradeSchedules(
   // Pass 2: Single-grade entries (required classes) - these take priority
   for (const [teacher, schedule] of Object.entries(teacherSchedules)) {
     for (const day of DAYS) {
-      for (let block = 1; block <= 5; block++) {
+      for (const blockKey of Object.keys(schedule[day] || {})) {
+        const block = Number(blockKey)
         const entry = schedule[day]?.[block]
         if (!entry || isOpenBlock(entry[1])) continue
 
@@ -538,6 +542,52 @@ export default function HistoryDetailPage() {
   const [skipStudyHalls, setSkipStudyHalls] = useState(false) // Skip study hall assignment during regen (can reassign after)
   const [showOpenLabels, setShowOpenLabels] = useState(false) // Show custom labels on OPEN blocks
 
+  // Block format for this generation's quarter. When no timetable template exists
+  // (legacy 5-block generations, or migration not applied) these resolve to the
+  // legacy [1..5] / all-blocks behavior.
+  const templateBlocks = useMemo(() => getTemplateBlocks(timetableTemplate), [timetableTemplate])
+  // Teachable blocks per grade, keyed by grade DISPLAY NAME (the solver/schedule key
+  // convention). A block scoped away from a grade (its band's lunch) is not teachable.
+  const teachableBlocksByGrade = useMemo(() => {
+    const map: Record<string, number[]> = {}
+    for (const g of gradesData) {
+      map[g.display_name] = getTeachableBlocksForGrade(timetableTemplate, g.id)
+    }
+    return map
+  }, [timetableTemplate, gradesData])
+
+  // Teachable-block check for a grade display string (may span multiple grades,
+  // e.g. "6th-8th Grade"). Returns null if OK, otherwise the display name of the
+  // first grade for which `block` is not teachable (its band's lunch block).
+  function findUnteachableGradeForBlock(gradeDisplay: string, block: number): string | null {
+    if (!timetableTemplate) return null // legacy: every block is teachable
+    const gradeNames = Object.keys(teachableBlocksByGrade)
+    if (gradeNames.length === 0) return null
+    const targets = parseGradeDisplayToNames(gradeDisplay, gradeNames)
+    for (const grade of targets) {
+      const teachable = teachableBlocksByGrade[grade]
+      if (teachable && !teachable.includes(block)) return grade
+    }
+    return null
+  }
+
+  // parseClassesFromSnapshot defaults availableBlocks to the legacy [1..5]. On a
+  // template-driven quarter that default would read as a restriction to blocks
+  // 1-5, so widen classes with no explicit available_blocks restriction to all
+  // template blocks. No-op when there is no template (legacy behavior).
+  function parseClassesForTemplate(snapshot: ClassSnapshot[]): ClassEntry[] {
+    const classes = parseClassesFromSnapshot(snapshot)
+    if (timetableTemplate) {
+      classes.forEach((cls, i) => {
+        const hasBlockRestriction = (snapshot[i]?.restrictions || []).some(
+          r => r.restriction_type === 'available_blocks'
+        )
+        if (!hasBlockRestriction) cls.availableBlocks = [...templateBlocks]
+      })
+    }
+    return classes
+  }
+
   // Effective freeform classes — applies pending transfers so all validation/logic sees the transferred state
   const effectiveFreeformClasses = useMemo(() => {
     if (!freeformClasses) return null
@@ -688,7 +738,7 @@ export default function HistoryDetailPage() {
     }
 
     return conflicts
-  }, [workingSchedules, pendingPlacements, floatingBlocks, conflictResolution, generation?.stats?.classes_snapshot])
+  }, [workingSchedules, pendingPlacements, floatingBlocks, conflictResolution, generation?.stats?.classes_snapshot, templateBlocks])
 
   // Extract just the IDs for highlighting
   const conflictingBlockIds = useMemo(() =>
@@ -715,7 +765,7 @@ export default function HistoryDetailPage() {
         type: e.type as 'grade_conflict' | 'subject_conflict' | 'other',
         message: e.message
       }))
-  }, [generation?.options, generation?.stats, viewingOption])
+  }, [generation?.options, generation?.stats, viewingOption, templateBlocks, teachableBlocksByGrade])
 
   // Compute health status for each revision tab
   // Returns 'green' (perfect), 'yellow' (incomplete), or 'red' (conflicts)
@@ -741,7 +791,7 @@ export default function HistoryDetailPage() {
 
       // 3. Count scheduled blocks vs expected (grade capacity)
       // Uses same logic as ScheduleStats - iterate through teacher schedules with proper grade parsing
-      const BLOCKS_PER_WEEK = 25
+      const BLOCKS_PER_WEEK = DAYS.length * templateBlocks.length
       const optGradeNames = Object.keys(opt.gradeSchedules || {})
       const totalGrades = optGradeNames.length
       const expectedBlocks = totalGrades * BLOCKS_PER_WEEK
@@ -756,7 +806,7 @@ export default function HistoryDetailPage() {
       for (const teacher of Object.keys(opt.teacherSchedules)) {
         const schedule = opt.teacherSchedules[teacher]
         for (const day of DAYS) {
-          for (let block = 1; block <= 5; block++) {
+          for (const block of templateBlocks) {
             const entry = schedule?.[day]?.[block]
             if (entry && entry[1] && isOccupiedBlock(entry[1])) {
               const gradeDisplay = entry[0]
@@ -774,13 +824,16 @@ export default function HistoryDetailPage() {
         }
       }
 
-      // Count total filled slots and grades that are full
+      // Count total filled slots and grades that are full.
+      // A grade's capacity is its teachable blocks (its band's lunch block is
+      // excluded by the template); legacy 5-block generations fall back to 25.
       let scheduledBlocks = 0
       let gradesFullCount = 0
       for (const grade of optGradeNames) {
         const filledCount = filledSlots[grade].size
         scheduledBlocks += filledCount
-        if (filledCount >= BLOCKS_PER_WEEK) {
+        const gradeCapacity = DAYS.length * (teachableBlocksByGrade[grade]?.length ?? templateBlocks.length)
+        if (filledCount >= gradeCapacity) {
           gradesFullCount++
         }
       }
@@ -791,7 +844,7 @@ export default function HistoryDetailPage() {
 
       return isComplete ? 'green' : 'yellow'
     })
-  }, [generation?.options, generation?.stats])
+  }, [generation?.options, generation?.stats, templateBlocks, teachableBlocksByGrade])
 
   // Set validation errors when conflicts are detected
   // Deduplicate by message to avoid showing same conflict multiple times (e.g., for co-taught linked blocks)
@@ -829,12 +882,14 @@ export default function HistoryDetailPage() {
     }
   }, [])
 
-  // Load timetable template + grades data for timetable view
+  // Load timetable template + grades data for timetable view.
+  // The template is resolved for this generation's quarter (per-quarter block formats).
   useEffect(() => {
+    if (!generation?.quarter_id) return
     async function loadTimetableData() {
       try {
         const [templatesRes, gradesRes] = await Promise.all([
-          fetch('/api/timetable-templates'),
+          fetch(`/api/timetable-templates?quarter_id=${generation?.quarter_id}`),
           fetch('/api/grades'),
         ])
         const templates = await templatesRes.json()
@@ -851,7 +906,7 @@ export default function HistoryDetailPage() {
       }
     }
     loadTimetableData()
-  }, [])
+  }, [generation?.quarter_id])
 
   // Remove 'new' query param after initial view so shared URLs don't include it
   // Wait for generation to load so the UI has applied defaultExpanded first
@@ -1349,7 +1404,7 @@ export default function HistoryDetailPage() {
           const restrictions = c.restrictions || []
           const fixedSlots: [string, number][] = []
           let availableDays = ['Mon', 'Tues', 'Wed', 'Thurs', 'Fri']
-          let availableBlocks = [1, 2, 3, 4, 5]
+          let availableBlocks = [...templateBlocks]
 
           restrictions.forEach((r) => {
             if (r.restriction_type === 'fixed_slot') {
@@ -1425,7 +1480,7 @@ export default function HistoryDetailPage() {
       } else {
         // Parse data from snapshots
         teachers = parseTeachersFromSnapshot(generation.stats!.teachers_snapshot!)
-        classes = parseClassesFromSnapshot(generation.stats!.classes_snapshot!)
+        classes = parseClassesForTemplate(generation.stats!.classes_snapshot!)
         // Parse grades from snapshot (grades_snapshot contains display_name)
         grades = (generation.stats!.grades_snapshot || []).map((g: { display_name: string }) => g.display_name)
       }
@@ -1501,7 +1556,7 @@ export default function HistoryDetailPage() {
           if (!a && !b) continue
 
           for (const day of ['Mon', 'Tues', 'Wed', 'Thurs', 'Fri']) {
-            for (const block of [1, 2, 3, 4, 5]) {
+            for (const block of templateBlocks) {
               if (JSON.stringify(a[day]?.[block]) !== JSON.stringify(b[day]?.[block])) {
                 return false
               }
@@ -1517,6 +1572,36 @@ export default function HistoryDetailPage() {
         const matchesPreview = previewOption && schedulesMatch(schedules, previewOption.teacherSchedules)
         return { matchesOriginal, matchesPreview }
       }
+
+      // Block format wiring (same convention as GenerateModal): omit both fields
+      // entirely when there is no template so the solver uses its legacy 5-block
+      // default. gradeTeachableBlocks is keyed by grade DISPLAY NAME.
+      // The template endpoint always resolves a template (legacy quarters get the
+      // 5-block fallback), so a null template here means the initial fetch FAILED.
+      // Solving without it would silently run a 9-block quarter in 5-block mode
+      // with no lunch masks — retry once, and fail closed if still unavailable.
+      let regenTemplate = timetableTemplate
+      if (!regenTemplate && generation?.quarter_id) {
+        try {
+          const res = await fetch(`/api/timetable-templates?quarter_id=${generation.quarter_id}`)
+          const tpls = await res.json()
+          if (Array.isArray(tpls) && tpls.length > 0) {
+            regenTemplate = tpls[0]
+            setTimetableTemplate(tpls[0])
+          }
+        } catch {
+          // handled below
+        }
+      }
+      if (!regenTemplate) {
+        // Inside the try block — the finally clause resets the generating state
+        toast.error("Couldn't load this quarter's block format — regeneration cancelled. Check your connection and try again.")
+        return
+      }
+      const solveBlocks = getTemplateBlocks(regenTemplate)
+      const solveGradeTeachableBlocks = Object.fromEntries(
+        gradesData.map(g => [g.display_name, getTeachableBlocksForGrade(regenTemplate, g.id)])
+      )
 
       // Auto-escalation strategy: try progressively harder approaches until one works
       // 1. OR-Tools normal (50 seeds, quick per seed)
@@ -1555,6 +1640,8 @@ export default function HistoryDetailPage() {
         startSeed: seedOffset,
         skipStudyHalls,
         grades,
+        blocks: solveBlocks,
+        gradeTeachableBlocks: solveGradeTeachableBlocks,
         onProgress: (current, total, message) => {
           setGenerationProgress({ current, total, message: `[OR-Tools] ${message}` })
         }
@@ -1579,6 +1666,8 @@ export default function HistoryDetailPage() {
           startSeed: seedOffset + 50,
           skipStudyHalls,
           grades,
+          blocks: solveBlocks,
+          gradeTeachableBlocks: solveGradeTeachableBlocks,
           onProgress: (current, total, message) => {
             setGenerationProgress({ current, total, message: `[OR-Tools Deep] ${message}` })
           }
@@ -1602,7 +1691,7 @@ export default function HistoryDetailPage() {
           onProgress: (current, total, message) => {
             setGenerationProgress({ current, total, message: `[JS] ${message}` })
           }
-        })
+        }, solveBlocks, solveGradeTeachableBlocks)
         result = jsResult
         usedJsFallback = true
         usedStrategy = "js"
@@ -1622,6 +1711,8 @@ export default function HistoryDetailPage() {
           skipTopSolutions: 3,
           skipStudyHalls,
           grades,
+          blocks: solveBlocks,
+          gradeTeachableBlocks: solveGradeTeachableBlocks,
           onProgress: (current, total, message) => {
             setGenerationProgress({ current, total, message: `[OR-Tools Suboptimal] ${message}` })
           }
@@ -1644,6 +1735,8 @@ export default function HistoryDetailPage() {
           randomizeScoring: true,
           skipStudyHalls,
           grades,
+          blocks: solveBlocks,
+          gradeTeachableBlocks: solveGradeTeachableBlocks,
           onProgress: (current, total, message) => {
             setGenerationProgress({ current, total, message: `[OR-Tools Randomized] ${message}` })
           }
@@ -1706,7 +1799,7 @@ export default function HistoryDetailPage() {
 
         // Compare each slot
         for (const day of ['Mon', 'Tues', 'Wed', 'Thurs', 'Fri']) {
-          for (let block = 1; block <= 5; block++) {
+          for (const block of templateBlocks) {
             const originalEntry = originalSchedule[day]?.[block]
             const newEntry = newSchedule[day]?.[block]
 
@@ -1847,7 +1940,7 @@ export default function HistoryDetailPage() {
       // Step 1: Remove selected teachers from grade schedules (clear their old slots)
       for (const grade of allGrades) {
         for (const day of DAYS) {
-          for (let block = 1; block <= 5; block++) {
+          for (const block of templateBlocks) {
             const cell = mergedGradeSchedules[grade]?.[day]?.[block]
             const entry = getFirstGradeEntry(cell)
             if (entry && previewTeachers.has(entry[0])) {
@@ -1862,7 +1955,7 @@ export default function HistoryDetailPage() {
       const previewGradeSchedules = previewOption.gradeSchedules
       for (const grade of allGrades) {
         for (const day of DAYS) {
-          for (let block = 1; block <= 5; block++) {
+          for (const block of templateBlocks) {
             const previewCell = previewGradeSchedules[grade]?.[day]?.[block]
             const previewEntry = getFirstGradeEntry(previewCell)
             if (previewEntry && previewTeachers.has(previewEntry[0])) {
@@ -2369,7 +2462,7 @@ export default function HistoryDetailPage() {
     // Remove all study halls from teacher schedules
     for (const [, schedule] of Object.entries(newTeacherSchedules) as [string, TeacherSchedule][]) {
       for (const day of DAYS_LIST) {
-        for (let block = 1; block <= 5; block++) {
+        for (const block of templateBlocks) {
           const entry = schedule[day]?.[block]
           if (entry && isStudyHall(entry[1])) {
             schedule[day][block] = ['', 'OPEN']
@@ -2382,7 +2475,7 @@ export default function HistoryDetailPage() {
     // Remove study halls from grade schedules too
     for (const [, schedule] of Object.entries(newGradeSchedules) as [string, GradeSchedule][]) {
       for (const day of DAYS_LIST) {
-        for (let block = 1; block <= 5; block++) {
+        for (const block of templateBlocks) {
           const cell = schedule[day]?.[block]
           const entry = getFirstGradeEntry(cell)
           if (entry && isStudyHall(entry[1])) {
@@ -2443,7 +2536,7 @@ export default function HistoryDetailPage() {
     const beforeStudyHalls: string[] = []
     for (const [teacher, schedule] of Object.entries(currentOption.teacherSchedules)) {
       for (const day of DAYS) {
-        for (let block = 1; block <= 5; block++) {
+        for (const block of templateBlocks) {
           const entry = schedule[day]?.[block]
           if (entry && entry[1] === 'Study Hall') {
             beforeStudyHalls.push(`${teacher} @ ${day} B${block}: ${entry[0]} / Study Hall`)
@@ -2453,7 +2546,15 @@ export default function HistoryDetailPage() {
     }
 
     // Pass all teachers for stats, but exclude UI-selected teachers from study hall assignment
-    const result = reassignStudyHalls(currentOption, teachers, seed, rules, excludedFromStudyHalls)
+    const result = reassignStudyHalls(
+      currentOption,
+      teachers,
+      seed,
+      rules,
+      excludedFromStudyHalls,
+      timetableTemplate ? templateBlocks : undefined,
+      timetableTemplate ? teachableBlocksByGrade : undefined
+    )
 
     if (!result.success) {
       toast.error(result.message || "Could not reassign study halls")
@@ -2474,7 +2575,7 @@ export default function HistoryDetailPage() {
     const afterStudyHalls: string[] = []
     for (const [teacher, schedule] of Object.entries(result.newOption.teacherSchedules)) {
       for (const day of DAYS) {
-        for (let block = 1; block <= 5; block++) {
+        for (const block of templateBlocks) {
           const entry = schedule[day]?.[block]
           if (entry && entry[1] === 'Study Hall') {
             afterStudyHalls.push(`${teacher} @ ${day} B${block}: ${entry[0]} / Study Hall`)
@@ -2571,7 +2672,7 @@ export default function HistoryDetailPage() {
 
     const grade = selectedStudyHallGroup
     const DAYS_LIST = ["Mon", "Tues", "Wed", "Thurs", "Fri"]
-    const BLOCKS_LIST = [1, 2, 3, 4, 5]
+    const BLOCKS_LIST = templateBlocks
     const targets: CellLocation[] = []
 
     // Pre-compute: days where this grade already has a study hall
@@ -2614,6 +2715,8 @@ export default function HistoryDetailPage() {
           if (entry && !isOpenBlock(entry[1])) continue
           // Grade must be free at this slot
           if (gradeBusySlots.has(`${day}|${block}`)) continue
+          // Block must be teachable for the group's grade(s) (not its band's lunch)
+          if (findUnteachableGradeForBlock(grade, block)) continue
 
           targets.push({ teacher, day, block, grade: '', subject: '' })
         }
@@ -2626,7 +2729,7 @@ export default function HistoryDetailPage() {
     } else {
       toast(`${targets.length} valid target${targets.length !== 1 ? 's' : ''} found`, { icon: <Crosshair className="h-4 w-4 text-violet-500" /> })
     }
-  }, [manualStudyHallMode, selectedStudyHallGroup, previewOption, generation?.options, viewingOption, excludedFromStudyHalls, studyHallMode])
+  }, [manualStudyHallMode, selectedStudyHallGroup, previewOption, generation?.options, viewingOption, excludedFromStudyHalls, studyHallMode, templateBlocks, teachableBlocksByGrade])
 
   function handleManualStudyHallPlace(teacher: string, day: string, block: number) {
     if (!selectedStudyHallGroup || !manualStudyHallMode) return
@@ -2662,6 +2765,13 @@ export default function HistoryDetailPage() {
     if (!shAssignment) return
 
     const grade = shAssignment.group
+
+    // Validate: block must be teachable for the group's grade(s) (not its band's lunch)
+    const lunchGrade = findUnteachableGradeForBlock(grade, block)
+    if (lunchGrade) {
+      toast.error(`Block ${block} is lunch for ${lunchGrade}`)
+      return
+    }
 
     // Validate: grade must be free at this slot (no grade conflict)
     for (const [, schedule] of Object.entries(newTeacherSchedules) as [string, TeacherSchedule][]) {
@@ -2886,7 +2996,7 @@ export default function HistoryDetailPage() {
     options?: { skipStudyHallCheck?: boolean }
   ): Promise<boolean> {
     const DAYS = ["Mon", "Tues", "Wed", "Thurs", "Fri"]
-    const softWarningTypes = ['back_to_back', 'study_hall_coverage']
+    const softWarningTypes = ['back_to_back', 'study_hall_coverage', 'no_lunch']
 
     // Define all checks
     const checkDefinitions = [
@@ -2900,6 +3010,7 @@ export default function HistoryDetailPage() {
       { name: 'Fixed slot constraints', key: 'fixed_slot_violation' },
       { name: 'Availability constraints', key: 'availability_violation' },
       { name: 'Back-to-back blocks', key: 'back_to_back' },
+      { name: 'Teacher lunch breaks', key: 'no_lunch' },
     ]
 
     // Initialize modal with all checks pending (mark study hall as skipped if applicable)
@@ -3084,7 +3195,7 @@ export default function HistoryDetailPage() {
       } else {
         // For OPEN blocks, can swap to any other OPEN block
         const DAYS = ["Mon", "Tues", "Wed", "Thurs", "Fri"]
-        const BLOCKS = [1, 2, 3, 4, 5]
+        const BLOCKS = templateBlocks
         for (const day of DAYS) {
           for (const block of BLOCKS) {
             const entry = schedule[day]?.[block]
@@ -3105,7 +3216,7 @@ export default function HistoryDetailPage() {
 
     const targets: CellLocation[] = []
     const DAYS = ["Mon", "Tues", "Wed", "Thurs", "Fri"]
-    const BLOCKS = [1, 2, 3, 4, 5]
+    const BLOCKS = templateBlocks
 
     const teacher = source.teacher
     const grade = source.grade
@@ -3117,6 +3228,9 @@ export default function HistoryDetailPage() {
     const teacherSchedule = teacherSchedules[teacher]
     const gradeSchedule = gradeSchedules[grade]
     if (!teacherSchedule || !gradeSchedule) return []
+
+    // Full grade span of the source class (may be multi-grade, e.g. an elective)
+    const sourceGradeDisplay = teacherSchedule[source.day]?.[source.block]?.[0] || grade
 
     // Get subjects already scheduled on each day for this grade (excluding source)
     const subjectsByDay: Record<string, Set<string>> = {}
@@ -3151,6 +3265,9 @@ export default function HistoryDetailPage() {
 
         // No subject conflict - source subject can't already be on this day
         if (subjectsByDay[day].has(subject)) continue
+
+        // Block must be teachable for all of the class's grades (not a band's lunch)
+        if (findUnteachableGradeForBlock(sourceGradeDisplay, block)) continue
 
         targets.push({ teacher, day, block, grade, subject })
       }
@@ -3197,6 +3314,11 @@ export default function HistoryDetailPage() {
         const sourceDaySubjects = new Set(subjectsByDay[source.day])
         if (sourceDaySubjects.has(otherSubject)) continue
 
+        // Teachability: source class moves to (day, block); other class moves to source slot
+        if (findUnteachableGradeForBlock(sourceGradeDisplay, block)) continue
+        const otherGradeDisplay = otherTeacherSchedule[day]?.[block]?.[0] || grade
+        if (findUnteachableGradeForBlock(otherGradeDisplay, source.block)) continue
+
         // Target is in the OTHER teacher's schedule (where the swap target class is)
         targets.push({ teacher: otherTeacher, day, block, grade, subject: otherSubject })
       }
@@ -3211,7 +3333,7 @@ export default function HistoryDetailPage() {
 
     const targets: CellLocation[] = []
     const DAYS = ["Mon", "Tues", "Wed", "Thurs", "Fri"]
-    const BLOCKS = [1, 2, 3, 4, 5]
+    const BLOCKS = templateBlocks
 
     const teacherSchedules = swapWorkingSchedules?.teacherSchedules || selectedResult.teacherSchedules
     const gradeSchedules = swapWorkingSchedules?.gradeSchedules || selectedResult.gradeSchedules
@@ -3219,6 +3341,9 @@ export default function HistoryDetailPage() {
     const gradeSchedule = gradeSchedules[source.grade]
     const teacherSchedule = teacherSchedules[source.teacher]
     if (!gradeSchedule || !teacherSchedule) return []
+
+    // Full grade span of the source class (may be multi-grade, e.g. an elective)
+    const sourceGradeDisplay = teacherSchedule[source.day]?.[source.block]?.[0] || source.grade
 
     // Get subjects already scheduled on each day for this grade (excluding source)
     const subjectsByDay: Record<string, Set<string>> = {}
@@ -3255,6 +3380,9 @@ export default function HistoryDetailPage() {
 
         // No subject conflict - source subject can't already be on this day
         if (subjectsByDay[day].has(source.subject)) continue
+
+        // Block must be teachable for all of the class's grades (not a band's lunch)
+        if (findUnteachableGradeForBlock(sourceGradeDisplay, block)) continue
 
         targets.push({ grade: source.grade, day, block, teacher: source.teacher, subject: source.subject })
       }
@@ -3303,6 +3431,11 @@ export default function HistoryDetailPage() {
         const sourceDaySubjects = new Set(subjectsByDay[source.day])
         // sourceDaySubjects already excludes source.subject
         if (sourceDaySubjects.has(otherSubject)) continue
+
+        // Teachability: source class moves to (day, block); other class moves to source slot
+        if (findUnteachableGradeForBlock(sourceGradeDisplay, block)) continue
+        const otherGradeDisplay = otherTeacherSchedule[day]?.[block]?.[0] || source.grade
+        if (findUnteachableGradeForBlock(otherGradeDisplay, source.block)) continue
 
         targets.push({ grade: source.grade, day, block, teacher: otherTeacher, subject: otherSubject })
       }
@@ -3920,7 +4053,7 @@ export default function HistoryDetailPage() {
     setPendingTransfers([])
 
     // Parse classes from snapshot for validation
-    const classes = parseClassesFromSnapshot(generation.stats!.classes_snapshot!)
+    const classes = parseClassesForTemplate(generation.stats!.classes_snapshot!)
     setFreeformClasses(classes)
 
     // Run validation on the current schedule to show any existing conflicts
@@ -3963,7 +4096,7 @@ export default function HistoryDetailPage() {
 
     for (const [teacher, schedule] of Object.entries(newTeacherSchedules) as [string, TeacherSchedule][]) {
       for (const day of DAYS) {
-        for (let block = 1; block <= 5; block++) {
+        for (const block of templateBlocks) {
           const entry = schedule[day]?.[block]
           if (entry && isStudyHall(entry[1])) {
             // Store the position and grade
@@ -4123,6 +4256,16 @@ export default function HistoryDetailPage() {
   // Core placement logic - places a block at a location, handling displaced content
   function doPlaceBlock(block: FloatingBlock, location: CellLocation) {
     if (!workingSchedules) return
+
+    // Hard reject: a class cannot be placed into a block that isn't teachable
+    // for one of its grades (that band's lunch block) — same rule as the solver
+    if (block.grade) {
+      const lunchGrade = findUnteachableGradeForBlock(block.grade, location.block)
+      if (lunchGrade) {
+        toast.error(`Block ${location.block} is lunch for ${lunchGrade}`)
+        return
+      }
+    }
 
     // Clear auto-fix undo state on new manual placement
     // User is taking a new action, so previous auto-fix undo is no longer relevant
@@ -4566,7 +4709,7 @@ export default function HistoryDetailPage() {
       // Check subject conflict - find the OTHER class that has same subject on same day for same grade
       // Use gradesOverlap() to handle multi-grade classes
       for (const [teacher, sched] of Object.entries(schedules.teacherSchedules)) {
-        for (let b = 1; b <= 5; b++) {
+        for (const b of templateBlocks) {
           if (teacher === placement.teacher && b === blockNum) continue // Skip our placement
           const entry = (sched as TeacherSchedule)[day]?.[b]
           if (entry && gradesOverlap(entry[0], block.grade) && entry[1] === block.subject) {
@@ -4607,7 +4750,7 @@ export default function HistoryDetailPage() {
     if (blockers.length === 0) return null
 
     const DAYS = ["Mon", "Tues", "Wed", "Thurs", "Fri"]
-    const BLOCKS = [1, 2, 3, 4, 5]
+    const BLOCKS = templateBlocks
 
     // Deep copy schedules
     const newTeacherSchedules = JSON.parse(JSON.stringify(schedules.teacherSchedules))
@@ -4662,6 +4805,9 @@ export default function HistoryDetailPage() {
       const currentEntry = newTeacherSchedules[teacher]?.[day]?.[blockNum]
       if (currentEntry && isOccupiedBlock(currentEntry[1])) return false
 
+      // Block must be teachable for all of the class's grades (not a band's lunch)
+      if (findUnteachableGradeForBlock(grade, blockNum)) return false
+
       // Check class restrictions (availableDays, availableBlocks)
       const restrictionKey = `${teacher}|${subject}`
       const restrictions = classRestrictions.get(restrictionKey)
@@ -4700,7 +4846,7 @@ export default function HistoryDetailPage() {
 
       // Check subject conflict - same subject on same day for overlapping grade
       for (const [, sched] of Object.entries(newTeacherSchedules)) {
-        for (let b = 1; b <= 5; b++) {
+        for (const b of templateBlocks) {
           if (b === blockNum) continue
           const entry = (sched as TeacherSchedule)[day]?.[b]
           if (entry && entry[1] === subject && gradesOverlap(entry[0], grade)) {
@@ -5236,7 +5382,7 @@ export default function HistoryDetailPage() {
     const DAYS = ["Mon", "Tues", "Wed", "Thurs", "Fri"]
 
     for (const day of DAYS) {
-      for (let block = 1; block <= 5; block++) {
+      for (const block of templateBlocks) {
         const classesAtSlot: ClassAtSlot[] = []
 
         for (const [teacher, schedule] of Object.entries(teacherSchedules)) {
@@ -5291,7 +5437,7 @@ export default function HistoryDetailPage() {
 
     for (const [teacher, schedule] of Object.entries(teacherSchedules)) {
       for (const day of DAYS) {
-        for (let block = 1; block <= 5; block++) {
+        for (const block of templateBlocks) {
           const entry = schedule[day]?.[block]
           if (!entry || !isScheduledClass(entry[1])) continue
 
@@ -5381,8 +5527,8 @@ export default function HistoryDetailPage() {
     for (const cls of classes) {
       if (!cls.teacher || !cls.subject) continue
 
-      const hasRestrictedDays = cls.availableDays && cls.availableDays.length < 5
-      const hasRestrictedBlocks = cls.availableBlocks && cls.availableBlocks.length < 5
+      const hasRestrictedDays = cls.availableDays && cls.availableDays.length < DAYS.length
+      const hasRestrictedBlocks = cls.availableBlocks && cls.availableBlocks.length < templateBlocks.length
 
       if (!hasRestrictedDays && !hasRestrictedBlocks) continue
 
@@ -5390,7 +5536,7 @@ export default function HistoryDetailPage() {
       if (!teacherSchedule) continue
 
       for (const day of DAYS) {
-        for (let block = 1; block <= 5; block++) {
+        for (const block of templateBlocks) {
           const entry = teacherSchedule[day]?.[block]
           if (!entry || entry[1] !== cls.subject) continue
 
@@ -5439,7 +5585,7 @@ export default function HistoryDetailPage() {
       // Derive from teacher schedules - collect all unique grade displays
       for (const schedule of Object.values(teacherSchedules)) {
         for (const day of DAYS) {
-          for (let block = 1; block <= 5; block++) {
+          for (const block of templateBlocks) {
             const entry = schedule[day]?.[block]
             if (entry && entry[0] && isScheduledClass(entry[1])) {
               availableGrades.add(entry[0])
@@ -5498,7 +5644,7 @@ export default function HistoryDetailPage() {
 
     for (const [teacher, schedule] of Object.entries(teacherSchedules)) {
       for (const day of DAYS) {
-        for (let block = 1; block <= 5; block++) {
+        for (const block of templateBlocks) {
           const entry = schedule[day]?.[block]
           if (!entry || !entry[0] || !isScheduledClass(entry[1])) continue
 
@@ -5774,7 +5920,7 @@ export default function HistoryDetailPage() {
       if (stats.classes_snapshot) {
         const classes = (freeformMode && effectiveFreeformClasses && pendingTransfers.length > 0)
           ? effectiveFreeformClasses
-          : parseClassesFromSnapshot(stats.classes_snapshot)
+          : parseClassesForTemplate(stats.classes_snapshot)
 
         // Helper: check if a schedule entry matches a class definition
         // A match requires: same teacher, same subject, and grades overlap
@@ -5795,7 +5941,7 @@ export default function HistoryDetailPage() {
 
         for (const [teacher, schedule] of Object.entries(option.teacherSchedules)) {
           for (const day of DAYS) {
-            for (let block = 1; block <= 5; block++) {
+            for (const block of templateBlocks) {
               const entry = schedule[day]?.[block]
               if (!entry || !isScheduledClass(entry[1])) continue
 
@@ -5822,7 +5968,7 @@ export default function HistoryDetailPage() {
           let sessionCount = 0
 
           for (const day of DAYS) {
-            for (let block = 1; block <= 5; block++) {
+            for (const block of templateBlocks) {
               const entry = teacherSchedule[day]?.[block]
               if (!entry) continue
 
@@ -5891,7 +6037,7 @@ export default function HistoryDetailPage() {
           // Find all study hall assignments
           for (const [, schedule] of Object.entries(option.teacherSchedules)) {
             for (const day of DAYS) {
-              for (let block = 1; block <= 5; block++) {
+              for (const block of templateBlocks) {
                 const entry = schedule[day]?.[block]
                 if (entry && isStudyHall(entry[1])) {
                   const gradeDisplay = entry[0]
@@ -5927,9 +6073,9 @@ export default function HistoryDetailPage() {
 
           let backToBackCount = 0
           for (const day of DAYS) {
-            for (let block = 1; block <= 4; block++) {
-              const entry1 = schedule[day]?.[block]
-              const entry2 = schedule[day]?.[block + 1]
+            for (let i = 0; i < templateBlocks.length - 1; i++) {
+              const entry1 = schedule[day]?.[templateBlocks[i]]
+              const entry2 = schedule[day]?.[templateBlocks[i + 1]]
 
               const isOpen1 = !entry1 || isOpenBlock(entry1[1]) || isStudyHall(entry1[1])
               const isOpen2 = !entry2 || isOpenBlock(entry2[1]) || isStudyHall(entry2[1])
@@ -5952,16 +6098,68 @@ export default function HistoryDetailPage() {
 
       // 8. Fixed Slot Violations - use shared core function
       if (stats.classes_snapshot) {
-        const classes = parseClassesFromSnapshot(stats.classes_snapshot)
+        const classes = parseClassesForTemplate(stats.classes_snapshot)
         const fixedSlotErrors = checkFixedSlotViolationsCore(option.teacherSchedules, classes)
         errors.push(...fixedSlotErrors)
       }
 
       // 9. Availability Violations - use shared core function
       if (stats.classes_snapshot) {
-        const classes = parseClassesFromSnapshot(stats.classes_snapshot)
+        const classes = parseClassesForTemplate(stats.classes_snapshot)
         const availabilityErrors = checkAvailabilityViolationsCore(option.teacherSchedules, classes)
         errors.push(...availabilityErrors)
+      }
+    }
+
+    // 10. Teacher Lunch Coverage (soft warning) - template-driven quarters only.
+    // Mirrors the solvers' definition: a teacher's candidate lunch windows are
+    // the union, over the grades of the classes they teach in this schedule, of
+    // (templateBlocks minus that grade's teachable blocks). Manual edits can
+    // override the solver's hard constraint, so a day where classes/study halls
+    // occupy ALL candidate windows is a warning, not a blocking error. Legacy
+    // quarters (no template) produce empty candidates and are skipped.
+    const lunchGradeNames = Object.keys(teachableBlocksByGrade)
+    if (timetableTemplate && lunchGradeNames.length > 0) {
+      for (const [teacher, schedule] of Object.entries(option.teacherSchedules)) {
+        // Grades this teacher teaches, expanded from multi-grade displays
+        const taughtGrades = new Set<string>()
+        for (const day of DAYS) {
+          for (const block of templateBlocks) {
+            const entry = schedule[day]?.[block]
+            if (!entry || !isScheduledClass(entry[1])) continue
+            for (const g of parseGradeDisplayToNames(entry[0], lunchGradeNames)) {
+              taughtGrades.add(g)
+            }
+          }
+        }
+
+        // Candidate lunch windows = union of non-teachable blocks across taught grades
+        const candidateBlocks = new Set<number>()
+        for (const grade of taughtGrades) {
+          const teachable = teachableBlocksByGrade[grade]
+          if (!teachable) continue
+          for (const block of templateBlocks) {
+            if (!teachable.includes(block)) candidateBlocks.add(block)
+          }
+        }
+        if (candidateBlocks.size === 0) continue // no lunch windows derivable (legacy/no data)
+
+        const candidates = Array.from(candidateBlocks).sort((a, b) => a - b)
+        for (const day of DAYS) {
+          const allOccupied = candidates.every(b => {
+            const entry = schedule[day]?.[b]
+            return !!entry && (isScheduledClass(entry[1]) || isStudyHall(entry[1]))
+          })
+          if (allOccupied) {
+            errors.push({
+              // 'no_lunch' is a page-local soft warning type; the shared
+              // ValidationError union in lib/types.ts is out of scope here.
+              type: 'no_lunch' as ValidationError['type'],
+              message: `[No Lunch] ${teacher} has no lunch break on ${day} (blocks ${candidates.join(', ')} all scheduled)`,
+              cells: candidates.map(b => ({ teacher, day, block: b }))
+            })
+          }
+        }
       }
     }
 
@@ -5969,7 +6167,7 @@ export default function HistoryDetailPage() {
   }
 
   /** Soft warning types — shown separately from hard validation errors */
-  const SOFT_WARNING_TYPES = new Set(['back_to_back'])
+  const SOFT_WARNING_TYPES = new Set(['back_to_back', 'no_lunch'])
 
   function splitValidationErrors(errors: ValidationError[]) {
     const hard = errors.filter(e => !SOFT_WARNING_TYPES.has(e.type))
@@ -6002,7 +6200,7 @@ export default function HistoryDetailPage() {
 
     const DAYS = ["Mon", "Tues", "Wed", "Thurs", "Fri"]
     const issues: RepairIssue[] = []
-    const classes = parseClassesFromSnapshot(stats.classes_snapshot)
+    const classes = parseClassesForTemplate(stats.classes_snapshot)
     const validGradeNames = stats.grades_snapshot.map(g => g.display_name)
 
     // Helper: check if a schedule entry matches a class definition
@@ -6038,7 +6236,7 @@ export default function HistoryDetailPage() {
 
     for (const [teacher, schedule] of Object.entries(option.teacherSchedules)) {
       for (const day of DAYS) {
-        for (let block = 1; block <= 5; block++) {
+        for (const block of templateBlocks) {
           const entry = schedule[day]?.[block]
           if (!entry || !isScheduledClass(entry[1])) continue
 
@@ -6171,7 +6369,7 @@ export default function HistoryDetailPage() {
       for (const [teacher, schedule] of Object.entries(option.teacherSchedules)) {
         if (teacher !== cls.teacher) continue
         for (const day of DAYS) {
-          for (let block = 1; block <= 5; block++) {
+          for (const block of templateBlocks) {
             const entry = schedule[day]?.[block]
             if (entry && entry[1] === cls.subject) {
               // Check if grades overlap (using global helper)
@@ -6223,7 +6421,7 @@ export default function HistoryDetailPage() {
       const schedule = option.gradeSchedules[grade]
       if (schedule) {
         for (const day of DAYS) {
-          for (let block = 1; block <= 5; block++) {
+          for (const block of templateBlocks) {
             const entry = schedule[day]?.[block]
             if (entry && entry[1] && entry[1] !== 'OPEN') {
               count++
@@ -6238,19 +6436,23 @@ export default function HistoryDetailPage() {
     for (const grade of validGradeNames) {
       const expected = expectedPerGrade.get(grade) || 0
       const actual = actualPerGrade.get(grade) || 0
-      // Note: expected can exceed 25 due to slot sharing (electives, multi-grade classes)
-      // Compare against min(expected, 25) since a grade can only have 25 slots max
-      const effectiveExpected = Math.min(expected, 25)
+      // A grade's weekly capacity is its teachable blocks x 5 days (25 for the
+      // legacy 5-block format; a band's lunch block is excluded by the template)
+      const gradeCapacity = DAYS.length * (teachableBlocksByGrade[grade]?.length ?? templateBlocks.length)
+      // Note: expected can exceed capacity due to slot sharing (electives, multi-grade classes)
+      // Compare against min(expected, capacity) since a grade can only have that many slots
+      const effectiveExpected = Math.min(expected, gradeCapacity)
       const status = actual >= effectiveExpected ? '✓' : '⚠️ UNDER'
 
       // Only check for missing slots if there are actual empty slots
-      // (actual < 25 means there are unfilled slots that could potentially have classes)
-      const emptySlotCount = 25 - actual
+      // (actual < capacity means there are unfilled slots that could potentially have classes)
+      const emptySlotCount = gradeCapacity - actual
       if (emptySlotCount > 0) {
         const schedule = option.gradeSchedules[grade]
         const emptySlots: string[] = []
+        const gradeBlocks = teachableBlocksByGrade[grade] ?? templateBlocks
         for (const day of DAYS) {
-          for (let block = 1; block <= 5; block++) {
+          for (const block of gradeBlocks) {
             const entry = schedule?.[day]?.[block]
             if (!entry || !entry[1] || entry[1] === 'OPEN') {
               emptySlots.push(`${day} B${block}`)
@@ -6295,14 +6497,24 @@ export default function HistoryDetailPage() {
     }
 
     // NEW: Analyze elective slot conflicts
-    // Elective slots for grades 6-11: Mon B5, Wed B5, Fri B1
-    // If a single-grade (non-elective) class is scheduled in these slots,
-    // it conflicts with the electives that run at the same time
-    const electiveSlots = [
-      { day: 'Mon', block: 5 },
-      { day: 'Wed', block: 5 },
-      { day: 'Fri', block: 1 }
-    ]
+    // Elective windows are derived from the elective classes' fixed_slot
+    // restrictions in this generation's snapshot (union of all elective fixed
+    // slots). If a single-grade (non-elective) class is scheduled in these
+    // slots, it conflicts with the electives that run at the same time.
+    // Legacy generations with electives pinned Mon B5 / Wed B5 / Fri B1 derive
+    // exactly those slots; if no elective has fixed slots, this check is a no-op.
+    const electiveSlotKeys = new Set<string>()
+    const electiveSlots: Array<{ day: string; block: number }> = []
+    for (const cls of classes) {
+      if (!cls.isElective) continue
+      for (const [day, block] of cls.fixedSlots || []) {
+        const key = `${day}|${block}`
+        if (!electiveSlotKeys.has(key)) {
+          electiveSlotKeys.add(key)
+          electiveSlots.push({ day, block })
+        }
+      }
+    }
     const electiveGrades = [6, 7, 8, 9, 10, 11]
 
     const electiveSlotConflicts: Array<{
@@ -7255,6 +7467,7 @@ export default function HistoryDetailPage() {
                       classesSnapshot={generation?.stats?.classes_snapshot}
                       openBlockLabels={publicOption.openBlockLabels}
                       showOpenLabels={true}
+                      blocks={templateBlocks}
                     />
                   ))
               : Object.entries(publicOption.gradeSchedules)
@@ -7266,6 +7479,7 @@ export default function HistoryDetailPage() {
                       type="grade"
                       name={grade}
                       classesSnapshot={generation?.stats?.classes_snapshot}
+                      blocks={templateBlocks}
                     />
                   ))
             }
@@ -7602,6 +7816,8 @@ export default function HistoryDetailPage() {
                     expectedTeachingSessions={expectedTeachingSessions}
                     defaultExpanded={isNewGeneration}
                     validationIssues={savedScheduleValidationIssues}
+                    blocks={templateBlocks}
+                    teachableBlocksByGrade={teachableBlocksByGrade}
                   />
                 </div>
               )}
@@ -7933,7 +8149,7 @@ export default function HistoryDetailPage() {
                                   {day}
                                 </div>
                               ))}
-                              {[1, 2, 3, 4, 5].map(block => (
+                              {templateBlocks.map(block => (
                                 <Fragment key={block}>
                                   <div className="text-[9px] font-medium text-slate-500 flex items-center pr-1">
                                     B{block}
@@ -7941,7 +8157,10 @@ export default function HistoryDetailPage() {
                                   {DAYS_LIST.map(day => {
                                     const cell = gradeSchedule[day]?.[block]
                                     const entry = getFirstGradeEntry(cell)
-                                    const isOpen = !entry || entry[1] === 'OPEN'
+                                    // A block that isn't teachable for this grade (its band's
+                                    // lunch) is never a valid placement target
+                                    const isUnteachable = !!findUnteachableGradeForBlock(selectedBlock.grade, block)
+                                    const isOpen = !isUnteachable && (!entry || entry[1] === 'OPEN')
                                     const isSH = entry && isStudyHall(entry[1])
                                     const isMultiple = isMultipleEntryCell(cell)
                                     const teacher = entry?.[0] || ''
@@ -9046,6 +9265,7 @@ export default function HistoryDetailPage() {
                                 openBlockLabels={selectedResult.openBlockLabels}
                                 showOpenLabels={!regenMode && !swapMode && !freeformMode && !studyHallMode}
                                 onOpenLabelChange={userRole === "admin" && showOpenLabels && !regenMode && !swapMode && !freeformMode && !studyHallMode ? handleOpenLabelChange : undefined}
+                                blocks={templateBlocks}
                               />
                               {/* Unplaced floating blocks from this teacher */}
                               {freeformMode && teacherFloatingBlocks.length > 0 && (
@@ -9131,6 +9351,7 @@ export default function HistoryDetailPage() {
                             highlightedCells={highlightedCells}
                             onCellClick={handleCellClick}
                             classesSnapshot={generation?.stats?.classes_snapshot}
+                            blocks={templateBlocks}
                           />
                         ))}
                 </div>
