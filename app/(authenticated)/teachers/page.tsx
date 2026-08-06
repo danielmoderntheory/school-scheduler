@@ -45,6 +45,7 @@ import { Trash2, Loader2, RotateCcw, ChevronDown, Archive } from "lucide-react"
 import toast from "@/lib/toast"
 import { TEACHER_STATUS_FULL_TIME, TEACHER_STATUS_PART_TIME, type TeacherStatus } from "@/lib/schedule-utils"
 import { TeacherAvailabilityPopover } from "@/components/TeacherAvailabilityPopover"
+import { getTemplateBlocks } from "@/lib/timetable-utils"
 
 interface Teacher {
   id: string
@@ -79,11 +80,32 @@ export default function TeachersPage() {
   const [archivedTeachers, setArchivedTeachers] = useState<ArchivedTeacher[]>([])
   const [archivedOpen, setArchivedOpen] = useState(false)
   const [restoringId, setRestoringId] = useState<string | null>(null)
+  // Blocks available in the active quarter's format, for the availability editor.
+  // Teacher availability is stored globally, so we edit it against the format
+  // currently being scheduled (the active quarter's template).
+  const [availabilityBlocks, setAvailabilityBlocks] = useState<number[] | undefined>(undefined)
 
   useEffect(() => {
     loadTeachers()
     loadArchivedTeachers()
+    loadAvailabilityBlocks()
   }, [])
+
+  async function loadAvailabilityBlocks() {
+    try {
+      const quartersRes = await fetch("/api/quarters")
+      const quarters = await quartersRes.json()
+      const active = Array.isArray(quarters) ? quarters.find((q: { is_active: boolean }) => q.is_active) : null
+      if (!active) return
+      const tplRes = await fetch(`/api/timetable-templates?quarter_id=${active.id}`)
+      const tpls = await tplRes.json()
+      if (Array.isArray(tpls) && tpls.length > 0) {
+        setAvailabilityBlocks(getTemplateBlocks(tpls[0]))
+      }
+    } catch {
+      // Non-critical: popover falls back to the legacy 5-block list
+    }
+  }
 
   useEffect(() => {
     if (teachers.length > 0) {
@@ -324,6 +346,7 @@ export default function TeachersPage() {
                     </TableCell>
                     <TableCell>
                       <TeacherAvailabilityPopover
+                        allBlocks={availabilityBlocks}
                         availableDays={teacher.available_days}
                         availableBlocks={teacher.available_blocks}
                         onSave={(days, blocks) =>

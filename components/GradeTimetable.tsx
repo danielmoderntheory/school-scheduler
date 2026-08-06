@@ -46,6 +46,29 @@ export function GradeTimetable({
     return { subject, teacher }
   }
 
+  // Safety net: find schedule entries whose block has no matching row in this
+  // grade's resolved template rows. Without this, such entries would be
+  // silently dropped from the timetable view. Only blocks with visible content
+  // (a class or study hall on at least one day) are surfaced.
+  const templateBlockNumbers = new Set(
+    templateRows
+      .filter((row) => row.type === "block" && typeof row.blockNumber === "number")
+      .map((row) => row.blockNumber as number)
+  )
+  const orphanBlocks: number[] = (() => {
+    const found = new Set<number>()
+    for (const day of DAYS) {
+      const daySchedule = gradeSchedule[day]
+      if (!daySchedule) continue
+      for (const key of Object.keys(daySchedule)) {
+        const blockNumber = Number(key)
+        if (!Number.isFinite(blockNumber) || templateBlockNumbers.has(blockNumber)) continue
+        if (getCellContent(day, blockNumber)) found.add(blockNumber)
+      }
+    }
+    return [...found].sort((a, b) => a - b)
+  })()
+
   return (
     <div data-card-name={gradeName} className="border rounded-lg overflow-hidden bg-white print-break-inside-avoid flex flex-col">
       {/* Header */}
@@ -119,6 +142,33 @@ export function GradeTimetable({
               </tr>
             )
           })}
+          {/* Fallback rows for schedule entries with no matching template row */}
+          {orphanBlocks.map((blockNumber) => (
+            <tr key={`orphan-${blockNumber}`} className="border-b last:border-b-0 bg-red-50/40">
+              <td className="py-2 px-1.5 text-xs text-red-600 whitespace-nowrap align-top border-r">
+                —
+              </td>
+              <td
+                className="py-2 px-1.5 font-semibold align-top text-xs border-r whitespace-nowrap bg-red-50 text-red-700 uppercase tracking-wide"
+                title={`Block ${blockNumber} has scheduled classes but no matching row in this grade's timetable template`}
+              >
+                Block {blockNumber} — no timetable row
+              </td>
+              {DAYS.map((day, i) => {
+                const content = getCellContent(day, blockNumber)
+                return (
+                  <td key={day} className={`py-2 px-1 text-center align-top border-r last:border-r-0 ${i % 2 === 1 ? "bg-slate-50/50" : ""}`}>
+                    {content ? (
+                      <div>
+                        <div className="text-xs font-medium">{content.subject}</div>
+                        <div className="text-[11px] text-muted-foreground leading-tight">{content.teacher}</div>
+                      </div>
+                    ) : null}
+                  </td>
+                )
+              })}
+            </tr>
+          ))}
         </tbody>
       </table>
     </div>

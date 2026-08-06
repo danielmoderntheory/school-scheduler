@@ -1,3 +1,6 @@
+// Captures the already-rendered schedule cards from the DOM, so it is
+// block-format agnostic: it exports exactly the rows the grid components
+// rendered (5-block legacy or any template-driven block count).
 export async function downloadSchedulesAsPng({ viewMode }: { viewMode: string }) {
   const [{ toPng }, { default: JSZip }] = await Promise.all([
     import("html-to-image"),

@@ -35,10 +35,14 @@ import {
   PopoverTrigger,
 } from "@/components/ui/popover"
 import { Checkbox } from "@/components/ui/checkbox"
-import { Trash2, Loader2, ArrowLeft, Plus, GripVertical } from "lucide-react"
+import { Trash2, Loader2, ArrowLeft, Plus, GripVertical, AlertTriangle } from "lucide-react"
 import Link from "next/link"
 import toast from "@/lib/toast"
 import { TimetableRow, TimetableRowType, TimetableTemplate } from "@/lib/types"
+import { getTemplateBlocks, resolveRowsForGrade } from "@/lib/timetable-utils"
+
+// Upper bound for block numbering in the editor (templates currently use 5 or 9)
+const MAX_BLOCK_NUMBER = 12
 
 interface GradeData {
   id: string
@@ -48,12 +52,16 @@ interface GradeData {
 }
 
 export default function TimetableSettingsPage() {
-  const [template, setTemplate] = useState<TimetableTemplate | null>(null)
+  const [templates, setTemplates] = useState<TimetableTemplate[]>([])
+  const [selectedTemplateId, setSelectedTemplateId] = useState<string | null>(null)
   const [grades, setGrades] = useState<GradeData[]>([])
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
   const [dragIdx, setDragIdx] = useState<number | null>(null)
   const [dragOverIdx, setDragOverIdx] = useState<number | null>(null)
+
+  const template =
+    templates.find((t) => t.id === selectedTemplateId) ?? templates[0] ?? null
 
   useEffect(() => {
     loadData()
@@ -65,17 +73,22 @@ export default function TimetableSettingsPage() {
         fetch("/api/timetable-templates"),
         fetch("/api/grades"),
       ])
-      const templates = await templatesRes.json()
+      const templatesData = await templatesRes.json()
       const gradesData = await gradesRes.json()
       setGrades(gradesData)
-      if (templates.length > 0) {
-        setTemplate(templates[0])
+      if (Array.isArray(templatesData) && templatesData.length > 0) {
+        setTemplates(templatesData)
+        setSelectedTemplateId((prev) => prev ?? templatesData[0].id)
       }
     } catch {
       toast.error("Failed to load data")
     } finally {
       setLoading(false)
     }
+  }
+
+  function replaceTemplate(updated: TimetableTemplate) {
+    setTemplates((prev) => prev.map((t) => (t.id === updated.id ? updated : t)))
   }
 
   async function saveRows(rows: TimetableRow[]) {
@@ -89,7 +102,7 @@ export default function TimetableSettingsPage() {
       })
       if (res.ok) {
         const updated = await res.json()
-        setTemplate(updated)
+        replaceTemplate(updated)
         toast.success("Saved")
       } else {
         const error = await res.json()
@@ -112,7 +125,8 @@ export default function TimetableSettingsPage() {
       })
       if (res.ok) {
         const created = await res.json()
-        setTemplate(created)
+        setTemplates((prev) => [...prev, created])
+        setSelectedTemplateId(created.id)
         toast.success("Template created")
       } else {
         toast.error("Failed to create template")
@@ -132,7 +146,7 @@ export default function TimetableSettingsPage() {
     if (field === "type" && value !== "block") {
       delete newRows[index].blockNumber
     }
-    setTemplate({ ...template, rows: newRows })
+    replaceTemplate({ ...template, rows: newRows })
     saveRows(newRows)
   }
 
@@ -149,14 +163,14 @@ export default function TimetableSettingsPage() {
       type: "transition",
     }
     const newRows = [...template.rows, newRow]
-    setTemplate({ ...template, rows: newRows })
+    replaceTemplate({ ...template, rows: newRows })
     saveRows(newRows)
   }
 
   function deleteRow(index: number) {
     if (!template) return
     const newRows = template.rows.filter((_, i) => i !== index)
-    setTemplate({ ...template, rows: newRows })
+    replaceTemplate({ ...template, rows: newRows })
     saveRows(newRows)
   }
 
@@ -183,8 +197,53 @@ export default function TimetableSettingsPage() {
     sorted.splice(insertAt, 0, moved)
     // Renumber sort_order sequentially
     const renumbered = sorted.map((row, i) => ({ ...row, sort_order: i + 1 }))
-    setTemplate({ ...template, rows: renumbered })
+    replaceTemplate({ ...template, rows: renumbered })
     saveRows(renumbered)
+  }
+
+  // --- Non-blocking validation warnings (per grade) ---
+  const templateBlockNumbers = template ? getTemplateBlocks(template) : []
+  const validationWarnings: string[] = []
+  if (template && template.rows.length > 0) {
+    // Block rows missing a block number apply to every grade — flag once
+    for (const row of template.rows) {
+      if (row.type === "block" && typeof row.blockNumber !== "number") {
+        validationWarnings.push(
+          `Row "${row.label || `#${row.sort_order}`}" is a block but has no block number`
+        )
+      }
+    }
+    for (const grade of [...grades].sort((a, b) => a.sort_order - b.sort_order)) {
+      const gradeBlockRows = resolveRowsForGrade(template.rows, grade.id).filter(
+        (r) => r.type === "block" && typeof r.blockNumber === "number"
+      )
+      if (gradeBlockRows.length === 0) {
+        validationWarnings.push(
+          `${grade.display_name}: no block rows apply — it will fall back to all ${templateBlockNumbers.length} blocks`
+        )
+        continue
+      }
+      // Uniqueness: each block number should come from exactly one row
+      const counts = new Map<number, number>()
+      for (const r of gradeBlockRows) {
+        counts.set(r.blockNumber!, (counts.get(r.blockNumber!) || 0) + 1)
+      }
+      const duplicates = [...counts.entries()].filter(([, c]) => c > 1)
+      for (const [blockNum, c] of duplicates) {
+        validationWarnings.push(
+          `${grade.display_name}: block ${blockNum} is defined by ${c} rows`
+        )
+      }
+      // Coverage: template blocks this grade has no row for. Exactly one missing
+      // block is usually intentional (that band's lunch block) — flag 2+.
+      const covered = new Set(gradeBlockRows.map((r) => r.blockNumber!))
+      const missing = templateBlockNumbers.filter((b) => !covered.has(b))
+      if (missing.length > 1) {
+        validationWarnings.push(
+          `${grade.display_name}: no rows for blocks ${missing.join(", ")} — only one gap (lunch) is expected`
+        )
+      }
+    }
   }
 
   const sortedRows = template
@@ -233,12 +292,51 @@ export default function TimetableSettingsPage() {
           <ArrowLeft className="h-4 w-4 mr-1" />
           Back to Classes
         </Link>
-        <h1 className="text-3xl font-bold mb-2">Timetable Template</h1>
+        <h1 className="text-3xl font-bold mb-2">Timetable Templates</h1>
         <p className="text-muted-foreground">
           Define the daily structure for grade timetables — times, breaks, blocks, and transitions.
-          Block rows map to schedule blocks 1-5.
+          Block rows map to numbered schedule blocks; a template can define any number of blocks
+          (e.g. 5 or 9). Scope a block row&apos;s grades to exclude a band&apos;s lunch block.
         </p>
       </div>
+
+      {/* Template switcher */}
+      {templates.length > 1 && (
+        <div className="mb-4 flex items-center gap-1 border-b">
+          {templates.map((t) => (
+            <button
+              key={t.id}
+              onClick={() => setSelectedTemplateId(t.id)}
+              className={`px-4 py-2 text-sm font-medium border-b-2 -mb-px transition-colors ${
+                t.id === template.id
+                  ? "border-primary text-foreground"
+                  : "border-transparent text-muted-foreground hover:text-foreground"
+              }`}
+            >
+              {t.name}
+            </button>
+          ))}
+        </div>
+      )}
+
+      {/* Non-blocking validation warnings */}
+      {validationWarnings.length > 0 && (
+        <div className="mb-4 bg-amber-50 border border-amber-200 rounded-lg p-3">
+          <div className="flex items-start gap-2">
+            <AlertTriangle className="h-4 w-4 text-amber-600 mt-0.5 flex-shrink-0" />
+            <div className="flex-1">
+              <div className="text-sm font-medium text-amber-800 mb-1">
+                Template warnings — schedules can still be generated
+              </div>
+              <div className="text-xs text-amber-700 space-y-0.5">
+                {validationWarnings.map((warning, i) => (
+                  <div key={i}>• {warning}</div>
+                ))}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
 
       <div className="border rounded-lg">
         <Table>
@@ -342,15 +440,18 @@ export default function TimetableSettingsPage() {
                       <Input
                         type="number"
                         min={1}
-                        max={5}
+                        max={MAX_BLOCK_NUMBER}
                         value={row.blockNumber || ""}
-                        onChange={(e) =>
+                        onChange={(e) => {
+                          const parsed = e.target.value ? parseInt(e.target.value) : undefined
                           updateRow(
                             actualIdx,
                             "blockNumber",
-                            e.target.value ? parseInt(e.target.value) : undefined
+                            parsed !== undefined
+                              ? Math.min(Math.max(parsed, 1), MAX_BLOCK_NUMBER)
+                              : undefined
                           )
-                        }
+                        }}
                         onWheel={(e) => (e.target as HTMLInputElement).blur()}
                         className="h-8 w-16"
                       />

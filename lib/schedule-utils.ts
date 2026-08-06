@@ -266,10 +266,58 @@ export function getBlockType(entry: ScheduleEntry): typeof BLOCK_TYPE_OPEN | typ
 // but only OPEN blocks can have labels (Study Halls always show their grade).
 // -----------------------------------------------------------------------------
 
-import type { TeacherSchedule, OpenBlockLabels, ScheduleOption, StudyHallAssignment } from "./types"
+import type { TeacherSchedule, GradeSchedule, OpenBlockLabels, ScheduleOption, StudyHallAssignment } from "./types"
+import { BLOCKS } from "./types"
 
 const DAYS_ORDER = ["Mon", "Tues", "Wed", "Thurs", "Fri"]
-const BLOCKS_ORDER = [1, 2, 3, 4, 5]
+/** Legacy 5-block fallback, used only when schedule data contains no block keys. */
+const LEGACY_BLOCKS_ORDER: number[] = [...BLOCKS]
+
+// -----------------------------------------------------------------------------
+// BLOCK LIST DERIVATION
+// Saved schedules carry whatever block numbers the solver used (5-block legacy,
+// 9-block 26/27, ...). Deriving the block list from the data itself keeps stats
+// and open-block indexing correct for any format without threading a template.
+// -----------------------------------------------------------------------------
+
+/** Minimal structural type matching both TeacherSchedule and GradeSchedule. */
+type AnySchedule = { [day: string]: { [block: number]: unknown } }
+
+/**
+ * Sorted union of block numbers actually present in the given schedule maps
+ * (e.g. an option's teacherSchedules and gradeSchedules).
+ * Falls back to the legacy 5-block list when no block keys exist at all.
+ */
+export function getScheduleBlockNumbers(
+  ...scheduleMaps: Array<Record<string, TeacherSchedule | GradeSchedule> | undefined | null>
+): number[] {
+  const blocks = new Set<number>()
+  for (const map of scheduleMaps) {
+    if (!map) continue
+    for (const schedule of Object.values(map)) {
+      collectBlockKeys(schedule as AnySchedule, blocks)
+    }
+  }
+  return blocks.size > 0 ? [...blocks].sort((a, b) => a - b) : [...LEGACY_BLOCKS_ORDER]
+}
+
+/** Sorted block numbers present in a single schedule, with legacy fallback. */
+function getBlocksForSchedule(schedule: TeacherSchedule | null | undefined): number[] {
+  const blocks = new Set<number>()
+  collectBlockKeys(schedule as AnySchedule | null | undefined, blocks)
+  return blocks.size > 0 ? [...blocks].sort((a, b) => a - b) : [...LEGACY_BLOCKS_ORDER]
+}
+
+function collectBlockKeys(schedule: AnySchedule | null | undefined, out: Set<number>): void {
+  if (!schedule) return
+  for (const day of Object.values(schedule)) {
+    if (!day) continue
+    for (const key of Object.keys(day)) {
+      const n = Number(key)
+      if (Number.isFinite(n)) out.add(n)
+    }
+  }
+}
 
 export interface OpenBlockInfo {
   day: string
@@ -283,9 +331,10 @@ export interface OpenBlockInfo {
  */
 export function getTeacherOpenBlocks(schedule: TeacherSchedule): OpenBlockInfo[] {
   const openBlocks: OpenBlockInfo[] = []
+  const blocksOrder = getBlocksForSchedule(schedule)
 
   for (const day of DAYS_ORDER) {
-    for (const block of BLOCKS_ORDER) {
+    for (const block of blocksOrder) {
       const entry = schedule[day]?.[block]
       if (!entry) {
         // null entry = OPEN
@@ -498,13 +547,19 @@ export function buildCotaughtGroups(classes: CotaughtDisplayClass[]): CotaughtGr
 // -----------------------------------------------------------------------------
 
 export function recalculateOptionStats(option: ScheduleOption): ScheduleOption {
+  // Derive the block list from the option's own data so stats are correct for
+  // any block format (5-block legacy, 9-block, ...). Iterating the sorted list
+  // positionally means two blocks are "back-to-back" only when they are
+  // adjacent in this list, regardless of numeric gaps.
+  const blocksOrder = getScheduleBlockNumbers(option.teacherSchedules, option.gradeSchedules)
+
   const teacherStats = option.teacherStats.map(stat => {
     const schedule = option.teacherSchedules[stat.teacher]
     let teaching = 0, studyHall = 0, open = 0, backToBackIssues = 0
 
     for (const day of DAYS_ORDER) {
       let prevWasOpen = false
-      for (const block of BLOCKS_ORDER) {
+      for (const block of blocksOrder) {
         const entry = schedule?.[day]?.[block]
         if (!entry || isOpenBlock(entry[1])) {
           open++
@@ -528,7 +583,8 @@ export function recalculateOptionStats(option: ScheduleOption): ScheduleOption {
   // that moved/removed study halls without updating the assignments array.
   const reconciledAssignments = reconcileStudyHallAssignments(
     option.studyHallAssignments,
-    option.teacherSchedules
+    option.teacherSchedules,
+    blocksOrder
   )
 
   return {
@@ -548,13 +604,14 @@ export function recalculateOptionStats(option: ScheduleOption): ScheduleOption {
  */
 function reconcileStudyHallAssignments(
   assignments: StudyHallAssignment[],
-  teacherSchedules: Record<string, TeacherSchedule>
+  teacherSchedules: Record<string, TeacherSchedule>,
+  blocksOrder: number[]
 ): StudyHallAssignment[] {
   // Build set of actual study halls from schedule: "group|teacher|day|block"
   const actualStudyHalls = new Map<string, { teacher: string; day: string; block: number }>()
   for (const [teacher, schedule] of Object.entries(teacherSchedules)) {
     for (const day of DAYS_ORDER) {
-      for (const block of BLOCKS_ORDER) {
+      for (const block of blocksOrder) {
         const entry = schedule?.[day]?.[block]
         if (entry && isStudyHall(entry[1])) {
           const group = entry[0] // grade display name is the group

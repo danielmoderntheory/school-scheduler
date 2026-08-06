@@ -24,7 +24,8 @@ import {
 } from "@/components/ui/alert-dialog"
 import { Loader2, Coffee, AlertTriangle, Users, CheckCircle2, ChevronDown, ChevronRight } from "lucide-react"
 import { generateSchedulesRemote, type ScheduleDiagnostics, type SchedulingRule } from "@/lib/scheduler-remote"
-import type { Teacher, ClassEntry } from "@/lib/types"
+import { DAYS, type Teacher, type ClassEntry, type TimetableTemplate } from "@/lib/types"
+import { getTemplateBlocks, getTeachableBlocksForGrade } from "@/lib/timetable-utils"
 import { useGeneration } from "@/lib/generation-context"
 import { calculateGradeBlocks, buildCotaughtGroups, type BlockCountClass } from "@/lib/schedule-utils"
 import toast from "@/lib/toast"
@@ -94,6 +95,22 @@ export function GenerateModal({
   } | null>(null)
   const generationIdRef = useRef<string | null>(null)
 
+  // The quarter's timetable template defines the block format (5-block legacy,
+  // 9-block 26/27, ...). null until loaded; helpers fall back to legacy blocks.
+  const [template, setTemplate] = useState<TimetableTemplate | null>(null)
+
+  async function fetchQuarterTemplate(): Promise<TimetableTemplate | null> {
+    try {
+      const res = await fetch(`/api/timetable-templates?quarter_id=${quarterId}`)
+      if (!res.ok) return null
+      const data = await res.json()
+      if (Array.isArray(data) && data.length > 0) return data[0] as TimetableTemplate
+    } catch (e) {
+      console.warn("Could not load timetable template, falling back to legacy 5-block format:", e)
+    }
+    return null
+  }
+
   // Calculate stats for the summary card
   const blockCountClasses: BlockCountClass[] = []
   const uniqueGrades = new Set<string>()
@@ -125,14 +142,33 @@ export function GenerateModal({
     totalGradeSessions += count
   }
 
-  // Add 1 study hall session for grades 6-11 (sort_order 6-11)
+  // Add 1 study hall session per grade configured for study halls. The grade
+  // list comes from the study_hall_grades rule config (display names) — the
+  // same source the solver uses — with the legacy 6th-11th sort-order range
+  // only as a fallback when the rule row is missing entirely.
+  const studyHallRule = rules.find((r) => r.rule_key === "study_hall_grades")
+  const studyHallGradeNames = (studyHallRule?.config as { grades?: string[] } | undefined)?.grades
+  const studyHallsEnabled = studyHallRule ? studyHallRule.enabled !== false : true
   for (const g of grades) {
-    if (g.sort_order >= 6 && g.sort_order <= 11 && uniqueGrades.has(g.id)) {
+    if (!studyHallsEnabled || !uniqueGrades.has(g.id)) continue
+    const getsStudyHall = studyHallGradeNames
+      ? studyHallGradeNames.includes(g.display_name)
+      : g.sort_order >= 6 && g.sort_order <= 11
+    if (getsStudyHall) {
       totalGradeSessions++
     }
   }
 
-  const availableGradeSlots = uniqueGrades.size * 25
+  // Block format from the quarter's template (legacy 5-block until/unless loaded)
+  const templateBlocks = getTemplateBlocks(template)
+  const blocksPerDay = templateBlocks.length
+  const maxTeacherSessions = DAYS.length * blocksPerDay
+
+  // Capacity: each grade only has its teachable blocks (e.g. lunch excluded)
+  const availableGradeSlots = [...uniqueGrades].reduce(
+    (sum, gradeId) => sum + DAYS.length * getTeachableBlocksForGrade(template, gradeId).length,
+    0
+  )
   const isOverCapacity = totalGradeSessions > availableGradeSlots
   const isAtCapacity = totalGradeSessions === availableGradeSlots
   const capacityPercent = availableGradeSlots > 0 ? Math.round((totalGradeSessions / availableGradeSlots) * 100) : 0
@@ -186,6 +222,21 @@ export function GenerateModal({
       setScheduleError(null)
     }
   }, [open])
+
+  // Load the quarter's timetable template when the modal opens
+  useEffect(() => {
+    if (!open || !quarterId) return
+    let cancelled = false
+    fetchQuarterTemplate().then((tpl) => {
+      // Set null on failure too — a stale template from a previously viewed
+      // quarter must not survive a failed refetch after quarterId changes
+      if (!cancelled) setTemplate(tpl)
+    })
+    return () => {
+      cancelled = true
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, quarterId])
 
   // Prevent accidental navigation away during generation
   useEffect(() => {
@@ -349,12 +400,35 @@ export function GenerateModal({
 
       const gradeNames = grades.map((g) => g.display_name)
 
+      // Resolve the quarter's block format. If the template isn't loaded yet,
+      // fetch it now. The endpoint always resolves a template (legacy quarters
+      // get the 5-block fallback), so null means the fetch FAILED — solving
+      // anyway would silently run a 9-block quarter in 5-block mode with no
+      // lunch masks. Fail closed instead.
+      let solveTemplate = template
+      if (!solveTemplate) {
+        solveTemplate = await fetchQuarterTemplate()
+        if (solveTemplate) setTemplate(solveTemplate)
+      }
+      if (!solveTemplate) {
+        toast.error("Couldn't load this quarter's block format — generation cancelled. Check your connection and try again.")
+        return
+      }
+      const solveBlocks = getTemplateBlocks(solveTemplate)
+      // The solver keys grades by display name (e.g. "1st Grade"), so map
+      // grade id -> teachable blocks under the display name.
+      const solveGradeTeachableBlocks = Object.fromEntries(
+        grades.map((g) => [g.display_name, getTeachableBlocksForGrade(solveTemplate, g.id)])
+      )
+
       let result = await generateSchedulesRemote(teacherList, classList, {
         numOptions: 1,
         numAttempts: 150,
         maxTimeSeconds: 280,
         rules,
         grades: gradeNames,
+        blocks: solveBlocks,
+        gradeTeachableBlocks: solveGradeTeachableBlocks,
         onProgress: (current, total, message) => {
           setProgress({ current, total, message })
         },
@@ -379,6 +453,8 @@ export function GenerateModal({
             maxTimeSeconds: 120,
             rules,
             grades: gradeNames,
+            blocks: solveBlocks,
+            gradeTeachableBlocks: solveGradeTeachableBlocks,
             onProgress: (current, total, message) => {
               setProgress({ current, total, message: `[Deep] ${message}` })
             },
@@ -543,7 +619,7 @@ export function GenerateModal({
                 <div className="text-slate-500 text-xs">Classes</div>
               </div>
               <div className="border border-slate-200 rounded-lg p-2.5 bg-slate-50">
-                <div className="font-semibold text-slate-700">{uniqueGrades.size} × 25</div>
+                <div className="font-semibold text-slate-700">{uniqueGrades.size} × {blocksPerDay}</div>
                 <div className="text-slate-500 text-xs">Grades × Blocks</div>
               </div>
               <div className={`border rounded-lg px-2 py-2.5 ${
@@ -847,12 +923,12 @@ export function GenerateModal({
                   scheduleError.diagnostics.teacherOverload.length > 0 && (
                     <div className="bg-red-50 rounded p-3 border border-red-200">
                       <p className="font-medium text-red-800 text-sm mb-1">
-                        Teachers with too many sessions (&gt;25):
+                        Teachers with too many sessions (&gt;{maxTeacherSessions}):
                       </p>
                       <ul className="text-sm text-red-700 space-y-0.5">
                         {scheduleError.diagnostics.teacherOverload.map((t, i) => (
                           <li key={i}>
-                            <strong>{t.teacher}</strong>: {t.sessions} sessions (max 25)
+                            <strong>{t.teacher}</strong>: {t.sessions} sessions (max {maxTeacherSessions})
                           </li>
                         ))}
                       </ul>
@@ -864,12 +940,12 @@ export function GenerateModal({
                   scheduleError.diagnostics.gradeOverload.length > 0 && (
                     <div className="bg-red-50 rounded p-3 border border-red-200">
                       <p className="font-medium text-red-800 text-sm mb-1">
-                        Grades with too many sessions (&gt;25):
+                        Grades with more sessions than teachable blocks:
                       </p>
                       <ul className="text-sm text-red-700 space-y-0.5">
                         {scheduleError.diagnostics.gradeOverload.map((g, i) => (
                           <li key={i}>
-                            <strong>{g.grade}</strong>: {g.sessions} sessions (max 25)
+                            <strong>{g.grade}</strong>: {g.sessions} sessions
                           </li>
                         ))}
                       </ul>

@@ -32,9 +32,12 @@ import {
 } from "lucide-react"
 import { cn } from "@/lib/utils"
 import toast from "@/lib/toast"
+import { BLOCKS, type TimetableTemplate } from "@/lib/types"
+import { getTeachableBlocksForGrade } from "@/lib/timetable-utils"
 
 const DAYS = ["Mon", "Tues", "Wed", "Thurs", "Fri"]
-const BLOCKS = [1, 2, 3, 4, 5]
+// Stable default so existing call sites without a template keep the legacy 5-block grid
+const DEFAULT_BLOCKS: number[] = [...BLOCKS]
 
 // Prefix for temporary IDs to distinguish from real UUIDs
 const PENDING_PREFIX = "pending:"
@@ -113,6 +116,10 @@ interface AddClassModalProps {
   onCreateClass: (data: Partial<ClassEntry>) => Promise<ClassEntry | null>
   onCreateSubject: (name: string) => Promise<Subject | null>
   onCreateTeacher: (name: string, status: "full-time" | "part-time") => Promise<Teacher | null>
+  /** Block numbers from the quarter's timetable template (defaults to legacy 1-5) */
+  blocks?: number[]
+  /** Quarter's timetable template — used to grey out a grade's lunch block */
+  template?: TimetableTemplate | null
 }
 
 type Step = "setup" | "assign" | "confirm"
@@ -128,6 +135,8 @@ export function AddClassModal({
   onCreateClass,
   onCreateSubject,
   onCreateTeacher,
+  blocks = DEFAULT_BLOCKS,
+  template = null,
 }: AddClassModalProps) {
   // Step state
   const [step, setStep] = useState<Step>("setup")
@@ -693,6 +702,14 @@ export function AddClassModal({
     return { days: combinedDays, blocks: combinedBlocks }
   }
 
+  // Blocks that are not teachable for one of the selected grades (e.g. that band's lunch block)
+  function getLunchBlocks(): number[] {
+    if (!template || gradeIds.length === 0) return []
+    return blocks.filter((b) =>
+      gradeIds.some((gid) => !getTeachableBlocksForGrade(template, gid).includes(b))
+    )
+  }
+
   function renderRegularAssign() {
     const isCotaught = assignments.length > 1
     // Use the first assignment's restrictions as the shared restrictions
@@ -804,6 +821,8 @@ export function AddClassModal({
               }}
               teacherAvailableDays={getCombinedTeacherAvailability().days}
               teacherAvailableBlocks={getCombinedTeacherAvailability().blocks}
+              blocks={blocks}
+              lunchBlocks={getLunchBlocks()}
             />
           </div>
           <p className="text-xs text-muted-foreground">
@@ -1054,6 +1073,8 @@ export function AddClassModal({
               onSave={setSharedRestrictions}
               teacherAvailableDays={getCombinedTeacherAvailability().days}
               teacherAvailableBlocks={getCombinedTeacherAvailability().blocks}
+              blocks={blocks}
+              lunchBlocks={getLunchBlocks()}
             />
           </div>
           <p className="text-xs text-muted-foreground">
@@ -1597,9 +1618,11 @@ interface RestrictionEditorProps {
   onSave: (restrictions: Restriction[]) => void
   teacherAvailableDays?: string[] | null
   teacherAvailableBlocks?: number[] | null
+  blocks?: number[]
+  lunchBlocks?: number[]
 }
 
-function RestrictionEditor({ restrictions, onSave, teacherAvailableDays, teacherAvailableBlocks }: RestrictionEditorProps) {
+function RestrictionEditor({ restrictions, onSave, teacherAvailableDays, teacherAvailableBlocks, blocks = DEFAULT_BLOCKS, lunchBlocks = [] }: RestrictionEditorProps) {
   const [open, setOpen] = useState(false)
   const [fixedSlots, setFixedSlots] = useState<{ day: string; block: number }[]>([])
   const [availableDaysOnly, setAvailableDaysOnly] = useState<string[]>([])
@@ -1614,14 +1637,17 @@ function RestrictionEditor({ restrictions, onSave, teacherAvailableDays, teacher
     setAvailableDaysOnly(availDays ? (availDays.value as string[]) : [])
   }, [restrictions, open])
 
+  // Blocks the class can actually be pinned to (template blocks minus lunch)
+  const selectableBlocks = blocks.filter((b) => !lunchBlocks.includes(b))
+
   function handleSave() {
     const newRestrictions: Restriction[] = []
 
-    // Check which days have all 5 blocks selected (should become available_days)
+    // Check which days have all selectable blocks selected (should become available_days)
     const daysWithAllBlocks: string[] = []
     DAYS.forEach((day) => {
       const blocksForDay = fixedSlots.filter((s) => s.day === day).map((s) => s.block)
-      if (blocksForDay.length === 5) {
+      if (blocksForDay.length === selectableBlocks.length) {
         daysWithAllBlocks.push(day)
       }
     })
@@ -1742,11 +1768,17 @@ function RestrictionEditor({ restrictions, onSave, teacherAvailableDays, teacher
                 </tr>
               </thead>
               <tbody>
-                {BLOCKS.map((block, blockIdx) => {
-                  const isLastRow = blockIdx === BLOCKS.length - 1
+                {blocks.map((block, blockIdx) => {
+                  const isLastRow = blockIdx === blocks.length - 1
+                  const isLunchBlock = lunchBlocks.includes(block)
                   return (
                     <tr key={block}>
-                      <td className={cn("w-7 h-7 text-center border-r font-medium bg-muted/50 text-muted-foreground", !isLastRow && "border-b")}>B{block}</td>
+                      <td
+                        title={isLunchBlock ? "Lunch — not schedulable" : undefined}
+                        className={cn("w-7 h-7 text-center border-r font-medium bg-muted/50", !isLastRow && "border-b", isLunchBlock ? "text-slate-300" : "text-muted-foreground")}
+                      >
+                        B{block}
+                      </td>
                       {DAYS.map((day) => {
                         const isExplicitlySelected = fixedSlots.some(
                           (s) => s.day === day && s.block === block
@@ -1754,7 +1786,7 @@ function RestrictionEditor({ restrictions, onSave, teacherAvailableDays, teacher
                         const isDayInAvailable = availableDaysOnly.includes(day)
                         const dayHasExplicitSlots = fixedSlots.some((s) => s.day === day)
                         // If day is available and has no explicit slots, all blocks are implicitly selected
-                        const isImplicitlySelected = isDayInAvailable && !dayHasExplicitSlots
+                        const isImplicitlySelected = isDayInAvailable && !dayHasExplicitSlots && !isLunchBlock
                         const isSelected = isExplicitlySelected || isImplicitlySelected
                         const isDayAvailable = availableDaysOnly.length === 0 || isDayInAvailable
                         // Check teacher availability
@@ -1764,14 +1796,15 @@ function RestrictionEditor({ restrictions, onSave, teacherAvailableDays, teacher
                         return (
                           <td
                             key={day}
+                            title={isLunchBlock ? "Lunch — not schedulable" : undefined}
                             onClick={() => {
-                              if (!isDayAvailable || !teacherSlotAvailable) return // Can't select slots on unavailable days/blocks
+                              if (isLunchBlock || !isDayAvailable || !teacherSlotAvailable) return // Can't select slots on unavailable days/blocks
 
                               if (isDayInAvailable) {
                                 // Day is in available days
                                 if (isImplicitlySelected) {
                                   // All blocks implicitly selected - add OTHER blocks explicitly (unselect this one)
-                                  const otherBlocks = BLOCKS.filter((b) => b !== block)
+                                  const otherBlocks = selectableBlocks.filter((b) => b !== block)
                                   const newSlots = [
                                     ...fixedSlots.filter((s) => s.day !== day),
                                     ...otherBlocks.map((b) => ({ day, block: b }))
@@ -1796,13 +1829,15 @@ function RestrictionEditor({ restrictions, onSave, teacherAvailableDays, teacher
                             className={cn(
                               "w-7 h-7 text-center border-r last:border-r-0 transition-colors",
                               !isLastRow && "border-b",
-                              !teacherSlotAvailable
-                                ? "bg-orange-50 cursor-not-allowed"
-                                : isSelected
-                                  ? "bg-violet-500 text-white hover:bg-violet-600 cursor-pointer"
-                                  : isDayAvailable
-                                    ? "hover:bg-violet-50 cursor-pointer"
-                                    : "bg-slate-100 cursor-not-allowed"
+                              isLunchBlock
+                                ? "bg-slate-100 cursor-not-allowed"
+                                : !teacherSlotAvailable
+                                  ? "bg-orange-50 cursor-not-allowed"
+                                  : isSelected
+                                    ? "bg-violet-500 text-white hover:bg-violet-600 cursor-pointer"
+                                    : isDayAvailable
+                                      ? "hover:bg-violet-50 cursor-pointer"
+                                      : "bg-slate-100 cursor-not-allowed"
                             )}
                           >
                             {isSelected && <Check className="h-3.5 w-3.5 mx-auto" />}

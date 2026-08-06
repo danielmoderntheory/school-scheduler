@@ -32,9 +32,10 @@ import {
   CollapsibleContent,
   CollapsibleTrigger,
 } from "@/components/ui/collapsible"
-import { Trash2, Loader2, ArrowLeft, RotateCcw, ChevronDown, Archive, Check, Copy } from "lucide-react"
+import { Trash2, Loader2, ArrowLeft, RotateCcw, ChevronDown, Archive, Check, Copy, LayoutGrid, AlertTriangle } from "lucide-react"
 import Link from "next/link"
 import toast from "@/lib/toast"
+import type { TimetableTemplate } from "@/lib/types"
 
 interface Quarter {
   id: string
@@ -42,6 +43,7 @@ interface Quarter {
   year: number
   quarter_num: number
   is_active: boolean
+  timetable_template_id?: string | null
 }
 
 interface ArchivedQuarter {
@@ -57,17 +59,25 @@ export default function QuartersSettingsPage() {
   const [archivedOpen, setArchivedOpen] = useState(false)
   const [restoringId, setRestoringId] = useState<string | null>(null)
   const [activatingId, setActivatingId] = useState<string | null>(null)
+  const [templates, setTemplates] = useState<TimetableTemplate[]>([])
+  // Pending block-format change awaiting confirmation
+  const [pendingFormatChange, setPendingFormatChange] = useState<{
+    quarter: Quarter
+    templateId: string
+  } | null>(null)
 
   // New quarter form state
   const [isCreating, setIsCreating] = useState(false)
   const [newYear, setNewYear] = useState(new Date().getFullYear())
   const [newQuarterNum, setNewQuarterNum] = useState(1)
   const [copyFromQuarterId, setCopyFromQuarterId] = useState<string>("")
+  const [newTemplateId, setNewTemplateId] = useState<string>("") // "" = inherit
   const [creating, setCreating] = useState(false)
 
   useEffect(() => {
     loadQuarters()
     loadArchivedQuarters()
+    loadTemplates()
   }, [])
 
   useEffect(() => {
@@ -124,6 +134,56 @@ export default function QuartersSettingsPage() {
       }
     } catch (error) {
       console.error("Failed to load archived quarters:", error)
+    }
+  }
+
+  async function loadTemplates() {
+    try {
+      const res = await fetch("/api/timetable-templates")
+      if (res.ok) {
+        const data = await res.json()
+        if (Array.isArray(data)) setTemplates(data)
+      }
+    } catch (error) {
+      console.error("Failed to load timetable templates:", error)
+    }
+  }
+
+  // Resolve a quarter's block format the same way the API does: its assigned
+  // template, falling back to the oldest template for pre-format quarters.
+  function resolveTemplate(quarter: Quarter | null | undefined): TimetableTemplate | null {
+    if (!quarter) return null
+    return (
+      templates.find((t) => t.id === quarter.timetable_template_id) ??
+      templates[0] ??
+      null
+    )
+  }
+
+  async function confirmFormatChange() {
+    if (!pendingFormatChange) return
+    const { quarter, templateId } = pendingFormatChange
+    try {
+      const res = await fetch(`/api/quarters/${quarter.id}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ timetable_template_id: templateId }),
+      })
+      if (res.ok) {
+        setQuarters((prev) =>
+          prev.map((q) =>
+            q.id === quarter.id ? { ...q, timetable_template_id: templateId } : q
+          )
+        )
+        toast.success("Block format updated")
+      } else {
+        const error = await res.json()
+        toast.error(error.error || "Failed to update block format")
+      }
+    } catch (error) {
+      toast.error("Failed to update block format")
+    } finally {
+      setPendingFormatChange(null)
     }
   }
 
@@ -194,6 +254,8 @@ export default function QuartersSettingsPage() {
           year: newYear,
           quarter_num: newQuarterNum,
           copy_from_quarter_id: copyFromQuarterId || undefined,
+          // Omitted when "" — the API inherits from the copy source / most recent quarter
+          timetable_template_id: newTemplateId || undefined,
         }),
       })
       if (res.ok) {
@@ -252,6 +314,7 @@ export default function QuartersSettingsPage() {
                   <TableHead>Name</TableHead>
                   <TableHead className="w-[100px]">Year</TableHead>
                   <TableHead className="w-[100px]">Quarter</TableHead>
+                  <TableHead className="w-[170px]">Block Format</TableHead>
                   <TableHead className="w-[100px]">Status</TableHead>
                   <TableHead className="w-[120px]"></TableHead>
                 </TableRow>
@@ -260,6 +323,7 @@ export default function QuartersSettingsPage() {
                 {quarters.map((quarter) => {
                   // Can archive any quarter except the active one
                   const canArchive = !quarter.is_active
+                  const resolvedTemplate = resolveTemplate(quarter)
 
                   return (
                     <TableRow key={quarter.id}>
@@ -268,6 +332,30 @@ export default function QuartersSettingsPage() {
                       </TableCell>
                       <TableCell>{quarter.year}</TableCell>
                       <TableCell>Q{quarter.quarter_num}</TableCell>
+                      <TableCell>
+                        {templates.length > 1 ? (
+                          <select
+                            value={resolvedTemplate?.id || ""}
+                            onChange={(e) => {
+                              const templateId = e.target.value
+                              if (templateId && templateId !== resolvedTemplate?.id) {
+                                setPendingFormatChange({ quarter, templateId })
+                              }
+                            }}
+                            className="h-8 w-full rounded-md border border-input bg-background px-2 text-sm"
+                          >
+                            {templates.map((t) => (
+                              <option key={t.id} value={t.id}>
+                                {t.name}
+                              </option>
+                            ))}
+                          </select>
+                        ) : (
+                          <span className="text-sm text-muted-foreground">
+                            {resolvedTemplate?.name || "—"}
+                          </span>
+                        )}
+                      </TableCell>
                       <TableCell>
                         {quarter.is_active ? (
                           <span className="inline-flex items-center gap-1 text-green-600 font-medium">
@@ -341,7 +429,7 @@ export default function QuartersSettingsPage() {
 
                 {/* Add new quarter row */}
                 <TableRow>
-                  <TableCell colSpan={5}>
+                  <TableCell colSpan={6}>
                     {isCreating ? (
                       <div className="space-y-3 py-2">
                         <div className="flex gap-2 items-center">
@@ -388,6 +476,57 @@ export default function QuartersSettingsPage() {
                             </select>
                           </div>
                         )}
+                        {templates.length > 0 && (() => {
+                          // The template the API will use if none is chosen explicitly:
+                          // inherited from the copy source, else from the most recent quarter
+                          const inheritedTemplate = copyFromQuarterId
+                            ? resolveTemplate(quarters.find((q) => q.id === copyFromQuarterId))
+                            : resolveTemplate(quarters[0]) ?? templates[0] ?? null
+                          const effectiveTemplate = newTemplateId
+                            ? templates.find((t) => t.id === newTemplateId) ?? null
+                            : inheritedTemplate
+                          const sourceQuarter = quarters.find((q) => q.id === copyFromQuarterId)
+                          const sourceTemplate = resolveTemplate(sourceQuarter)
+                          const crossFormatCopy =
+                            !!sourceQuarter &&
+                            !!effectiveTemplate &&
+                            !!sourceTemplate &&
+                            sourceTemplate.id !== effectiveTemplate.id
+                          return (
+                            <>
+                              <div className="flex items-center gap-2">
+                                <LayoutGrid className="h-4 w-4 text-muted-foreground" />
+                                <span className="text-sm text-muted-foreground">Block format:</span>
+                                <select
+                                  value={newTemplateId}
+                                  onChange={(e) => setNewTemplateId(e.target.value)}
+                                  className="h-8 rounded-md border border-input bg-background px-2 text-sm"
+                                >
+                                  <option value="">
+                                    Inherit{inheritedTemplate ? ` (${inheritedTemplate.name})` : ""}
+                                  </option>
+                                  {templates.map((t) => (
+                                    <option key={t.id} value={t.id}>
+                                      {t.name}
+                                    </option>
+                                  ))}
+                                </select>
+                              </div>
+                              {crossFormatCopy && (
+                                <div className="flex items-start gap-2 max-w-xl rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-700">
+                                  <AlertTriangle className="h-4 w-4 text-amber-600 mt-0.5 flex-shrink-0" />
+                                  <span>
+                                    <span className="font-medium">{sourceQuarter!.name}</span> uses the{" "}
+                                    <span className="font-medium">{sourceTemplate!.name}</span> format, but the
+                                    new quarter will use <span className="font-medium">{effectiveTemplate!.name}</span>.
+                                    Block-based restrictions (fixed slots, block ranges) will be copied with
+                                    their old block numbers — review them after creating the quarter.
+                                  </span>
+                                </div>
+                              )}
+                            </>
+                          )
+                        })()}
                         <div className="flex gap-2">
                           <Button
                             size="sm"
@@ -419,6 +558,7 @@ export default function QuartersSettingsPage() {
                         size="sm"
                         onClick={() => {
                           setNextQuarterDefaults()
+                          setNewTemplateId("")
                           setIsCreating(true)
                         }}
                         className="text-muted-foreground"
@@ -432,6 +572,42 @@ export default function QuartersSettingsPage() {
             </Table>
           </div>
         </div>
+
+        {/* Block format change confirmation */}
+        <AlertDialog
+          open={!!pendingFormatChange}
+          onOpenChange={(open) => {
+            if (!open) setPendingFormatChange(null)
+          }}
+        >
+          <AlertDialogContent>
+            <AlertDialogHeader>
+              <AlertDialogTitle>Change block format?</AlertDialogTitle>
+              <AlertDialogDescription>
+                {pendingFormatChange && (
+                  <>
+                    This switches {pendingFormatChange.quarter.name} to the{" "}
+                    <span className="font-medium">
+                      {templates.find((t) => t.id === pendingFormatChange.templateId)?.name}
+                    </span>{" "}
+                    format. New schedule generations will use the new format. Existing
+                    saved schedules keep their own block data, but schedule pages and
+                    timetables for this quarter will display using the new format — so
+                    switching is best done before generating schedules, not after.
+                    Block-based restrictions (fixed slots, block ranges) keep their
+                    current block numbers and should be reviewed.
+                  </>
+                )}
+              </AlertDialogDescription>
+            </AlertDialogHeader>
+            <AlertDialogFooter>
+              <AlertDialogCancel>Cancel</AlertDialogCancel>
+              <AlertDialogAction onClick={confirmFormatChange}>
+                Change Format
+              </AlertDialogAction>
+            </AlertDialogFooter>
+          </AlertDialogContent>
+        </AlertDialog>
 
         {/* Archived Quarters Section */}
         <Collapsible

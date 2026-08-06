@@ -7,9 +7,11 @@ import { Badge } from "@/components/ui/badge"
 import { Checkbox } from "@/components/ui/checkbox"
 import { Label } from "@/components/ui/label"
 import { Settings2 } from "lucide-react"
+import { BLOCKS } from "@/lib/types"
 
 const DAYS = ["Mon", "Tues", "Wed", "Thurs", "Fri"]
-const BLOCKS = [1, 2, 3, 4, 5]
+// Stable default so effect deps don't churn when the prop is omitted
+const DEFAULT_BLOCKS: number[] = [...BLOCKS]
 
 interface Restriction {
   id?: string
@@ -20,26 +22,28 @@ interface Restriction {
 interface RestrictionPopoverProps {
   restrictions: Restriction[]
   onSave: (restrictions: Restriction[]) => void
+  /** Block numbers from the quarter's timetable template (defaults to legacy 1-5) */
+  blocks?: number[]
 }
 
-export function RestrictionPopover({ restrictions, onSave }: RestrictionPopoverProps) {
+export function RestrictionPopover({ restrictions, onSave, blocks = DEFAULT_BLOCKS }: RestrictionPopoverProps) {
   const [open, setOpen] = useState(false)
   const [availableDays, setAvailableDays] = useState<string[]>(DAYS)
-  const [availableBlocks, setAvailableBlocks] = useState<number[]>(BLOCKS)
+  const [availableBlocks, setAvailableBlocks] = useState<number[]>(blocks)
   const [fixedSlots, setFixedSlots] = useState<{ day: string; block: number }[]>([])
 
   useEffect(() => {
     // Parse existing restrictions
     const days = restrictions.find((r) => r.restriction_type === "available_days")
-    const blocks = restrictions.find((r) => r.restriction_type === "available_blocks")
+    const blocksRestriction = restrictions.find((r) => r.restriction_type === "available_blocks")
     const fixed = restrictions.filter((r) => r.restriction_type === "fixed_slot")
 
     if (days) setAvailableDays(days.value as string[])
-    if (blocks) setAvailableBlocks(blocks.value as number[])
+    setAvailableBlocks(blocksRestriction ? (blocksRestriction.value as number[]) : blocks)
     if (fixed.length > 0) {
       setFixedSlots(fixed.map((f) => f.value as { day: string; block: number }))
     }
-  }, [restrictions])
+  }, [restrictions, blocks])
 
   function handleSave() {
     const newRestrictions: Restriction[] = []
@@ -52,7 +56,7 @@ export function RestrictionPopover({ restrictions, onSave }: RestrictionPopoverP
       })
     }
 
-    if (availableBlocks.length < BLOCKS.length) {
+    if (availableBlocks.length < blocks.length) {
       newRestrictions.push({
         restriction_type: "available_blocks",
         value: availableBlocks,
@@ -129,8 +133,8 @@ export function RestrictionPopover({ restrictions, onSave }: RestrictionPopoverP
 
           <div>
             <Label className="text-sm font-medium">Available Blocks</Label>
-            <div className="flex gap-2 mt-2">
-              {BLOCKS.map((block) => (
+            <div className="flex flex-wrap gap-2 mt-2">
+              {blocks.map((block) => (
                 <label
                   key={block}
                   className="flex items-center gap-1 cursor-pointer"
@@ -155,7 +159,7 @@ export function RestrictionPopover({ restrictions, onSave }: RestrictionPopoverP
                 <thead>
                   <tr className="bg-muted">
                     <th className="p-1 border-r"></th>
-                    {BLOCKS.map((b) => (
+                    {blocks.map((b) => (
                       <th key={b} className="p-1 text-center border-r last:border-r-0">
                         {b}
                       </th>
@@ -168,7 +172,7 @@ export function RestrictionPopover({ restrictions, onSave }: RestrictionPopoverP
                       <td className="p-1 border-r font-medium bg-muted">
                         {day.slice(0, 3)}
                       </td>
-                      {BLOCKS.map((block) => {
+                      {blocks.map((block) => {
                         const isFixed = fixedSlots.some(
                           (s) => s.day === day && s.block === block
                         )
@@ -197,7 +201,7 @@ export function RestrictionPopover({ restrictions, onSave }: RestrictionPopoverP
               size="sm"
               onClick={() => {
                 setAvailableDays(DAYS)
-                setAvailableBlocks(BLOCKS)
+                setAvailableBlocks(blocks)
                 setFixedSlots([])
               }}
             >

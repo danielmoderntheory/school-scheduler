@@ -1,11 +1,27 @@
 import XLSX from "xlsx-js-style"
 import type { ScheduleOption, TeacherSchedule, GradeSchedule, OpenBlockLabels, TimetableRow, TimetableTemplate } from "./types"
-import { BLOCK_TYPE_OPEN, BLOCK_TYPE_STUDY_HALL, isOpenBlock, isStudyHall, isScheduledClass, getOpenBlockAt, getOpenBlockLabel } from "./schedule-utils"
+import { BLOCK_TYPE_OPEN, BLOCK_TYPE_STUDY_HALL, isOpenBlock, isStudyHall, isScheduledClass, getOpenBlockAt, getOpenBlockLabel, getScheduleBlockNumbers } from "./schedule-utils"
 import { formatGradeDisplayCompact } from "./grade-utils"
-import { resolveRowsForGrade } from "./timetable-utils"
+import { resolveRowsForGrade, getTemplateBlocks } from "./timetable-utils"
 
 const DAYS = ["Mon", "Tues", "Wed", "Thurs", "Fri"]
-const BLOCKS = [1, 2, 3, 4, 5]
+
+// Block list for an export: prefer the block keys actually present in the saved
+// schedule data (a saved option knows its own format), falling back to the
+// quarter's timetable template only when the data has no block keys, then to
+// the legacy 5-block list. Data-first matters when a quarter's template is
+// switched after generating: a 5-block option must still export 5 rows, and a
+// 9-block option must never have blocks 6-9 silently dropped.
+function resolveExportBlocks(option: ScheduleOption, metadata?: ExportMetadata): number[] {
+  const dataBlocks = getScheduleBlockNumbers(option.teacherSchedules, option.gradeSchedules)
+  const hasData = Object.keys(option.teacherSchedules || {}).length > 0
+    || Object.keys(option.gradeSchedules || {}).length > 0
+  if (hasData) return dataBlocks
+  if (metadata?.timetableTemplate) {
+    return getTemplateBlocks(metadata.timetableTemplate)
+  }
+  return dataBlocks
+}
 
 // Sort grades: Kindergarten first, then by grade number
 function gradeSort(a: string, b: string): number {
@@ -281,6 +297,7 @@ export interface ExportMetadata {
 
 export function generateXLSX(option: ScheduleOption, metadata?: ExportMetadata): Blob {
   const workbook = XLSX.utils.book_new()
+  const exportBlocks = resolveExportBlocks(option, metadata)
 
   // Get sorted teacher order (same as schedule view)
   const sortedTeacherOrder = sortTeachers(Object.entries(option.teacherSchedules), option.teacherStats)
@@ -397,7 +414,7 @@ export function generateXLSX(option: ScheduleOption, metadata?: ExportMetadata):
     teacherRowInfo.push({ type: "header", row: teacherData.length })
     teacherData.push(["", ...DAYS])
 
-    BLOCKS.forEach((block) => {
+    exportBlocks.forEach((block) => {
       teacherRowInfo.push({ type: "block", row: teacherData.length })
       const row: (string | number)[] = [`Block ${block}`]
       DAYS.forEach((day) => {
@@ -448,7 +465,7 @@ export function generateXLSX(option: ScheduleOption, metadata?: ExportMetadata):
     gradeRowInfo.push({ type: "header", row: gradeData.length })
     gradeData.push(["", ...DAYS])
 
-    BLOCKS.forEach((block) => {
+    exportBlocks.forEach((block) => {
       gradeRowInfo.push({ type: "block", row: gradeData.length })
       const row: (string | number)[] = [`Block ${block}`]
       DAYS.forEach((day) => {
@@ -621,6 +638,7 @@ export function generateXLSX(option: ScheduleOption, metadata?: ExportMetadata):
 
 export function generateCSV(option: ScheduleOption, metadata?: ExportMetadata): string {
   const lines: string[] = []
+  const exportBlocks = resolveExportBlocks(option, metadata)
 
   // Format the date if provided
   const formattedDate = metadata?.generatedAt
@@ -653,7 +671,7 @@ export function generateCSV(option: ScheduleOption, metadata?: ExportMetadata): 
   sortTeachers(Object.entries(option.teacherSchedules), option.teacherStats).forEach(([teacher, schedule]) => {
     lines.push(teacher)
     lines.push(["", ...DAYS].join(","))
-    BLOCKS.forEach((block) => {
+    exportBlocks.forEach((block) => {
       const row: string[] = [`Block ${block}`]
       DAYS.forEach((day) => {
         const label = getOpenLabelForCell(schedule, teacher, day, block, option.openBlockLabels)
@@ -671,7 +689,7 @@ export function generateCSV(option: ScheduleOption, metadata?: ExportMetadata): 
   Object.entries(option.gradeSchedules).sort(([a], [b]) => gradeSort(a, b)).forEach(([grade, schedule]) => {
     lines.push(grade)
     lines.push(["", ...DAYS].join(","))
-    BLOCKS.forEach((block) => {
+    exportBlocks.forEach((block) => {
       const row: string[] = [`Block ${block}`]
       DAYS.forEach((day) => {
         const cell = formatGradeCell(schedule[day]?.[block])

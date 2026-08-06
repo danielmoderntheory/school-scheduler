@@ -30,6 +30,8 @@ import { LocalQuarterSelector } from "@/components/LocalQuarterSelector"
 import { GenerateModal } from "@/components/GenerateModal"
 import { useQuarterSelection } from "@/lib/hooks/useQuarterSelection"
 import { TEACHER_STATUS_FULL_TIME, isPartTime, isFullTime, calculateGradeBlocks, buildCotaughtGroups, type TeacherStatus } from "@/lib/schedule-utils"
+import { getTemplateBlocks, getTeachableBlocksForGrade } from "@/lib/timetable-utils"
+import type { TimetableTemplate } from "@/lib/types"
 import type { SchedulingRule } from "@/lib/scheduler-remote"
 import toast from "@/lib/toast"
 
@@ -94,7 +96,8 @@ interface Quarter {
 }
 
 const DAYS = ["Mon", "Tues", "Wed", "Thurs", "Fri"]
-const BLOCKS = [1, 2, 3, 4, 5]
+// Legacy fallback — the real block list comes from the quarter's timetable template
+const DEFAULT_BLOCKS = [1, 2, 3, 4, 5]
 // NOTE: Study hall grades are now configured in the rules, fetched below
 
 function formatTimeAgo(timestamp: string): string {
@@ -126,6 +129,7 @@ function ClassesPageContent() {
   const [grades, setGrades] = useState<Grade[]>([])
   const [subjects, setSubjects] = useState<Subject[]>([])
   const [studyHallGrades, setStudyHallGrades] = useState<string[]>([])
+  const [timetableTemplate, setTimetableTemplate] = useState<TimetableTemplate | null>(null)
   const [rules, setRules] = useState<SchedulingRule[]>([])
   const [loading, setLoading] = useState(true)
   const [showGenerateModal, setShowGenerateModal] = useState(false)
@@ -217,12 +221,25 @@ function ClassesPageContent() {
     setClassesLoading(true)
     try {
       // Fetch classes and lock state in parallel
-      const [classesRes, snapshotRes, historyRes, starredRes] = await Promise.all([
+      const [classesRes, snapshotRes, historyRes, starredRes, templateRes] = await Promise.all([
         fetch(`/api/classes?quarter_id=${quarterId}`),
         fetch(`/api/history?quarter_id=${quarterId}&snapshot_version_only=true`).catch(() => null),
         fetch(`/api/history?quarter_id=${quarterId}&limit=1&most_recent=true&summary=true`).catch(() => null),
         fetch(`/api/history?quarter_id=${quarterId}&limit=1&starred_only=true&summary=true`).catch(() => null),
+        fetch(`/api/timetable-templates?quarter_id=${quarterId}`).catch(() => null),
       ])
+
+      // Resolve the quarter's block format (falls back to legacy 5-block when unavailable)
+      try {
+        if (templateRes?.ok) {
+          const templates = await templateRes.json()
+          setTimetableTemplate(Array.isArray(templates) && templates.length > 0 ? templates[0] : null)
+        } else {
+          setTimetableTemplate(null)
+        }
+      } catch {
+        setTimetableTemplate(null)
+      }
 
       const classesData = await classesRes.json()
       // Sort by teacher name
@@ -760,6 +777,8 @@ function ClassesPageContent() {
   function parseRestrictions(restrictionStr: string): Restriction[] {
     if (!restrictionStr?.trim()) return []
 
+    // Accept block numbers within the quarter's template (e.g. 1-9 under the 9-block format)
+    const validBlocks = getTemplateBlocks(timetableTemplate)
     const restrictions: Restriction[] = []
     const str = restrictionStr.trim()
 
@@ -789,7 +808,7 @@ function ClassesPageContent() {
         const endBlock = parseInt(rangeMatch[3])
         if (!availableDays.includes(day)) availableDays.push(day)
         for (let b = startBlock; b <= endBlock; b++) {
-          if (!availableBlocks.includes(b)) availableBlocks.push(b)
+          if (validBlocks.includes(b) && !availableBlocks.includes(b)) availableBlocks.push(b)
         }
         continue
       }
@@ -799,7 +818,9 @@ function ClassesPageContent() {
       if (fixedMatch) {
         const day = DAY_MAP[fixedMatch[1]] || fixedMatch[1]
         const block = parseInt(fixedMatch[2])
-        restrictions.push({ restriction_type: 'fixed_slot', value: { day, block } })
+        if (validBlocks.includes(block)) {
+          restrictions.push({ restriction_type: 'fixed_slot', value: { day, block } })
+        }
       }
     }
 
@@ -1769,6 +1790,23 @@ function ClassesPageContent() {
     gradeNameToDisplay.set(g.name, g.display_name)
   }
 
+  // Blocks defined by this quarter's timetable template (legacy quarters resolve to 1-5)
+  const templateBlocks = getTemplateBlocks(timetableTemplate)
+  const teachableBlocksByGrade = new Map<string, number[]>()
+  for (const g of grades) {
+    teachableBlocksByGrade.set(g.id, getTeachableBlocksForGrade(timetableTemplate, g.id))
+  }
+
+  // Blocks a class can never occupy — any block that isn't teachable for one of its
+  // grades (e.g. that band's lunch block under the 9-block format)
+  function lunchBlocksForClass(cls: ClassEntry): number[] {
+    const gradeIds = cls.grade_ids?.length ? cls.grade_ids : (cls.grade_id ? [cls.grade_id] : [])
+    if (gradeIds.length === 0) return []
+    return templateBlocks.filter(b =>
+      gradeIds.some(gid => !(teachableBlocksByGrade.get(gid) ?? templateBlocks).includes(b))
+    )
+  }
+
   // Calculate grade capacity using shared helper
   const blockCountClasses: import('@/lib/schedule-utils').BlockCountClass[] = []
   for (const cls of classes) {
@@ -2344,6 +2382,8 @@ Maria\t6th-11th Elective\tSpanish 101\t1\tMon Block 5`}
         onCreateClass={createClass}
         onCreateSubject={createSubject}
         onCreateTeacher={createTeacher}
+        blocks={templateBlocks}
+        template={timetableTemplate}
       />
 
       {/* Co-taught Suggestion Dialog */}
@@ -2405,9 +2445,11 @@ Maria\t6th-11th Elective\tSpanish 101\t1\tMon Block 5`}
           <span className="text-xs text-slate-500 mr-2 flex-shrink-0">Blocks:</span>
           {sortedGrades.map(grade => {
             const count = gradeCapacity.get(grade.display_name) || 0
-            const isFull = count === 25
-            const isOver = count > 25
-            const isUnder = count < 25
+            // Weekly capacity = teachable blocks/day for this grade × 5 days
+            const capacity = (teachableBlocksByGrade.get(grade.id)?.length ?? templateBlocks.length) * 5
+            const isFull = count === capacity
+            const isOver = count > capacity
+            const isUnder = count < capacity
             const shortName = grade.display_name.replace(' Grade', '').replace('Kindergarten', 'K')
 
             // Get classes for this grade
@@ -2420,7 +2462,7 @@ Maria\t6th-11th Elective\tSpanish 101\t1\tMon Block 5`}
               <Popover key={grade.id}>
                 <PopoverTrigger asChild>
                   <button
-                    title={`${grade.display_name}: ${count}/25 blocks${studyHallGrades.includes(grade.display_name) ? ' (includes study hall)' : ''}`}
+                    title={`${grade.display_name}: ${count}/${capacity} blocks${studyHallGrades.includes(grade.display_name) ? ' (includes study hall)' : ''}`}
                     className={cn(
                       "flex items-center gap-1 px-2 py-0.5 rounded text-xs font-medium flex-shrink-0 cursor-pointer hover:ring-1 hover:ring-slate-300 transition-all",
                       isOver && "bg-red-100 text-red-700",
@@ -2449,7 +2491,7 @@ Maria\t6th-11th Elective\tSpanish 101\t1\tMon Block 5`}
                         isFull && "text-emerald-600",
                         isUnder && "text-amber-600"
                       )}>
-                        {count}/25 blocks
+                        {count}/{capacity} blocks
                       </span>
                     </div>
                   </div>
@@ -2494,7 +2536,7 @@ Maria\t6th-11th Elective\tSpanish 101\t1\tMon Block 5`}
             }
             const fullTimeTeachers = teachers.filter(t => isFullTime(t.status))
             const hasIssue = fullTimeTeachers.some(t => {
-              const maxBlocks = (t.available_days?.length ?? 5) * (t.available_blocks?.length ?? 5)
+              const maxBlocks = (t.available_days?.length ?? 5) * (t.available_blocks?.length ?? templateBlocks.length)
               const blocks = teacherBlocks.get(t.id) || 0
               return blocks > maxBlocks || blocks < maxBlocks - 5
             })
@@ -2530,7 +2572,7 @@ Maria\t6th-11th Elective\tSpanish 101\t1\tMon Block 5`}
                             .sort((a, b) => a.name.localeCompare(b.name))
                             .map(t => {
                               const blocks = teacherBlocks.get(t.id) || 0
-                              const maxBlocks = (t.available_days?.length ?? 5) * (t.available_blocks?.length ?? 5)
+                              const maxBlocks = (t.available_days?.length ?? 5) * (t.available_blocks?.length ?? templateBlocks.length)
                               const isOver = blocks > maxBlocks
                               const isUnderAllocated = blocks < maxBlocks - 5
                               return (
@@ -2561,7 +2603,7 @@ Maria\t6th-11th Elective\tSpanish 101\t1\tMon Block 5`}
                             .sort((a, b) => a.name.localeCompare(b.name))
                             .map(t => {
                               const blocks = teacherBlocks.get(t.id) || 0
-                              const maxBlocks = (t.available_days?.length ?? 5) * (t.available_blocks?.length ?? 5)
+                              const maxBlocks = (t.available_days?.length ?? 5) * (t.available_blocks?.length ?? templateBlocks.length)
                               return (
                                 <div key={t.id} className="px-3 py-1.5 flex items-center justify-between text-xs hover:bg-slate-50">
                                   <span className="text-slate-500 truncate">{t.name}</span>
@@ -2763,6 +2805,8 @@ Maria\t6th-11th Elective\tSpanish 101\t1\tMon Block 5`}
                 teachers={teachers}
                 grades={grades}
                 subjects={subjects}
+                blocks={templateBlocks}
+                lunchBlocks={lunchBlocksForClass(cls)}
                 cotaughtTeachers={cotaughtTeacherNames.get(cls.id)}
                 onUpdate={updateClass}
                 onUpdateRestrictions={updateRestrictions}
@@ -2805,6 +2849,8 @@ interface ClassRowProps {
   teachers: Teacher[]
   grades: Grade[]
   subjects: Subject[]
+  blocks: number[]
+  lunchBlocks: number[]
   cotaughtTeachers?: string[]
   onUpdate: (id: string, field: string, value: unknown) => void
   onUpdateRestrictions: (id: string, restrictions: Restriction[]) => void
@@ -2819,6 +2865,8 @@ function ClassRow({
   teachers,
   grades,
   subjects,
+  blocks,
+  lunchBlocks,
   cotaughtTeachers,
   onUpdate,
   onUpdateRestrictions,
@@ -2907,6 +2955,8 @@ function ClassRow({
           onChange={(r) => onUpdateRestrictions(cls.id, r)}
           teacherAvailableDays={teachers.find(t => t.id === cls.teacher_id)?.available_days}
           teacherAvailableBlocks={teachers.find(t => t.id === cls.teacher_id)?.available_blocks}
+          blocks={blocks}
+          lunchBlocks={lunchBlocks}
         />
       </td>
       <td className="px-1 py-1">
@@ -3224,9 +3274,11 @@ interface RestrictionsCellProps {
   onChange: (restrictions: Restriction[]) => void
   teacherAvailableDays?: string[] | null
   teacherAvailableBlocks?: number[] | null
+  blocks?: number[]
+  lunchBlocks?: number[]
 }
 
-function RestrictionsCell({ restrictions, onChange, teacherAvailableDays, teacherAvailableBlocks }: RestrictionsCellProps) {
+function RestrictionsCell({ restrictions, onChange, teacherAvailableDays, teacherAvailableBlocks, blocks = DEFAULT_BLOCKS, lunchBlocks = [] }: RestrictionsCellProps) {
   const [editing, setEditing] = useState(false)
   const [selectedDays, setSelectedDays] = useState<string[]>([])
   const [selectedBlocks, setSelectedBlocks] = useState<number[]>([])
@@ -3294,16 +3346,19 @@ function RestrictionsCell({ restrictions, onChange, teacherAvailableDays, teache
     onChange(newRestrictions)
   }
 
+  // Blocks the class can actually be pinned to (template blocks minus lunch)
+  const selectableBlocks = blocks.filter((b) => !lunchBlocks.includes(b))
+
   function saveRestrictions() {
     const newRestrictions: Restriction[] = []
 
-    // Check which days have all 5 blocks selected (should become available_days)
+    // Check which days have all selectable blocks selected (should become available_days)
     const daysWithAllBlocks: string[] = []
     DAYS.forEach((day) => {
       const blocksForDay = selectedDays
         .map((d, i) => d === day ? selectedBlocks[i] : null)
         .filter((b): b is number => b !== null)
-      if (blocksForDay.length === 5) {
+      if (blocksForDay.length === selectableBlocks.length) {
         daysWithAllBlocks.push(day)
       }
     })
@@ -3439,17 +3494,23 @@ function RestrictionsCell({ restrictions, onChange, teacherAvailableDays, teache
                 </tr>
               </thead>
               <tbody>
-                {BLOCKS.map((block, blockIdx) => {
-                  const isLastRow = blockIdx === BLOCKS.length - 1
+                {blocks.map((block, blockIdx) => {
+                  const isLastRow = blockIdx === blocks.length - 1
+                  const isLunchBlock = lunchBlocks.includes(block)
                   return (
                     <tr key={block}>
-                      <td className={cn("w-7 h-7 text-center border-r font-medium bg-muted/50 text-muted-foreground", !isLastRow && "border-b")}>B{block}</td>
+                      <td
+                        title={isLunchBlock ? "Lunch — not schedulable" : undefined}
+                        className={cn("w-7 h-7 text-center border-r font-medium bg-muted/50", !isLastRow && "border-b", isLunchBlock ? "text-slate-300" : "text-muted-foreground")}
+                      >
+                        B{block}
+                      </td>
                       {DAYS.map((day) => {
                         const isExplicitlySelected = selectedDays.some((d, i) => d === day && selectedBlocks[i] === block)
                         const isDayInAvailable = availableDaysOnly.includes(day)
                         const dayHasExplicitSlots = selectedDays.some((d) => d === day)
                         // If day is available and has no explicit slots, all blocks are implicitly selected
-                        const isImplicitlySelected = isDayInAvailable && !dayHasExplicitSlots
+                        const isImplicitlySelected = isDayInAvailable && !dayHasExplicitSlots && !isLunchBlock
                         const isSelected = isExplicitlySelected || isImplicitlySelected
                         const isDayAvailable = availableDaysOnly.length === 0 || isDayInAvailable
                         // Check teacher availability
@@ -3459,14 +3520,15 @@ function RestrictionsCell({ restrictions, onChange, teacherAvailableDays, teache
                         return (
                           <td
                             key={day}
+                            title={isLunchBlock ? "Lunch — not schedulable" : undefined}
                             onClick={() => {
-                              if (!isDayAvailable || !teacherSlotAvailable) return // Can't select slots on unavailable days/blocks
+                              if (isLunchBlock || !isDayAvailable || !teacherSlotAvailable) return // Can't select slots on unavailable days/blocks
 
                               if (isDayInAvailable) {
                                 // Day is in available days
                                 if (isImplicitlySelected) {
                                   // All blocks implicitly selected - add OTHER blocks explicitly (unselect this one)
-                                  const otherBlocks = BLOCKS.filter((b) => b !== block)
+                                  const otherBlocks = selectableBlocks.filter((b) => b !== block)
                                   const newDays = [...selectedDays.filter((d) => d !== day), ...otherBlocks.map(() => day)]
                                   const newBlocks = [...selectedBlocks.filter((_, i) => selectedDays[i] !== day), ...otherBlocks]
                                   setSelectedDays(newDays)
@@ -3500,13 +3562,15 @@ function RestrictionsCell({ restrictions, onChange, teacherAvailableDays, teache
                             className={cn(
                               "w-7 h-7 text-center border-r last:border-r-0 transition-colors",
                               !isLastRow && "border-b",
-                              !teacherSlotAvailable
-                                ? "bg-orange-50 cursor-not-allowed"
-                                : isSelected
-                                  ? "bg-violet-500 text-white hover:bg-violet-600 cursor-pointer"
-                                  : isDayAvailable
-                                    ? "hover:bg-violet-50 cursor-pointer"
-                                    : "bg-slate-100 cursor-not-allowed"
+                              isLunchBlock
+                                ? "bg-slate-100 cursor-not-allowed"
+                                : !teacherSlotAvailable
+                                  ? "bg-orange-50 cursor-not-allowed"
+                                  : isSelected
+                                    ? "bg-violet-500 text-white hover:bg-violet-600 cursor-pointer"
+                                    : isDayAvailable
+                                      ? "hover:bg-violet-50 cursor-pointer"
+                                      : "bg-slate-100 cursor-not-allowed"
                             )}
                           >
                             {isSelected && <Check className="h-3.5 w-3.5 mx-auto" />}

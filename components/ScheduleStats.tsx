@@ -18,6 +18,7 @@ import {
 } from "@/components/ui/tooltip"
 import { Info, AlertTriangle, ChevronDown, ChevronRight } from "lucide-react"
 import type { TeacherStat, StudyHallAssignment, GradeSchedule, TeacherSchedule } from "@/lib/types"
+import { BLOCKS as LEGACY_BLOCKS } from "@/lib/types"
 import { isOccupiedBlock, isScheduledClass, isFullTime, getFirstGradeEntry } from "@/lib/schedule-utils"
 import { parseGradeDisplayToNames } from "@/lib/grade-utils"
 
@@ -36,6 +37,12 @@ interface ScheduleStatsProps {
   expectedTeachingSessions?: number
   defaultExpanded?: boolean
   validationIssues?: ValidationIssue[]  // Grade conflicts, subject conflicts, etc.
+  // Block numbers for this schedule's format (from the quarter's timetable template).
+  // Defaults to the legacy 5-block list for existing call sites.
+  blocks?: number[]
+  // Per-grade teachable blocks (display_name -> blocks). Grades' capacity and
+  // gap detection use these; absent grades fall back to the full block list.
+  teachableBlocksByGrade?: Record<string, number[]>
 }
 
 function InfoTooltip({ text }: { text: string }) {
@@ -61,6 +68,8 @@ export function ScheduleStats({
   expectedTeachingSessions,
   defaultExpanded = true,
   validationIssues = [],
+  blocks,
+  teachableBlocksByGrade,
 }: ScheduleStatsProps) {
   const [expanded, setExpanded] = useState(defaultExpanded)
 
@@ -68,8 +77,14 @@ export function ScheduleStats({
   // Teacher schedules are the source of truth - gradeSchedules can miss entries when
   // multiple classes share a slot (electives, study halls, etc.)
   const DAYS = ['Mon', 'Tues', 'Wed', 'Thurs', 'Fri']
-  const BLOCKS = [1, 2, 3, 4, 5]
-  const BLOCKS_PER_WEEK = 25
+  const BLOCKS: number[] = blocks && blocks.length > 0 ? blocks : [...LEGACY_BLOCKS]
+  const BLOCKS_PER_WEEK = DAYS.length * BLOCKS.length
+  // A grade's own block list and weekly capacity (excludes e.g. its lunch block)
+  const gradeBlocksFor = (grade: string): number[] =>
+    teachableBlocksByGrade?.[grade] && teachableBlocksByGrade[grade].length > 0
+      ? teachableBlocksByGrade[grade]
+      : BLOCKS
+  const gradeCapacityFor = (grade: string): number => DAYS.length * gradeBlocksFor(grade).length
 
   let totalGrades = 0
   let gradesFullCount = 0
@@ -89,7 +104,7 @@ export function ScheduleStats({
   // Get grade list from gradeSchedules (still needed to know which grades exist)
   const gradeNames = gradeSchedules ? Object.keys(gradeSchedules) : []
   totalGrades = gradeNames.length
-  totalBlocksAvailable = totalGrades * BLOCKS_PER_WEEK
+  totalBlocksAvailable = gradeNames.reduce((sum, g) => sum + gradeCapacityFor(g), 0)
 
   if (teacherSchedules && gradeNames.length > 0) {
     // Build a set of filled slots per grade from teacher schedules
@@ -140,13 +155,13 @@ export function ScheduleStats({
     for (const grade of gradeNames) {
       const filledCount = filledSlots[grade].size
       totalBlocksScheduled += filledCount
-      if (filledCount >= BLOCKS_PER_WEEK) {
+      if (filledCount >= gradeCapacityFor(grade)) {
         gradesFullCount++
       } else {
-        // Find which slots are missing
+        // Find which slots are missing (only blocks this grade can use)
         const missingSlots: Array<{ day: string; block: number }> = []
         for (const day of DAYS) {
-          for (const block of BLOCKS) {
+          for (const block of gradeBlocksFor(grade)) {
             const slotKey = `${day}|${block}`
             if (!filledSlots[grade].has(slotKey)) {
               missingSlots.push({ day, block })
@@ -164,7 +179,7 @@ export function ScheduleStats({
       const missingSlots: Array<{ day: string; block: number }> = []
 
       for (const day of DAYS) {
-        for (const block of BLOCKS) {
+        for (const block of gradeBlocksFor(grade)) {
           const cell = schedule?.[day]?.[block]
           const entry = getFirstGradeEntry(cell)
           // Count as filled if it's not empty and not OPEN
@@ -185,7 +200,7 @@ export function ScheduleStats({
         }
       }
 
-      if (filledBlocks >= BLOCKS_PER_WEEK) {
+      if (filledBlocks >= gradeCapacityFor(grade)) {
         gradesFullCount++
       } else {
         gradesWithGaps.push({ grade, filledCount: filledBlocks, missingSlots })
@@ -219,7 +234,7 @@ export function ScheduleStats({
 
   // Calculate utilization for full-time teachers only
   const avgUtilization = fullTimeTeachers.length > 0
-    ? Math.round((fullTimeTeachers.reduce((sum, s) => sum + s.totalUsed, 0) / fullTimeTeachers.length / 25) * 100)
+    ? Math.round((fullTimeTeachers.reduce((sum, s) => sum + s.totalUsed, 0) / fullTimeTeachers.length / BLOCKS_PER_WEEK) * 100)
     : 0
 
   // Find full-time teachers with most open blocks (candidates for more classes)
@@ -279,7 +294,8 @@ export function ScheduleStats({
   }
 
   // High average open blocks (more than half the week free)
-  if (avgOpenBlocks > 12 && fullTimeTeachers.length > 0) {
+  // BLOCKS_PER_WEEK / 2 - 0.5 = 12 for the legacy 25-block week (preserves prior threshold)
+  if (avgOpenBlocks > BLOCKS_PER_WEEK / 2 - 0.5 && fullTimeTeachers.length > 0) {
     issues.push({
       type: 'info',
       message: `Full-time teachers average ${avgOpenBlocks.toFixed(1)} open blocks. Consider adding more classes or adjusting staffing.`
@@ -412,7 +428,7 @@ export function ScheduleStats({
           >
             <div className="text-sm text-slate-600">
               Grades Full
-              <InfoTooltip text="Number of grades with all 25 blocks filled (no empty slots)." />
+              <InfoTooltip text="Number of grades with every schedulable block filled (no empty slots; a grade's lunch block doesn't count)." />
             </div>
             <div className="text-xl font-bold">
               {gradesFullCount}/{totalGrades}
@@ -489,7 +505,7 @@ export function ScheduleStats({
                 ? (fullTimeTeachers.reduce((sum, t) => sum + t.open, 0) / fullTimeTeachers.length).toFixed(1)
                 : 0}
               <span className="text-sm font-normal text-slate-500 ml-1">
-                / 25
+                / {BLOCKS_PER_WEEK}
               </span>
             </div>
             <div className="text-xs text-slate-500 mt-1">Full-time only</div>

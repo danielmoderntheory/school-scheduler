@@ -7,11 +7,13 @@ import { Checkbox } from "@/components/ui/checkbox"
 import { Input } from "@/components/ui/input"
 import { RefreshCw, AlertTriangle, Check, Ban, X, ArrowLeftRight, Pencil } from "lucide-react"
 import type { TeacherSchedule, GradeSchedule, FloatingBlock, PendingPlacement, ValidationError, CellLocation, OpenBlockLabels } from "@/lib/types"
+import { BLOCKS } from "@/lib/types"
 import { BLOCK_TYPE_OPEN, isOpenBlock, isStudyHall, isScheduledClass, isFullTime, getOpenBlockAt, getOpenBlockLabel } from "@/lib/schedule-utils"
 import { formatGradeDisplayCompact, isClassElective, isClassCotaught, type ClassSnapshotEntry } from "@/lib/grade-utils"
 
 const DAYS = ["Mon", "Tues", "Wed", "Thurs", "Fri"]
-const BLOCKS = [1, 2, 3, 4, 5]
+// Legacy 5-block default — call sites that don't pass `blocks` render 5-block data
+const LEGACY_BLOCKS: number[] = [...BLOCKS]
 
 export type { CellLocation }
 
@@ -20,6 +22,9 @@ interface ScheduleGridProps {
   type: "teacher" | "grade"
   name: string
   status?: string
+  // Block numbers to render as rows (from the quarter's timetable template).
+  // Defaults to the legacy 5-block list for existing call sites.
+  blocks?: number[]
   // Change indicator: 'pending' = changes will be applied, 'applied' = changes have been applied in preview
   changeStatus?: 'pending' | 'applied'
   // Selection mode props (regen mode)
@@ -62,6 +67,7 @@ export function ScheduleGrid({
   type,
   name,
   status,
+  blocks = LEGACY_BLOCKS,
   changeStatus,
   showCheckbox,
   isSelected,
@@ -480,7 +486,7 @@ export function ScheduleGrid({
           </tr>
         </thead>
         <tbody>
-          {BLOCKS.map((block) => (
+          {blocks.map((block) => (
             <tr key={block} className="border-b last:border-b-0">
               <td className="p-1.5 font-medium text-muted-foreground bg-muted/30 whitespace-nowrap text-xs">
                 B{block}

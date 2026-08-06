@@ -7,29 +7,34 @@ import { Badge } from "@/components/ui/badge"
 import { Checkbox } from "@/components/ui/checkbox"
 import { Label } from "@/components/ui/label"
 import { CalendarClock } from "lucide-react"
+import { BLOCKS } from "@/lib/types"
 
 const DAYS = ["Mon", "Tues", "Wed", "Thurs", "Fri"]
-const BLOCKS = [1, 2, 3, 4, 5]
+// Stable default so effect deps don't churn when the prop is omitted
+const DEFAULT_BLOCKS: number[] = [...BLOCKS]
 
 interface TeacherAvailabilityPopoverProps {
   availableDays: string[] | null
   availableBlocks: number[] | null
   onSave: (days: string[] | null, blocks: number[] | null) => void
+  /** Block numbers from the quarter's timetable template (defaults to legacy 1-5) */
+  allBlocks?: number[]
 }
 
 export function TeacherAvailabilityPopover({
   availableDays,
   availableBlocks,
   onSave,
+  allBlocks = DEFAULT_BLOCKS,
 }: TeacherAvailabilityPopoverProps) {
   const [open, setOpen] = useState(false)
   const [days, setDays] = useState<string[]>(DAYS)
-  const [blocks, setBlocks] = useState<number[]>(BLOCKS)
+  const [blocks, setBlocks] = useState<number[]>(allBlocks)
 
   useEffect(() => {
     setDays(availableDays ?? DAYS)
-    setBlocks(availableBlocks ?? BLOCKS)
-  }, [availableDays, availableBlocks])
+    setBlocks(availableBlocks ?? allBlocks)
+  }, [availableDays, availableBlocks, allBlocks])
 
   function toggleDay(day: string) {
     setDays((prev) =>
@@ -46,7 +51,7 @@ export function TeacherAvailabilityPopover({
   function handleSave() {
     // Normalize: full selection → null (no restriction)
     const saveDays = days.length < DAYS.length ? days : null
-    const saveBlocks = blocks.length < BLOCKS.length ? blocks : null
+    const saveBlocks = blocks.length < allBlocks.length ? blocks : null
     onSave(saveDays, saveBlocks)
     setOpen(false)
   }
@@ -89,8 +94,8 @@ export function TeacherAvailabilityPopover({
 
           <div>
             <Label className="text-sm font-medium">Available Blocks</Label>
-            <div className="flex gap-2 mt-2">
-              {BLOCKS.map((block) => (
+            <div className="flex flex-wrap gap-2 mt-2">
+              {allBlocks.map((block) => (
                 <label
                   key={block}
                   className="flex items-center gap-1 cursor-pointer"
@@ -111,7 +116,7 @@ export function TeacherAvailabilityPopover({
               size="sm"
               onClick={() => {
                 setDays(DAYS)
-                setBlocks(BLOCKS)
+                setBlocks(allBlocks)
               }}
             >
               Clear
