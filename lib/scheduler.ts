@@ -14,25 +14,248 @@ import { parseGradeDisplayToNumbers, parseGradeDisplayToNames, gradeNumToDisplay
 
 // Constants
 export const DAYS = ['Mon', 'Tues', 'Wed', 'Thurs', 'Fri'];
+// Legacy 5-block defaults - kept exported for back-compat. Callers that pass no
+// block configuration to generateSchedules/reassignStudyHalls get these.
 export const BLOCKS = [1, 2, 3, 4, 5];
 export const NUM_SLOTS = 25;
 
 // NOTE: Grades now come from the database - no hardcoded grade list
 
 // ============================================================================
+// ACTIVE BLOCK CONFIGURATION (module state)
+// ============================================================================
+// The block format is parameterized per call: the exported entry points
+// (generateSchedules, reassignStudyHalls) accept optional `blocks` and
+// `teachableBlocksByGrade` arguments and stamp them into this module state
+// before doing any work. All internal helpers read the active state.
+// generateSchedules re-applies its state after every `await` so interleaved
+// calls in the same JS realm cannot corrupt each other's configuration.
+
+interface BlockState {
+  /** Ordered list of block numbers in the timetable (e.g. [1..5] or [1..9]) */
+  blocks: number[];
+  /** Grade name -> set of block numbers that grade can be scheduled in. null = unrestricted */
+  gradeBlocks: Map<string, Set<number>> | null;
+}
+
+let activeBlocks: number[] = [...BLOCKS];
+let activeGradeBlocks: Map<string, Set<number>> | null = null;
+
+function resolveBlockState(
+  blocks?: number[],
+  teachableBlocksByGrade?: Record<string, number[]>
+): BlockState {
+  const resolvedBlocks = blocks && blocks.length > 0 ? [...blocks] : [...BLOCKS];
+  let gradeBlocks: Map<string, Set<number>> | null = null;
+  if (teachableBlocksByGrade) {
+    gradeBlocks = new Map();
+    for (const [grade, allowed] of Object.entries(teachableBlocksByGrade)) {
+      gradeBlocks.set(grade, new Set(allowed));
+    }
+  }
+  return { blocks: resolvedBlocks, gradeBlocks };
+}
+
+function applyBlockState(state: BlockState): void {
+  activeBlocks = state.blocks;
+  activeGradeBlocks = state.gradeBlocks;
+}
+
+/**
+ * Compute the set of block numbers teachable by ALL of the given grade names,
+ * per the active teachableBlocksByGrade map. A grade absent from the map is
+ * unrestricted (all blocks). Returns null when fully unrestricted.
+ */
+function getTeachableBlocksForGrades(gradeNames: string[]): Set<number> | null {
+  if (!activeGradeBlocks) return null;
+  let result: Set<number> | null = null;
+  for (const g of gradeNames) {
+    const allowed = activeGradeBlocks.get(g);
+    if (!allowed) continue; // absent grade key = all blocks teachable
+    if (result === null) {
+      result = new Set(allowed);
+    } else {
+      const prev: Set<number> = result;
+      result = new Set([...prev].filter(b => allowed.has(b)));
+    }
+  }
+  return result;
+}
+
+function isBlockTeachableForGrades(gradeNames: string[], block: number): boolean {
+  const teachable = getTeachableBlocksForGrades(gradeNames);
+  return teachable === null || teachable.has(block);
+}
+
+// ============================================================================
+// TEACHER LUNCH CONSTRAINT (hard, rule_key: 'teacher_lunch')
+// ============================================================================
+// A teacher's CANDIDATE LUNCH WINDOWS are the union, over all grades covered
+// by their classes, of (activeBlocks minus that grade's teachable set) — i.e.
+// every band lunch block of every band they touch. The hard constraint: on
+// every day, at least one candidate window must stay free of the teacher's
+// obligations (classes AND study halls). Only active when a
+// teachableBlocksByGrade map is in effect and the 'teacher_lunch' rule is
+// enabled (missing rule = enabled, matching isRuleEnabled).
+
+interface TeacherLunchInfo {
+  /** Candidate lunch window block numbers for this teacher */
+  candidates: Set<number>;
+  /** Indices into activeBlocks for each candidate block */
+  candidateIdxs: number[];
+  /**
+   * Whether the constraint is enforced for this teacher. False when the
+   * candidate set is empty (legacy / unrestricted grades) or when some
+   * candidate window can never be occupied by any of the teacher's classes
+   * (single-band teacher — the constraint holds vacuously).
+   */
+  enforced: boolean;
+}
+
+function buildTeacherLunchInfo(
+  gradeGroupsByTeacher: Map<string, string[][]>
+): Map<string, TeacherLunchInfo> {
+  const result = new Map<string, TeacherLunchInfo>();
+  if (!activeGradeBlocks) return result;
+
+  for (const [teacher, groups] of gradeGroupsByTeacher) {
+    // Candidate windows: union over covered grades of (activeBlocks \ teachable)
+    const candidates = new Set<number>();
+    for (const group of groups) {
+      for (const g of group) {
+        const allowed = activeGradeBlocks.get(g);
+        if (!allowed) continue; // grade absent from map = unrestricted, no lunch window
+        for (const b of activeBlocks) {
+          if (!allowed.has(b)) candidates.add(b);
+        }
+      }
+    }
+
+    let enforced = candidates.size > 0;
+    if (enforced) {
+      // Vacuous-satisfaction check: if some candidate window can never be
+      // occupied by any of this teacher's classes (per grade teachability),
+      // that window is always free — skip enforcement (single-band case).
+      const occupiable = new Set<number>();
+      let allBlocksOccupiable = false;
+      for (const group of groups) {
+        const teachable = getTeachableBlocksForGrades(group);
+        if (teachable === null) { allBlocksOccupiable = true; break; }
+        teachable.forEach(b => occupiable.add(b));
+      }
+      if (!allBlocksOccupiable) {
+        for (const b of candidates) {
+          if (!occupiable.has(b)) { enforced = false; break; }
+        }
+      }
+    }
+
+    const candidateIdxs: number[] = [];
+    activeBlocks.forEach((b, idx) => {
+      if (candidates.has(b)) candidateIdxs.push(idx);
+    });
+
+    result.set(teacher, { candidates, candidateIdxs, enforced });
+  }
+
+  return result;
+}
+
+/** Build teacher lunch info from a class list (generation path). */
+function buildTeacherLunchFromClasses(classes: ClassEntry[]): Map<string, TeacherLunchInfo> {
+  const byTeacher = new Map<string, string[][]>();
+  for (const cls of classes) {
+    if (!byTeacher.has(cls.teacher)) byTeacher.set(cls.teacher, []);
+    byTeacher.get(cls.teacher)!.push(parseGrades(cls.grade));
+  }
+  return buildTeacherLunchInfo(byTeacher);
+}
+
+/** Build teacher lunch info from placed schedules (reassign path — no class list available). */
+function buildTeacherLunchFromSchedules(
+  teacherSchedules: Record<string, TeacherSchedule>
+): Map<string, TeacherLunchInfo> {
+  const byTeacher = new Map<string, string[][]>();
+  for (const [teacher, schedule] of Object.entries(teacherSchedules)) {
+    const groups: string[][] = [];
+    for (const day of DAYS) {
+      for (const block of activeBlocks) {
+        const entry = schedule?.[day]?.[block];
+        if (entry && entry[0] && isScheduledClass(entry[1])) {
+          groups.push(parseGrades(entry[0]));
+        }
+      }
+    }
+    byTeacher.set(teacher, groups);
+  }
+  return buildTeacherLunchInfo(byTeacher);
+}
+
+/** A candidate window is free when it holds no obligation (class or study hall). */
+function isLunchWindowFree(
+  teacherSchedules: Record<string, TeacherSchedule>,
+  teacher: string,
+  day: string,
+  block: number
+): boolean {
+  const entry = teacherSchedules[teacher]?.[day]?.[block];
+  return !entry || !isOccupiedBlock(entry[1]);
+}
+
+/**
+ * Fail-closed preflight: if a teacher's fixed slots alone fill every one of
+ * their candidate lunch windows on some day, no schedule can leave them a
+ * lunch break — throw rather than silently produce an infeasible/violating
+ * result (mirrors the buildSessions fixed-slot-in-lunch-block error).
+ */
+function assertFixedSlotsLeaveLunch(
+  sessions: Session[],
+  teacherLunch: Map<string, TeacherLunchInfo>
+): void {
+  // teacher -> dayIdx -> candidate blocks consumed by fixed slots
+  const fixedByTeacherDay = new Map<string, Map<number, Set<number>>>();
+  for (const s of sessions) {
+    if (!s.isFixed || s.validSlots.length !== 1) continue;
+    const info = teacherLunch.get(s.teacher);
+    if (!info?.enforced) continue;
+    const slot = s.validSlots[0];
+    const block = activeBlocks[slotToBlock(slot)];
+    if (!info.candidates.has(block)) continue;
+    const dayIdx = slotToDay(slot);
+    if (!fixedByTeacherDay.has(s.teacher)) fixedByTeacherDay.set(s.teacher, new Map());
+    const byDay = fixedByTeacherDay.get(s.teacher)!;
+    if (!byDay.has(dayIdx)) byDay.set(dayIdx, new Set());
+    byDay.get(dayIdx)!.add(block);
+  }
+
+  for (const [teacher, byDay] of fixedByTeacherDay) {
+    const info = teacherLunch.get(teacher)!;
+    for (const [dayIdx, blocks] of byDay) {
+      if (blocks.size >= info.candidates.size) {
+        const windows = [...info.candidates].sort((a, b) => a - b).join(', ');
+        throw new Error(
+          `Teacher '${teacher}' has fixed classes on ${DAYS[dayIdx]} filling every ` +
+          `candidate lunch window (blocks ${windows}); no lunch break is possible`
+        );
+      }
+    }
+  }
+}
+
+// ============================================================================
 // UTILITY FUNCTIONS
 // ============================================================================
 
 function slotToDay(slot: number): number {
-  return Math.floor(slot / 5);
+  return Math.floor(slot / activeBlocks.length);
 }
 
 function slotToBlock(slot: number): number {
-  return slot % 5;
+  return slot % activeBlocks.length;
 }
 
 function dayBlockToSlot(dayIdx: number, blockIdx: number): number {
-  return dayIdx * 5 + blockIdx;
+  return dayIdx * activeBlocks.length + blockIdx;
 }
 
 /**
@@ -55,12 +278,12 @@ function getValidSlots(availDays: string[], availBlocks: number[]): number[] {
     const dayIdx = DAYS.indexOf(day);
     if (dayIdx === -1) return;
     availBlocks.forEach(block => {
-      const blockIdx = BLOCKS.indexOf(block);
+      const blockIdx = activeBlocks.indexOf(block);
       if (blockIdx === -1) return;
       slots.push(dayBlockToSlot(dayIdx, blockIdx));
     });
   });
-  return slots.length > 0 ? slots : Array.from({ length: 25 }, (_, i) => i);
+  return slots.length > 0 ? slots : Array.from({ length: DAYS.length * activeBlocks.length }, (_, i) => i);
 }
 
 // Seeded random number generator (mulberry32)
@@ -121,15 +344,15 @@ function buildSessions(classes: ClassEntry[], teachers?: Teacher[]): Session[] {
     for (const t of teachers) {
       if (t.availableDays || t.availableBlocks) {
         const days = t.availableDays || [...DAYS];
-        const blocks = t.availableBlocks || [...BLOCKS];
+        const blocks = t.availableBlocks || [...activeBlocks];
         const slots = new Set<number>();
         for (const day of days) {
           const dayIdx = DAYS.indexOf(day);
           if (dayIdx === -1) continue;
           for (const block of blocks) {
-            const blockIdx = BLOCKS.indexOf(block);
+            const blockIdx = activeBlocks.indexOf(block);
             if (blockIdx === -1) continue;
-            slots.add(dayIdx * BLOCKS.length + blockIdx);
+            slots.add(dayIdx * activeBlocks.length + blockIdx);
           }
         }
         teacherValidSlots.set(t.name, slots);
@@ -139,9 +362,18 @@ function buildSessions(classes: ClassEntry[], teachers?: Teacher[]): Session[] {
 
   classes.forEach(cls => {
     if (cls.fixedSlots && cls.fixedSlots.length > 0) {
+      // Fail closed when a fixed slot lands in a block some covered grade
+      // can't use (its band's lunch) — mirrors the backend preflight check.
+      const fixedTeachable = getTeachableBlocksForGrades(parseGrades(cls.grade));
       cls.fixedSlots.forEach(([day, block]) => {
+        if (fixedTeachable !== null && !fixedTeachable.has(block)) {
+          throw new Error(
+            `Class '${cls.teacher} - ${cls.subject}' is fixed to ${day} Block ${block}, ` +
+            `but Block ${block} is not a teachable block for ${cls.grade}`
+          );
+        }
         const dayIdx = DAYS.indexOf(day);
-        const blockIdx = BLOCKS.indexOf(block);
+        const blockIdx = activeBlocks.indexOf(block);
         const slot = dayBlockToSlot(dayIdx, blockIdx);
         sessions.push({
           id: id++,
@@ -157,7 +389,7 @@ function buildSessions(classes: ClassEntry[], teachers?: Teacher[]): Session[] {
     } else {
       let validSlots = getValidSlots(
         cls.availableDays || DAYS,
-        cls.availableBlocks || BLOCKS
+        cls.availableBlocks || activeBlocks
       );
 
       // Intersect with teacher-level availability (defense-in-depth:
@@ -165,6 +397,13 @@ function buildSessions(classes: ClassEntry[], teachers?: Teacher[]): Session[] {
       const tSlots = teacherValidSlots.get(cls.teacher);
       if (tSlots) {
         validSlots = validSlots.filter(s => tSlots.has(s));
+      }
+
+      // Restrict to blocks teachable by ALL grades this class covers
+      // (multi-grade classes spanning bands must avoid every band's lunch block)
+      const teachable = getTeachableBlocksForGrades(parseGrades(cls.grade));
+      if (teachable !== null) {
+        validSlots = validSlots.filter(s => teachable.has(activeBlocks[slotToBlock(s)]));
       }
 
       for (let i = 0; i < cls.daysPerWeek; i++) {
@@ -270,7 +509,8 @@ function solveBacktracking(
   deprioritizeTeachers?: Set<string>, // Teachers to schedule last (for diversity)
   rules?: SchedulingRule[], // Scheduling rules to respect
   cotaughtGroups?: Map<string, Session[]>, // Co-taught class groups
-  prefilledGradeSubjectDays?: Map<string, Set<number>> // "gradeName|subject" -> days already used by locked teachers
+  prefilledGradeSubjectDays?: Map<string, Set<number>>, // "gradeName|subject" -> days already used by locked teachers
+  teacherLunch?: Map<string, TeacherLunchInfo> // teacher_lunch hard constraint info
 ): SolveResult {
   const assignment = new Map<number, number>();
   const startTime = Date.now();
@@ -357,6 +597,23 @@ function solveBacktracking(
       for (const g of grades) {
         const key = `${g}|${session.subject}`;
         if (gradeSubjectDay.get(key)?.has(day)) return false;
+      }
+    }
+
+    // Teacher lunch (HARD): never place a session into the teacher's LAST free
+    // candidate lunch window on that day — every day must keep one window open
+    if (teacherLunch) {
+      const lunch = teacherLunch.get(session.teacher);
+      if (lunch?.enforced && lunch.candidates.has(activeBlocks[slotToBlock(slot)])) {
+        const dayIdx = slotToDay(slot);
+        const occupied = teacherSlots.get(session.teacher);
+        let freeWindows = 0;
+        for (const bIdx of lunch.candidateIdxs) {
+          if (!occupied?.has(dayBlockToSlot(dayIdx, bIdx))) freeWindows++;
+        }
+        // The target slot itself is free (teacher conflict checked above), so
+        // freeWindows >= 1; if it's the only free window, refuse the placement.
+        if (freeWindows <= 1) return false;
       }
     }
 
@@ -534,7 +791,7 @@ function buildSchedules(
     teacherSchedules[t.name] = {};
     DAYS.forEach(day => {
       teacherSchedules[t.name][day] = {};
-      BLOCKS.forEach(block => {
+      activeBlocks.forEach(block => {
         teacherSchedules[t.name][day][block] = null;
       });
     });
@@ -545,7 +802,7 @@ function buildSchedules(
     gradeSchedules[g] = {};
     DAYS.forEach(day => {
       gradeSchedules[g][day] = {};
-      BLOCKS.forEach(block => {
+      activeBlocks.forEach(block => {
         gradeSchedules[g][day][block] = null;
       });
     });
@@ -556,7 +813,7 @@ function buildSchedules(
     if (slot === undefined) return;
 
     const day = DAYS[slotToDay(slot)];
-    const block = BLOCKS[slotToBlock(slot)];
+    const block = activeBlocks[slotToBlock(slot)];
 
     teacherSchedules[s.teacher][day][block] = [s.grade, s.subject];
     parseGrades(s.grade).forEach(g => {
@@ -610,7 +867,7 @@ function rebuildGradeSchedules(
     gradeSchedules[g] = {};
     for (const day of DAYS) {
       gradeSchedules[g][day] = {};
-      for (const block of BLOCKS) {
+      for (const block of activeBlocks) {
         gradeSchedules[g][day][block] = null;
       }
     }
@@ -623,7 +880,7 @@ function rebuildGradeSchedules(
   // Pass 1: Multi-grade entries (electives) - accumulate into arrays
   for (const [teacher, schedule] of Object.entries(teacherSchedules)) {
     for (const day of DAYS) {
-      for (const block of BLOCKS) {
+      for (const block of activeBlocks) {
         const entry = schedule[day]?.[block];
         if (entry && entry[0] && isOccupiedBlock(entry[1])) {
           const gradeDisplay = entry[0];
@@ -640,7 +897,7 @@ function rebuildGradeSchedules(
                 gradeSchedules[g] = {};
                 for (const d of DAYS) {
                   gradeSchedules[g][d] = {};
-                  for (const b of BLOCKS) {
+                  for (const b of activeBlocks) {
                     gradeSchedules[g][d][b] = null;
                   }
                 }
@@ -667,7 +924,7 @@ function rebuildGradeSchedules(
   // Pass 2: Single-grade entries (required classes) - overwrite electives
   for (const [teacher, schedule] of Object.entries(teacherSchedules)) {
     for (const day of DAYS) {
-      for (const block of BLOCKS) {
+      for (const block of activeBlocks) {
         const entry = schedule[day]?.[block];
         if (entry && entry[0] && isOccupiedBlock(entry[1])) {
           const gradeDisplay = entry[0];
@@ -682,7 +939,7 @@ function rebuildGradeSchedules(
               gradeSchedules[g] = {};
               for (const d of DAYS) {
                 gradeSchedules[g][d] = {};
-                for (const b of BLOCKS) {
+                for (const b of activeBlocks) {
                   gradeSchedules[g][d][b] = null;
                 }
               }
@@ -713,6 +970,7 @@ function addStudyHalls(
     seed?: number; // Seed for reproducible randomization
     rules?: SchedulingRule[]; // Scheduling rules (for study_hall_grades config)
     teacherAvailability?: Map<string, Set<number>>; // Teacher name → set of valid slot numbers
+    teacherLunch?: Map<string, TeacherLunchInfo>; // teacher_lunch hard constraint info
   }
 ): StudyHallAssignment[] {
   const {
@@ -723,6 +981,7 @@ function addStudyHalls(
     seed,
     rules,
     teacherAvailability,
+    teacherLunch,
   } = options || {};
 
   // Get configured study hall grades from rules
@@ -764,7 +1023,7 @@ function addStudyHalls(
   const countTeaching = (teacher: string): number => {
     let count = 0;
     DAYS.forEach(day => {
-      BLOCKS.forEach(block => {
+      activeBlocks.forEach(block => {
         const entry = teacherSchedules[teacher]?.[day]?.[block];
         if (entry && isScheduledClass(entry[1])) {
           count++;
@@ -808,7 +1067,7 @@ function addStudyHalls(
   ): boolean {
     // Optionally shuffle the order we try days and blocks
     const daysToTry = shuffleAssignments ? shuffle(DAYS, randomFn) : DAYS;
-    const blocksToTry = shuffleAssignments ? shuffle(BLOCKS, randomFn) : BLOCKS;
+    const blocksToTry = shuffleAssignments ? shuffle(activeBlocks, randomFn) : activeBlocks;
 
     for (const teacher of teachers) {
       for (const day of daysToTry) {
@@ -817,12 +1076,34 @@ function addStudyHalls(
         for (const block of blocksToTry) {
           if (teacherSchedules[teacher]?.[day]?.[block] !== null) continue;
 
+          // Study halls must respect the grades' teachable blocks
+          // (e.g. a 6th grade study hall can't land in the MS lunch block)
+          if (!isBlockTeachableForGrades(group.grades, block)) continue;
+
           // Check teacher availability
           if (teacherAvailability?.has(teacher)) {
             const dayIdx = DAYS.indexOf(day);
-            const blockIdx = BLOCKS.indexOf(block);
-            const slot = dayIdx * BLOCKS.length + blockIdx;
+            const blockIdx = activeBlocks.indexOf(block);
+            const slot = dayIdx * activeBlocks.length + blockIdx;
             if (!teacherAvailability.get(teacher)!.has(slot)) continue;
+          }
+
+          // Teacher lunch (HARD): never give a supervisor a study hall in
+          // their last free candidate lunch window for that day. Applies even
+          // to teachers exempt from the solver constraint (single-band): their
+          // classes can't occupy their lunch window, but a cross-band study
+          // hall could — matches the Python solver's add_study_halls guard.
+          if (teacherLunch) {
+            const lunch = teacherLunch.get(teacher);
+            if (lunch && lunch.candidates.size > 0 && lunch.candidates.has(block)) {
+              let freeWindows = 0;
+              for (const b of lunch.candidates) {
+                if (isLunchWindowFree(teacherSchedules, teacher, day, b)) freeWindows++;
+              }
+              // This block itself is free (checked above), so freeWindows >= 1;
+              // if it's the only free window, don't place the study hall here.
+              if (freeWindows <= 1) continue;
+            }
           }
 
           // Check if all grades are free using teacherSchedules (source of truth)
@@ -936,7 +1217,7 @@ function addStudyHalls(
 function fillOpenBlocks(teacherSchedules: Record<string, TeacherSchedule>): void {
   Object.keys(teacherSchedules).forEach(teacher => {
     DAYS.forEach(day => {
-      BLOCKS.forEach(block => {
+      activeBlocks.forEach(block => {
         if (teacherSchedules[teacher][day][block] === null) {
           teacherSchedules[teacher][day][block] = ['', BLOCK_TYPE_OPEN];
         }
@@ -949,7 +1230,7 @@ function countBackToBack(teacherSchedules: Record<string, TeacherSchedule>, teac
   let count = 0;
   DAYS.forEach(day => {
     let prevOpen = false;
-    BLOCKS.forEach(block => {
+    activeBlocks.forEach(block => {
       const entry = teacherSchedules[teacher]?.[day]?.[block];
       const currOpen = !entry || !isScheduledClass(entry[1]);
       if (prevOpen && currOpen) count++;
@@ -968,7 +1249,7 @@ function countSameDayOpen(teacherSchedules: Record<string, TeacherSchedule>, tea
   let count = 0;
   DAYS.forEach(day => {
     let openCount = 0;
-    BLOCKS.forEach(block => {
+    activeBlocks.forEach(block => {
       const entry = teacherSchedules[teacher]?.[day]?.[block];
       if (!entry || !isScheduledClass(entry[1])) {
         openCount++;
@@ -985,18 +1266,19 @@ function countSameDayOpen(teacherSchedules: Record<string, TeacherSchedule>, tea
 function redistributeOpenBlocks(
   teacherSchedules: Record<string, TeacherSchedule>,
   gradeSchedules: Record<string, GradeSchedule>,
-  fullTimeTeachers: string[]
+  fullTimeTeachers: string[],
+  teacherLunch?: Map<string, TeacherLunchInfo>
 ): void {
   const getBackToBackSlots = (teacher: string) => {
     const pairs: { day: string; block: number }[] = [];
     DAYS.forEach(day => {
-      for (let i = 0; i < BLOCKS.length - 1; i++) {
-        const entry1 = teacherSchedules[teacher][day][BLOCKS[i]];
-        const entry2 = teacherSchedules[teacher][day][BLOCKS[i + 1]];
+      for (let i = 0; i < activeBlocks.length - 1; i++) {
+        const entry1 = teacherSchedules[teacher][day][activeBlocks[i]];
+        const entry2 = teacherSchedules[teacher][day][activeBlocks[i + 1]];
         const isOpen1 = !entry1 || !isScheduledClass(entry1[1]);
         const isOpen2 = !entry2 || !isScheduledClass(entry2[1]);
         if (isOpen1 && isOpen2) {
-          pairs.push({ day, block: BLOCKS[i + 1] });
+          pairs.push({ day, block: activeBlocks[i + 1] });
         }
       }
     });
@@ -1004,16 +1286,39 @@ function redistributeOpenBlocks(
   };
 
   const wouldCreateBTB = (teacher: string, day: string, block: number): boolean => {
-    const blockIdx = BLOCKS.indexOf(block);
+    const blockIdx = activeBlocks.indexOf(block);
     if (blockIdx > 0) {
-      const prev = teacherSchedules[teacher][day][BLOCKS[blockIdx - 1]];
+      const prev = teacherSchedules[teacher][day][activeBlocks[blockIdx - 1]];
       if (!prev || !isScheduledClass(prev[1])) return true;
     }
-    if (blockIdx < 4) {
-      const next = teacherSchedules[teacher][day][BLOCKS[blockIdx + 1]];
+    if (blockIdx < activeBlocks.length - 1) {
+      const next = teacherSchedules[teacher][day][activeBlocks[blockIdx + 1]];
       if (!next || !isScheduledClass(next[1])) return true;
     }
     return false;
+  };
+
+  // Teacher lunch (HARD): would moving a class into (issueDay, issueBlock)
+  // leave the teacher without a free candidate lunch window on that day?
+  // The vacated (targetDay, targetBlock) becomes OPEN, which can restore a
+  // window when the swap happens within the same day.
+  const wouldBreakLunch = (
+    teacher: string,
+    issueDay: string,
+    issueBlock: number,
+    targetDay: string,
+    targetBlock: number
+  ): boolean => {
+    if (!teacherLunch) return false;
+    const lunch = teacherLunch.get(teacher);
+    if (!lunch?.enforced || !lunch.candidates.has(issueBlock)) return false;
+    let freeWindows = 0;
+    for (const b of lunch.candidates) {
+      if (b === issueBlock) continue; // becomes occupied by the moved class
+      if (targetDay === issueDay && b === targetBlock) { freeWindows++; continue; } // freed by the swap
+      if (isLunchWindowFree(teacherSchedules, teacher, issueDay, b)) freeWindows++;
+    }
+    return freeWindows === 0;
   };
 
   for (let iter = 0; iter < 2000; iter++) {
@@ -1029,7 +1334,7 @@ function redistributeOpenBlocks(
         for (const targetDay of DAYS) {
           if (madeSwap) break;
 
-          for (const targetBlock of BLOCKS) {
+          for (const targetBlock of activeBlocks) {
             const entry = teacherSchedules[teacher][targetDay][targetBlock];
             if (!entry || !isScheduledClass(entry[1]) || !entry[0]) {
               continue;
@@ -1040,6 +1345,13 @@ function redistributeOpenBlocks(
             const [gradeDisplay, subject] = entry;
             const grades = parseGrades(gradeDisplay);
             if (grades.length === 0) continue;
+
+            // Moving this class into the issue slot must respect the grades'
+            // teachable blocks (can't move a class into a grade's lunch block)
+            if (!isBlockTeachableForGrades(grades, issueBlock)) continue;
+
+            // Never swap a class INTO the teacher's last free lunch window
+            if (wouldBreakLunch(teacher, issueDay, issueBlock, targetDay, targetBlock)) continue;
 
             // Check conflicts
             let hasConflict = false;
@@ -1055,7 +1367,7 @@ function redistributeOpenBlocks(
 
             // Check subject/day conflict
             for (const g of grades) {
-              for (const b of BLOCKS) {
+              for (const b of activeBlocks) {
                 if (b === issueBlock) continue;
                 const cell = gradeSchedules[g]?.[issueDay]?.[b];
                 const slot = getFirstGradeEntry(cell);
@@ -1073,6 +1385,7 @@ function redistributeOpenBlocks(
             teacherSchedules[teacher][targetDay][targetBlock] = ['', BLOCK_TYPE_OPEN];
 
             grades.forEach(g => {
+              if (!gradeSchedules[g]) return; // grade not tracked (defensive)
               gradeSchedules[g][targetDay][targetBlock] = null;
               gradeSchedules[g][issueDay][issueBlock] = [teacher, subject];
             });
@@ -1101,7 +1414,7 @@ function calculateStats(
     let teaching = 0, studyHall = 0, open = 0;
 
     DAYS.forEach(day => {
-      BLOCKS.forEach(block => {
+      activeBlocks.forEach(block => {
         const entry = teacherSchedules[t.name]?.[day]?.[block];
         if (!entry || isOpenBlock(entry[1])) {
           open++;
@@ -1220,11 +1533,27 @@ function getStudyHallEligibleStatuses(rules: SchedulingRule[] | undefined): Set<
   return statuses;
 }
 
+/**
+ * Generate schedule options.
+ *
+ * @param blocks - Ordered block numbers of the timetable (default: legacy [1,2,3,4,5]).
+ * @param teachableBlocksByGrade - Optional map of grade NAME (as the solver uses
+ *   them, e.g. "6th Grade") -> block numbers that grade may be scheduled in.
+ *   A grade absent from the map may use all blocks. Classes covering multiple
+ *   grades are restricted to the intersection of their grades' teachable blocks.
+ */
 export async function generateSchedules(
   teachers: Teacher[],
   classes: ClassEntry[],
-  options: GeneratorOptions = {}
+  options: GeneratorOptions = {},
+  blocks?: number[],
+  teachableBlocksByGrade?: Record<string, number[]>
 ): Promise<GeneratorResult> {
+  // Stamp the block configuration into module state. Re-applied after every
+  // await below so interleaved calls can't corrupt this call's configuration.
+  const blockState = resolveBlockState(blocks, teachableBlocksByGrade);
+  applyBlockState(blockState);
+
   const {
     numOptions = 3,
     numAttempts = 50,
@@ -1276,15 +1605,15 @@ export async function generateSchedules(
   for (const t of teachers) {
     if (t.availableDays || t.availableBlocks) {
       const days = t.availableDays || [...DAYS];
-      const blocks = t.availableBlocks || [...BLOCKS];
+      const blocks = t.availableBlocks || [...activeBlocks];
       const validSlots = new Set<number>();
       for (const day of days) {
         const dayIdx = DAYS.indexOf(day);
         if (dayIdx === -1) continue;
         for (const block of blocks) {
-          const blockIdx = BLOCKS.indexOf(block);
+          const blockIdx = activeBlocks.indexOf(block);
           if (blockIdx === -1) continue;
-          validSlots.add(dayIdx * BLOCKS.length + blockIdx);
+          validSlots.add(dayIdx * activeBlocks.length + blockIdx);
         }
       }
       teacherAvailability.set(t.name, validSlots);
@@ -1296,6 +1625,17 @@ export async function generateSchedules(
   // Identify co-taught classes (same grade+subject, different teachers)
   // These must be scheduled at the same time slot
   const cotaughtGroups = assignCotaughtGroups(sessions);
+
+  // Teacher lunch hard constraint — only when a teachable-blocks map is in
+  // effect AND the 'teacher_lunch' rule is enabled (missing rule = enabled)
+  const teacherLunch = activeGradeBlocks && isRuleEnabled(rules, 'teacher_lunch')
+    ? buildTeacherLunchFromClasses(classes)
+    : undefined;
+
+  // Fail closed: fixed slots alone must not fill every candidate lunch window
+  if (teacherLunch) {
+    assertFixedSlotsLeaveLunch(sessions, teacherLunch);
+  }
 
   // Pre-compute locked grade slots (slots occupied by locked teachers' classes)
   // Separate elective vs non-elective for proper conflict handling
@@ -1320,7 +1660,7 @@ export async function generateSchedules(
   if (isRefinementMode) {
     for (const [teacher, schedule] of Object.entries(lockedTeachers)) {
       DAYS.forEach((day, dayIdx) => {
-        BLOCKS.forEach((block, blockIdx) => {
+        activeBlocks.forEach((block, blockIdx) => {
           const entry = schedule[day]?.[block];
           if (entry && entry[0] && isScheduledClass(entry[1])) {
             const slot = dayBlockToSlot(dayIdx, blockIdx);
@@ -1364,6 +1704,7 @@ export async function generateSchedules(
 
   onProgress?.(0, numAttempts, 'Initializing solver...');
   await new Promise(resolve => setTimeout(resolve, 10));
+  applyBlockState(blockState);
 
   const candidates: {
     attempt: number;
@@ -1388,6 +1729,7 @@ export async function generateSchedules(
 
     // Allow UI to update
     await new Promise(resolve => setTimeout(resolve, 5));
+    applyBlockState(blockState);
 
     // Build deprioritize set from previously found unique solutions
     // This forces the solver to explore different regions of the solution space
@@ -1411,7 +1753,8 @@ export async function generateSchedules(
       deprioritize.size > 0 ? deprioritize : undefined,
       rules,
       cotaughtGroups.size > 0 ? cotaughtGroups : undefined,
-      isRefinementMode ? lockedGradeSubjectDays : undefined
+      isRefinementMode ? lockedGradeSubjectDays : undefined,
+      teacherLunch
     );
 
     if (!result.assignment) {
@@ -1442,7 +1785,7 @@ export async function generateSchedules(
         ts[teacher] = JSON.parse(JSON.stringify(schedule));
         // Update grade schedules with ALL locked assignments (skip study halls if skipStudyHalls)
         DAYS.forEach(day => {
-          BLOCKS.forEach(block => {
+          activeBlocks.forEach(block => {
             const entry = schedule[day]?.[block];
             if (entry && entry[0] && isOccupiedBlock(entry[1])) {
               if (isStudyHall(entry[1])) {
@@ -1454,7 +1797,7 @@ export async function generateSchedules(
                     group: entry[0],
                     teacher,
                     day,
-                    block: BLOCKS[BLOCKS.indexOf(block)]
+                    block
                   });
                   // Mark this group as already covered
                   alreadyCoveredGroups.add(entry[0]);
@@ -1479,7 +1822,7 @@ export async function generateSchedules(
                     gs[g] = {};
                     DAYS.forEach(d => {
                       gs[g][d] = {};
-                      BLOCKS.forEach(b => {
+                      activeBlocks.forEach(b => {
                         gs[g][d][b] = null;
                       });
                     });
@@ -1510,6 +1853,7 @@ export async function generateSchedules(
         existingGradeStudyHallDays,
         rules,
         teacherAvailability,
+        teacherLunch,
       });
 
       // Combine locked and new study hall assignments
@@ -1524,7 +1868,7 @@ export async function generateSchedules(
     fillOpenBlocks(ts);
     // Only redistribute open blocks if the no_btb_open rule is enabled
     if (isRuleEnabled(rules, 'no_btb_open')) {
-      redistributeOpenBlocks(ts, gs, fullTimeUnlocked);
+      redistributeOpenBlocks(ts, gs, fullTimeUnlocked, teacherLunch);
     }
 
     // CRITICAL: Rebuild grade schedules from teacher schedules to ensure consistency.
@@ -1682,14 +2026,29 @@ export async function generateSchedules(
  * @param seed - Random seed for shuffling
  * @param rules - Scheduling rules
  * @param excludedTeachers - Optional set of teacher names to exclude from study hall assignment
+ * @param blocks - Ordered block numbers of the timetable (default: legacy [1,2,3,4,5])
+ * @param teachableBlocksByGrade - Optional map of grade NAME -> block numbers that
+ *   grade may be scheduled in; study halls only land in blocks teachable by their grade
  */
 export function reassignStudyHalls(
   option: ScheduleOption,
   teachers: Teacher[],
   seed?: number,
   rules?: SchedulingRule[],
-  excludedTeachers?: Set<string>
+  excludedTeachers?: Set<string>,
+  blocks?: number[],
+  teachableBlocksByGrade?: Record<string, number[]>
 ): { success: boolean; newOption?: ScheduleOption; message?: string; noChanges?: boolean } {
+  // Stamp the block configuration into module state (this function is fully
+  // synchronous, so a single application at entry is deterministic per call)
+  applyBlockState(resolveBlockState(blocks, teachableBlocksByGrade));
+
+  // Teacher lunch hard constraint — derived from the placed class schedules
+  // (no class list is available here). Same gating as generateSchedules.
+  const teacherLunch = activeGradeBlocks && isRuleEnabled(rules, 'teacher_lunch')
+    ? buildTeacherLunchFromSchedules(option.teacherSchedules)
+    : undefined;
+
   // Track old study hall assignments for comparison
   const oldAssignments = new Set<string>();
   if (option.studyHallAssignments) {
@@ -1727,15 +2086,15 @@ export function reassignStudyHalls(
   for (const t of teachers) {
     if (t.availableDays || t.availableBlocks) {
       const days = t.availableDays || [...DAYS];
-      const blocks = t.availableBlocks || [...BLOCKS];
+      const blocks = t.availableBlocks || [...activeBlocks];
       const validSlots = new Set<number>();
       for (const day of days) {
         const dayIdx = DAYS.indexOf(day);
         if (dayIdx === -1) continue;
         for (const block of blocks) {
-          const blockIdx = BLOCKS.indexOf(block);
+          const blockIdx = activeBlocks.indexOf(block);
           if (blockIdx === -1) continue;
-          validSlots.add(dayIdx * BLOCKS.length + blockIdx);
+          validSlots.add(dayIdx * activeBlocks.length + blockIdx);
         }
       }
       teacherAvailability.set(t.name, validSlots);
@@ -1756,7 +2115,7 @@ export function reassignStudyHalls(
     // Clear all existing study halls and OPEN blocks from teacher schedules
     for (const teacher of Object.keys(teacherSchedules)) {
       for (const day of DAYS) {
-        for (const block of BLOCKS) {
+        for (const block of activeBlocks) {
           const entry = teacherSchedules[teacher]?.[day]?.[block];
           if (entry && !isScheduledClass(entry[1])) {
             teacherSchedules[teacher][day][block] = null;
@@ -1768,7 +2127,7 @@ export function reassignStudyHalls(
     // Clear study halls from grade schedules
     for (const grade of Object.keys(gradeSchedules)) {
       for (const day of DAYS) {
-        for (const block of BLOCKS) {
+        for (const block of activeBlocks) {
           const cell = gradeSchedules[grade]?.[day]?.[block];
           const entry = getFirstGradeEntry(cell);
           if (entry && isStudyHall(entry[1])) {
@@ -1784,6 +2143,7 @@ export function reassignStudyHalls(
       seed: currentSeed,
       rules,
       teacherAvailability,
+      teacherLunch,
     });
     const shPlaced = shAssignments.filter(sh => sh.teacher !== null).length;
     const shTotal = shAssignments.length;
@@ -1799,7 +2159,7 @@ export function reassignStudyHalls(
         const gradeSchedule = gradeSchedules[grade];
         const gradeFreeSlots: string[] = [];
         for (const day of DAYS) {
-          for (const block of BLOCKS) {
+          for (const block of activeBlocks) {
             if (gradeSchedule?.[day]?.[block] === null) {
               gradeFreeSlots.push(`${day} B${block}`);
             }
@@ -1812,7 +2172,7 @@ export function reassignStudyHalls(
           const schedule = teacherSchedules[teacherName];
           if (schedule) {
             for (const day of DAYS) {
-              for (const block of BLOCKS) {
+              for (const block of activeBlocks) {
                 if (schedule[day]?.[block] === null) {
                   teacherOpenSlots.push(`${day} B${block}`);
                 }
@@ -1838,7 +2198,7 @@ export function reassignStudyHalls(
     // Fill any remaining null slots with OPEN
     for (const teacher of Object.keys(teacherSchedules)) {
       for (const day of DAYS) {
-        for (const block of BLOCKS) {
+        for (const block of activeBlocks) {
           if (teacherSchedules[teacher][day][block] === null) {
             teacherSchedules[teacher][day][block] = ['', BLOCK_TYPE_OPEN];
           }

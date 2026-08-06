@@ -95,6 +95,10 @@ class SolveRequest(BaseModel):
     randomizeScoring: bool = False  # Add noise to scoring for variety (picks suboptimal but valid solutions)
     skipStudyHalls: bool = False  # If True, skip study hall assignment entirely (reassign after saving)
     grades: Optional[list[str]] = None  # All grade names from database - for grade schedule initialization
+    # Per-quarter block format (from the quarter's timetable template).
+    # Absent = legacy 5-block behavior ([1..5], all blocks teachable for every grade).
+    blocks: Optional[list[int]] = None  # Block numbers, e.g. [1..9] for the 9-block format
+    grade_teachable_blocks: Optional[dict[str, list[int]]] = None  # grade name -> teachable block numbers
 
 
 class SolveResponse(BaseModel):
@@ -135,6 +139,10 @@ async def solve_schedule(request: SolveRequest):
     # Log request summary
     logger.info(f"=== SOLVE REQUEST === Teachers: {len(teachers)}, Classes: {len(classes)}, Attempts: {request.numAttempts}")
     logger.info(f"  Grades received: {request.grades}")
+    if request.blocks:
+        logger.info(f"  Block format: {request.blocks} ({len(request.blocks)} blocks/day)")
+    if request.grade_teachable_blocks:
+        logger.info(f"  Grade teachable blocks: {request.grade_teachable_blocks}")
 
     # Log detailed info only when DEBUG_SOLVER is enabled
     if DEBUG_SOLVER:
@@ -145,13 +153,14 @@ async def solve_schedule(request: SolveRequest):
             logger.debug(f"  Teacher: {t['name']} ({t.get('status', 'unknown')})")
 
         # Log class details with constraints
+        num_blocks = len(request.blocks) if request.blocks else 5
         for i, c in enumerate(classes):
             constraints = []
             if c.get('fixedSlots'):
                 constraints.append(f"fixed:{c['fixedSlots']}")
             if c.get('availableDays') and len(c['availableDays']) < 5:
                 constraints.append(f"days:{c['availableDays']}")
-            if c.get('availableBlocks') and len(c['availableBlocks']) < 5:
+            if c.get('availableBlocks') and len(c['availableBlocks']) < num_blocks:
                 constraints.append(f"blocks:{c['availableBlocks']}")
             constraint_str = f" [{', '.join(constraints)}]" if constraints else ""
             grades = c.get('grades') or [c.get('grade', '?')]
@@ -182,6 +191,8 @@ async def solve_schedule(request: SolveRequest):
             randomize_scoring=request.randomizeScoring,
             skip_study_halls=request.skipStudyHalls,
             grades=request.grades,
+            blocks=request.blocks,
+            grade_teachable_blocks=request.grade_teachable_blocks,
         )
 
         elapsed = time.time() - start_time

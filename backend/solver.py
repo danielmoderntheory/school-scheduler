@@ -12,8 +12,27 @@ from ortools.sat.python import cp_model
 
 # Constants
 DAYS = ['Mon', 'Tues', 'Wed', 'Thurs', 'Fri']
-BLOCKS = [1, 2, 3, 4, 5]
-NUM_SLOTS = 25
+
+# Block format is per-request (per-quarter timetable template). BLOCKS/NUM_SLOTS
+# are module-level state configured via set_blocks() at the top of every
+# generate_schedules() call. This is safe because the Cloud Run service runs
+# with --concurrency 1 (one request at a time per instance); if concurrency is
+# ever raised, this must be refactored into explicit parameter threading.
+DEFAULT_BLOCKS = [1, 2, 3, 4, 5]
+BLOCKS = list(DEFAULT_BLOCKS)
+NUM_SLOTS = len(DAYS) * len(BLOCKS)
+
+
+def set_blocks(blocks: Optional[list] = None) -> None:
+    """Configure the block list for the current solve request.
+
+    Args:
+        blocks: List of block numbers (e.g. [1..9] for the 9-block format).
+                None/empty resets to the legacy 5-block format.
+    """
+    global BLOCKS, NUM_SLOTS
+    BLOCKS = list(blocks) if blocks else list(DEFAULT_BLOCKS)
+    NUM_SLOTS = len(DAYS) * len(BLOCKS)
 
 # NOTE: Grade lists are now passed from the database - no hardcoded grade constants
 
@@ -145,15 +164,15 @@ class TeacherStat:
 
 # Utility functions
 def slot_to_day(slot: int) -> int:
-    return slot // 5
+    return slot // len(BLOCKS)
 
 
 def slot_to_block(slot: int) -> int:
-    return slot % 5
+    return slot % len(BLOCKS)
 
 
 def day_block_to_slot(day_idx: int, block_idx: int) -> int:
-    return day_idx * 5 + block_idx
+    return day_idx * len(BLOCKS) + block_idx
 
 
 def number_to_grade(num: int) -> str:
@@ -239,7 +258,7 @@ def get_valid_slots(avail_days: list, avail_blocks: list) -> list:
                 continue
             block_idx = BLOCKS.index(block)
             slots.append(day_block_to_slot(day_idx, block_idx))
-    return slots if slots else list(range(25))
+    return slots if slots else list(range(len(DAYS) * len(BLOCKS)))
 
 
 def get_study_hall_eligible(teachers: list[Teacher], classes: list[ClassEntry], rules: list[dict] = None) -> list[str]:
@@ -267,12 +286,42 @@ def get_study_hall_eligible(teachers: list[Teacher], classes: list[ClassEntry], 
     return eligible
 
 
+def compute_teacher_lunch_candidates(
+    sessions: list[Session],
+    grade_teachable_blocks: dict,
+) -> dict[str, set[int]]:
+    """Compute each teacher's candidate lunch windows (block numbers).
+
+    A teacher's candidate lunch windows are the union, over all grades covered
+    by their sessions, of (BLOCKS minus that grade's teachable blocks) - i.e.
+    the blocks during which at least one band of their students is at lunch.
+    On every day at least one of these windows must stay free of the teacher's
+    obligations so they get a lunch break.
+
+    Grades absent from grade_teachable_blocks are teachable in every block and
+    contribute no windows. Teachers whose candidate set comes out empty (e.g.
+    legacy 5-block requests, or teachers of only unmasked grades) are omitted.
+    """
+    if not grade_teachable_blocks:
+        return {}
+    blocks_set = set(BLOCKS)
+    candidates: dict[str, set[int]] = {}
+    for s in sessions:
+        cset = candidates.setdefault(s.teacher, set())
+        for g in s.grades:
+            mask = grade_teachable_blocks.get(g)
+            if mask is not None:
+                cset |= blocks_set - set(mask)
+    return {t: c for t, c in candidates.items() if c}
+
+
 def build_sessions(
     classes: list[ClassEntry],
     locked_grade_slots: dict[str, set[int]] = None,
     grades: list[str] = None,
     locked_grade_subject_days: dict[tuple[str, str], set[int]] = None,
-    teachers: list[Teacher] = None
+    teachers: list[Teacher] = None,
+    grade_teachable_slots: dict[str, set[int]] = None
 ) -> list[Session]:
     """Convert classes to sessions (one per day of instruction).
 
@@ -283,6 +332,10 @@ def build_sessions(
         locked_grade_subject_days: Dict mapping (grade, subject) to set of day indices where
             that subject is already taught by a locked teacher (to prevent duplicate subjects per day)
         teachers: List of Teacher objects (used to intersect teacher availability into valid slots)
+        grade_teachable_slots: Dict mapping grade name to the set of slot indices that grade
+            can be taught in (e.g. lunch blocks excluded). Grades absent from the dict can be
+            taught in any slot. A session covering multiple grades is restricted to the
+            intersection of all covered grades' teachable slots.
 
     Sessions are sorted by constraint level (most constrained first):
     1. Fixed slots first (only 1 valid slot)
@@ -339,9 +392,9 @@ def build_sessions(
 
     for teacher in teacher_session_count:
         total_sessions = teacher_session_count[teacher]
-        total_slots = teacher_total_slots.get(teacher, 25 * total_sessions)
+        total_slots = teacher_total_slots.get(teacher, NUM_SLOTS * total_sessions)
         # Average valid slots per session for this teacher
-        teacher_avg_slots[teacher] = total_slots / total_sessions if total_sessions > 0 else 25
+        teacher_avg_slots[teacher] = total_slots / total_sessions if total_sessions > 0 else NUM_SLOTS
 
     # Pre-compute slots blocked by electives for each grade
     # Electives with fixed slots block those slots for all grades they cover
@@ -388,6 +441,15 @@ def build_sessions(
                 teacher_slots = teacher_valid_slots[cls.teacher]
                 valid_slots = [s for s in valid_slots if s in teacher_slots]
 
+            # Restrict to the teachable slots of every grade this class covers
+            # (e.g. exclude each covered band's lunch block). Applies to electives
+            # too - students still aren't available during their lunch block.
+            if grade_teachable_slots and cls.grades:
+                for grade in cls.grades:
+                    mask = grade_teachable_slots.get(grade)
+                    if mask is not None:
+                        valid_slots = [s for s in valid_slots if s in mask]
+
             # For regular (non-elective) classes, remove slots blocked by:
             # 1. Electives with fixed slots
             # 2. Locked teachers (for partial regeneration)
@@ -411,8 +473,8 @@ def build_sessions(
                         if key in locked_grade_subject_days:
                             blocked_days.update(locked_grade_subject_days[key])
                     if blocked_days:
-                        # Filter out slots on blocked days (day = slot // 5)
-                        valid_slots = [s for s in valid_slots if (s // 5) not in blocked_days]
+                        # Filter out slots on blocked days (day = slot // num_blocks)
+                        valid_slots = [s for s in valid_slots if slot_to_day(s) not in blocked_days]
 
             for _ in range(cls.days_per_week):
                 sessions.append(Session(
@@ -434,7 +496,7 @@ def build_sessions(
     # 3. Fewer valid slots for this specific session
     def sort_key(s: Session) -> tuple:
         teacher_load = teacher_session_count.get(s.teacher, 0)
-        teacher_flexibility = teacher_avg_slots.get(s.teacher, 25)
+        teacher_flexibility = teacher_avg_slots.get(s.teacher, NUM_SLOTS)
         # Constraint score: more sessions + fewer avg slots = more constrained
         # We want higher constraint = lower sort value, so negate
         constraint_score = -teacher_load / teacher_flexibility if teacher_flexibility > 0 else 0
@@ -563,6 +625,8 @@ def suggest_teachers_to_unlock(
     grades: list[str],
     max_suggestions: int = 3,
     trial_timeout: float = 5.0,
+    blocks: list = None,
+    grade_teachable_blocks: dict = None,
 ) -> list[dict]:
     """
     When solver returns infeasible, try unlocking each affecting teacher
@@ -618,6 +682,8 @@ def suggest_teachers_to_unlock(
             locked_teachers=trial_locked,
             grades=grades,
             timeout=trial_timeout,
+            blocks=blocks,
+            grade_teachable_blocks=grade_teachable_blocks,
         )
 
         is_feasible = trial_result.get('status') == 'success' and len(trial_result.get('options', [])) > 0
@@ -657,6 +723,8 @@ def suggest_teachers_to_unlock(
                     locked_teachers=trial_locked,
                     grades=grades,
                     timeout=trial_timeout,
+                    blocks=blocks,
+                    grade_teachable_blocks=grade_teachable_blocks,
                 )
 
                 is_feasible = trial_result.get('status') == 'success' and len(trial_result.get('options', [])) > 0
@@ -689,6 +757,8 @@ def suggest_teachers_to_unlock(
                 locked_teachers=trial_locked,
                 grades=grades,
                 timeout=trial_timeout,
+                blocks=blocks,
+                grade_teachable_blocks=grade_teachable_blocks,
             )
 
             is_feasible = trial_result.get('status') == 'success' and len(trial_result.get('options', [])) > 0
@@ -720,6 +790,8 @@ def _quick_feasibility_check(
     locked_teachers: dict,
     grades: list[str],
     timeout: float = 5.0,
+    blocks: list = None,
+    grade_teachable_blocks: dict = None,
 ) -> dict:
     """
     Run a quick solver check to test feasibility.
@@ -738,12 +810,14 @@ def _quick_feasibility_check(
         locked_teachers=locked_teachers,
         skip_study_halls=True,  # Skip study halls for speed
         grades=grades,
+        blocks=blocks,
+        grade_teachable_blocks=grade_teachable_blocks,
         # Don't recurse into suggestions for trial runs
         _skip_unlock_suggestions=True,
     )
 
 
-def solve_with_cpsat(sessions: list[Session], seed: int = 0, time_limit: float = 10.0, max_solutions: int = 5, diagnostics: dict = None, rules: list[dict] = None, active_grades: list[str] = None) -> list[dict]:
+def solve_with_cpsat(sessions: list[Session], seed: int = 0, time_limit: float = 10.0, max_solutions: int = 5, diagnostics: dict = None, rules: list[dict] = None, active_grades: list[str] = None, teacher_lunch_windows: dict = None) -> list[dict]:
     """
     Solve the scheduling problem using CP-SAT.
 
@@ -755,6 +829,11 @@ def solve_with_cpsat(sessions: list[Session], seed: int = 0, time_limit: float =
     If rules is provided, certain constraints can be toggled on/off based on rule settings.
 
     active_grades is required - list of all grade names from the database.
+
+    teacher_lunch_windows: optional dict mapping teacher name -> set of candidate
+    lunch block numbers (see compute_teacher_lunch_candidates). When provided,
+    a hard constraint keeps at least one candidate window free of the teacher's
+    classes on every day. Callers gate this on the 'teacher_lunch' rule.
     """
     import random
     rng = random.Random(seed)
@@ -769,10 +848,10 @@ def solve_with_cpsat(sessions: list[Session], seed: int = 0, time_limit: float =
         diagnostics['totalSessions'] = len(sessions)
         diagnostics['fixedSessions'] = len(fixed_sessions)
 
-        # Check for teacher overload (more than 25 sessions)
+        # Check for teacher overload (more sessions than available slots)
         from collections import Counter
         teacher_counts = Counter(s.teacher for s in sessions)
-        overloaded = [(t, c) for t, c in teacher_counts.items() if c > 25]
+        overloaded = [(t, c) for t, c in teacher_counts.items() if c > NUM_SLOTS]
         if overloaded:
             diagnostics['teacherOverload'] = [{'teacher': t, 'sessions': c} for t, c in overloaded]
 
@@ -783,8 +862,8 @@ def solve_with_cpsat(sessions: list[Session], seed: int = 0, time_limit: float =
             slot = s.valid_slots[0]
             key = (s.teacher, slot)
             if key in teacher_fixed:
-                day_idx = slot // 5
-                block_idx = slot % 5
+                day_idx = slot_to_day(slot)
+                block_idx = slot_to_block(slot)
                 conflicts.append({
                     'teacher': s.teacher,
                     'day': DAYS[day_idx],
@@ -927,11 +1006,13 @@ def solve_with_cpsat(sessions: list[Session], seed: int = 0, time_limit: float =
                             # Skip if both are co-taught (they'll be at same slot anyway)
                             if s1.is_cotaught and s2.is_cotaught and s1.teacher != s2.teacher:
                                 continue
-                            # day = slot // 5, so different days means slot1//5 != slot2//5
-                            day1 = model.NewIntVar(0, 4, f'd1_{s1.id}_{s2.id}')
-                            day2 = model.NewIntVar(0, 4, f'd2_{s1.id}_{s2.id}')
-                            model.AddDivisionEquality(day1, slot_vars[s1.id], 5)
-                            model.AddDivisionEquality(day2, slot_vars[s2.id], 5)
+                            # day = slot // num_blocks, so different days means
+                            # slot1 // num_blocks != slot2 // num_blocks
+                            num_blocks = len(BLOCKS)
+                            day1 = model.NewIntVar(0, len(DAYS) - 1, f'd1_{s1.id}_{s2.id}')
+                            day2 = model.NewIntVar(0, len(DAYS) - 1, f'd2_{s1.id}_{s2.id}')
+                            model.AddDivisionEquality(day1, slot_vars[s1.id], num_blocks)
+                            model.AddDivisionEquality(day2, slot_vars[s2.id], num_blocks)
                             model.Add(day1 != day2)
 
     # Hard Constraint 4: Co-taught classes (same grade+subject, different teachers)
@@ -1002,6 +1083,63 @@ def solve_with_cpsat(sessions: list[Session], seed: int = 0, time_limit: float =
         diagnostics['cotaughtConstraints'] = cotaught_count
         if cotaught_mismatches:
             diagnostics['cotaughtMismatches'] = cotaught_mismatches
+
+    # Hard Constraint 5: Teacher lunch (only when candidate windows are provided)
+    # For each affected teacher, on every day at least one candidate lunch
+    # window (a block during which some band of their students is at lunch)
+    # must remain free of that teacher's classes.
+    #
+    # Teachers are skipped when the constraint is vacuously true:
+    # - empty candidate set (legacy requests / only unmasked grades)
+    # - some candidate window can never be occupied by any of their sessions
+    #   (e.g. single-band teachers: their only candidate window is their own
+    #   band's lunch block, which all their sessions are masked away from)
+    if teacher_lunch_windows:
+        for lunch_teacher, cand_blocks in teacher_lunch_windows.items():
+            t_sessions = [s for s in active_sessions if s.teacher == lunch_teacher]
+            if not t_sessions:
+                continue
+            cand = sorted(b for b in cand_blocks if b in BLOCKS)
+            if not cand:
+                continue
+
+            # Occupiability check: a window no session can ever land in is
+            # always free, so the whole per-day constraint is vacuously true.
+            ever_occupiable = {b: False for b in cand}
+            for s in t_sessions:
+                for slot in s.valid_slots:
+                    bnum = BLOCKS[slot_to_block(slot)]
+                    if bnum in ever_occupiable:
+                        ever_occupiable[bnum] = True
+            if not all(ever_occupiable.values()):
+                continue
+
+            num_windows = len(cand)
+            cand_block_idx = {b: BLOCKS.index(b) for b in cand}
+            for day_idx in range(len(DAYS)):
+                occupied_lits = []
+                fixed_occupied = 0
+                for b in cand:
+                    window_slot = day_block_to_slot(day_idx, cand_block_idx[b])
+                    for s in t_sessions:
+                        if window_slot not in s.valid_slots:
+                            continue
+                        if len(s.valid_slots) == 1:
+                            fixed_occupied += 1
+                        else:
+                            lit = model.NewBoolVar(f'lunch_{lunch_teacher}_{day_idx}_{b}_{s.id}')
+                            model.Add(slot_vars[s.id] == window_slot).OnlyEnforceIf(lit)
+                            model.Add(slot_vars[s.id] != window_slot).OnlyEnforceIf(lit.Not())
+                            occupied_lits.append(lit)
+                # AddAllDifferent on the teacher's sessions guarantees at most
+                # one session per slot, so the sum of these literals equals the
+                # number of occupied candidate windows on this day.
+                if fixed_occupied >= num_windows:
+                    # Fixed slots alone fill every window - infeasible.
+                    # (Preflight reports this with a readable message first.)
+                    model.AddBoolOr([])
+                elif occupied_lits:
+                    model.Add(sum(occupied_lits) <= num_windows - 1 - fixed_occupied)
 
     # Note: Back-to-back OPEN minimization is handled in post-processing via
     # redistribute_open_blocks() which is more effective since it can account for
@@ -1240,11 +1378,50 @@ def rebuild_grade_schedules(teacher_schedules: dict, grades: list[str]) -> dict:
 
 
 def redistribute_open_blocks(teacher_schedules: dict, grade_schedules: dict,
-                             full_time_teachers: list[str]) -> None:
+                             full_time_teachers: list[str],
+                             grade_teachable_blocks: dict = None,
+                             teacher_lunch_windows: dict = None) -> None:
     """
     Post-processing to break up consecutive OPEN blocks by swapping classes around.
     This mimics the JavaScript solver's redistributeOpenBlocks function.
+
+    grade_teachable_blocks: optional dict mapping grade name -> set/list of block
+    numbers the grade can be taught in. A class is never moved into a block that
+    is not teachable for one of its grades (e.g. that grade band's lunch block).
+
+    teacher_lunch_windows: optional dict mapping teacher name -> set of candidate
+    lunch block numbers. A class is never moved into a teacher's last free
+    candidate lunch window on a day (would leave them without a lunch break).
     """
+
+    def would_lose_lunch(teacher: str, issue_day: str, issue_block: int,
+                         target_day: str, target_block: int) -> bool:
+        """Would moving a class into (issue_day, issue_block) - vacating
+        (target_day, target_block) - leave the teacher with no free candidate
+        lunch window on issue_day? Study Hall counts as occupied."""
+        cand = (teacher_lunch_windows or {}).get(teacher)
+        if not cand or issue_block not in cand:
+            return False
+        day_sched = teacher_schedules.get(teacher, {}).get(issue_day, {})
+        for b in cand:
+            if b == issue_block or b not in BLOCKS:
+                continue
+            # The vacated slot becomes OPEN, so it counts as free
+            if target_day == issue_day and b == target_block:
+                return False
+            entry = day_sched.get(b)
+            if entry is None or (len(entry) > 1 and entry[1] == 'OPEN'):
+                return False
+        return True
+    def grades_teachable_at(grades: list, block: int) -> bool:
+        if not grade_teachable_blocks:
+            return True
+        for g in grades:
+            mask = grade_teachable_blocks.get(g)
+            if mask is not None and block not in mask:
+                return False
+        return True
+
     def get_back_to_back_slots(teacher: str) -> list[tuple[str, int]]:
         """Get (day, block) pairs where there's a back-to-back OPEN issue."""
         pairs = []
@@ -1272,7 +1449,7 @@ def redistribute_open_blocks(teacher_schedules: dict, grade_schedules: dict,
                 return True
 
         # Check next block
-        if block_idx < 4:
+        if block_idx < len(BLOCKS) - 1:
             next_entry = schedule.get(BLOCKS[block_idx + 1])
             if not next_entry or (len(next_entry) > 1 and next_entry[1] in ('OPEN', 'Study Hall')):
                 return True
@@ -1327,6 +1504,17 @@ def redistribute_open_blocks(teacher_schedules: dict, grade_schedules: dict,
                             if not grades:
                                 continue
 
+                        # Never move a class into a block that isn't teachable
+                        # for one of its grades (e.g. that band's lunch block)
+                        if not grades_teachable_at(grades, issue_block):
+                            continue
+
+                        # Never move a class into the teacher's last free
+                        # candidate lunch window on that day
+                        if would_lose_lunch(teacher, issue_day, issue_block,
+                                            target_day, target_block):
+                            continue
+
                         # Check for conflicts at the target location
                         has_conflict = False
 
@@ -1376,7 +1564,9 @@ def add_study_halls(teacher_schedules: dict, grade_schedules: dict,
                     preserve_existing: bool = True,
                     rules: list[dict] = None,
                     grades: list[str] = None,
-                    teacher_availability: dict = None) -> list[StudyHallAssignment]:
+                    teacher_availability: dict = None,
+                    grade_teachable_blocks: dict = None,
+                    teacher_lunch_windows: dict = None) -> list[StudyHallAssignment]:
     """Assign study halls to eligible teachers with open blocks.
 
     Strategy:
@@ -1387,6 +1577,13 @@ def add_study_halls(teacher_schedules: dict, grade_schedules: dict,
         preserve_existing: If True, keep existing study halls and only fill gaps.
                           If False, reassign all study halls from scratch.
         rules: Scheduling rules to read config from (study_hall_grades).
+        grade_teachable_blocks: Optional dict mapping grade name -> set/list of
+            block numbers the grade can occupy. Study halls are never placed in
+            a block that isn't teachable for every grade in the group.
+        teacher_lunch_windows: Optional dict mapping teacher name -> set of
+            candidate lunch block numbers. A study hall is never assigned to a
+            supervisor's last free candidate lunch window on a day (a study
+            hall occupies its supervisor, who still needs a lunch break).
 
     Prioritizes teachers with MORE open blocks (not even distribution).
     """
@@ -1463,9 +1660,33 @@ def add_study_halls(teacher_schedules: dict, grade_schedules: dict,
                     continue
 
                 for block in BLOCKS:
+                    # Block must be teachable for every grade in the group
+                    # (e.g. skip that grade band's lunch block)
+                    if grade_teachable_blocks:
+                        blocked = False
+                        for g in group_grades:
+                            mask = grade_teachable_blocks.get(g)
+                            if mask is not None and block not in mask:
+                                blocked = True
+                                break
+                        if blocked:
+                            continue
+
                     # Teacher must be free
                     if teacher_schedules[teacher][day][block] is not None:
                         continue
+
+                    # Never take the supervisor's last free candidate lunch
+                    # window on this day (study hall occupies the teacher)
+                    if teacher_lunch_windows:
+                        cand = teacher_lunch_windows.get(teacher)
+                        if cand and block in cand:
+                            day_sched = teacher_schedules[teacher][day]
+                            if not any(
+                                b != block and b in BLOCKS and day_sched.get(b) is None
+                                for b in cand
+                            ):
+                                continue
 
                     # Teacher must be available on this day/block
                     if teacher_availability and teacher in teacher_availability:
@@ -1625,6 +1846,8 @@ def generate_schedules(
     randomize_scoring: bool = False,  # Add noise to scoring to pick suboptimal but valid solutions
     skip_study_halls: bool = False,  # If True, skip study hall assignment entirely (reassign after saving)
     grades: list[str] = None,  # All grade names from database - used for grade schedule initialization
+    blocks: list = None,  # Block numbers for this quarter's timetable (None = legacy [1..5])
+    grade_teachable_blocks: dict = None,  # grade name -> list of teachable block numbers (None = all)
     _skip_unlock_suggestions: bool = False,  # Internal: skip unlock suggestions to prevent recursion
 ) -> dict:
     """
@@ -1640,11 +1863,39 @@ def generate_schedules(
         on_progress: Optional callback(current, total, message)
         locked_teachers: Dict mapping teacher names to their fixed schedules (for partial regen)
         teachers_needing_study_halls: List of teacher names that need study halls assigned
+        blocks: Block numbers defined by the quarter's timetable template (e.g. [1..9]).
+            None/empty falls back to the legacy 5-block format.
+        grade_teachable_blocks: Dict mapping grade name (e.g. '1st Grade') to the list of
+            block numbers that grade can be scheduled into (e.g. its band's lunch block
+            excluded). Grades absent from the dict may use all blocks.
 
     Returns:
         Dict with status, options, message, seeds_completed
     """
     start_time = time.time()
+
+    # Configure the block format for this request (module-level; see set_blocks docs)
+    set_blocks(blocks)
+
+    # Normalize the per-grade teachable-block masks: drop unknown block numbers,
+    # keep only masks that actually restrict something meaningful.
+    grade_teachable: dict[str, list[int]] = {}
+    if grade_teachable_blocks:
+        blocks_set = set(BLOCKS)
+        for g, tbs in grade_teachable_blocks.items():
+            grade_teachable[g] = sorted(b for b in set(tbs or []) if b in blocks_set)
+
+    # Slot-index form of the masks (same blocks every day), for session building
+    grade_teachable_slots: dict[str, set[int]] = None
+    if grade_teachable:
+        grade_teachable_slots = {}
+        for g, tbs in grade_teachable.items():
+            block_idxs = [BLOCKS.index(b) for b in tbs]
+            grade_teachable_slots[g] = {
+                day_block_to_slot(d, bi)
+                for d in range(len(DAYS))
+                for bi in block_idxs
+            }
     time_per_attempt = min(10.0, max_time_seconds / num_attempts)
 
     # Validate required inputs
@@ -1829,9 +2080,17 @@ def generate_schedules(
         locked_grade_slots if is_partial_regen else None,
         active_grades,
         locked_grade_subject_days if is_partial_regen else None,
-        teacher_objs
+        teacher_objs,
+        grade_teachable_slots
     )
 
+    # Candidate lunch windows per teacher (hard 'teacher_lunch' rule).
+    # Only active when per-grade teachable-block masks are provided AND the
+    # rule is enabled (missing rule row defaults to enabled). Sessions here
+    # already exclude locked teachers, whose schedules we cannot change.
+    teacher_lunch_windows = None
+    if grade_teachable and is_rule_enabled(rules, 'teacher_lunch'):
+        teacher_lunch_windows = compute_teacher_lunch_candidates(sessions, grade_teachable) or None
 
     if on_progress:
         on_progress(0, num_attempts, 'Initializing CP-SAT solver...')
@@ -1865,21 +2124,30 @@ def generate_schedules(
     if incomplete_classes:
         diagnostics['incompleteClasses'] = incomplete_classes
 
-    # Check 1: Teacher overload (more than 25 sessions)
+    # Check 1: Teacher overload (more sessions than weekly slots)
+    max_teacher_sessions = len(DAYS) * len(BLOCKS)
     teacher_session_count = {}
     for cls in class_objs:
         count = len(cls.fixed_slots) if cls.fixed_slots else cls.days_per_week
         teacher_session_count[cls.teacher] = teacher_session_count.get(cls.teacher, 0) + count
 
-    overloaded_teachers = [(t, c) for t, c in teacher_session_count.items() if c > 25]
+    overloaded_teachers = [(t, c) for t, c in teacher_session_count.items() if c > max_teacher_sessions]
     if overloaded_teachers:
         diagnostics['teacherOverload'] = [{'teacher': t, 'sessions': c} for t, c in overloaded_teachers]
         for t, c in overloaded_teachers:
-            preflight_errors.append(f"Teacher '{t}' has {c} sessions but max is 25 (5 days × 5 blocks)")
+            preflight_errors.append(
+                f"Teacher '{t}' has {c} sessions but max is {max_teacher_sessions} "
+                f"({len(DAYS)} days × {len(BLOCKS)} blocks)"
+            )
 
-    # Check 2: Grade overload (more than 25 sessions per grade)
+    # Check 2: Grade overload (more sessions than that grade's teachable slots)
     # Note: Elective sessions don't count toward individual grade limits
     # Note: Co-taught classes (same grade+subject, different teachers) only count once
+    def grade_max_sessions(grade: str) -> tuple[int, int]:
+        """Return (max sessions per week, teachable blocks per day) for a grade."""
+        teachable_count = len(grade_teachable.get(grade, BLOCKS))
+        return len(DAYS) * teachable_count, teachable_count
+
     grade_session_count = {}
     seen_grade_subject = set()  # Track (grade, subject) to avoid double-counting co-taught
     for cls in class_objs:
@@ -1893,11 +2161,49 @@ def generate_schedules(
             seen_grade_subject.add(key)
             grade_session_count[grade] = grade_session_count.get(grade, 0) + count
 
-    overloaded_grades = [(g, c) for g, c in grade_session_count.items() if c > 25]
+    overloaded_grades = [(g, c) for g, c in grade_session_count.items() if c > grade_max_sessions(g)[0]]
     if overloaded_grades:
         diagnostics['gradeOverload'] = [{'grade': g, 'sessions': c} for g, c in overloaded_grades]
         for g, c in overloaded_grades:
-            preflight_errors.append(f"Grade '{g}' has {c} sessions but max is 25 (5 days × 5 blocks)")
+            g_max, g_blocks = grade_max_sessions(g)
+            preflight_errors.append(
+                f"Grade '{g}' has {c} sessions but max is {g_max} "
+                f"({len(DAYS)} days × {g_blocks} teachable blocks)"
+            )
+
+    # Check 2b: Fixed slots that land in a block a covered grade can't use
+    # (e.g. an elective pinned to a grade band's lunch block)
+    if grade_teachable:
+        for cls in class_objs:
+            for day, block in cls.fixed_slots:
+                for grade in cls.grades:
+                    mask = grade_teachable.get(grade)
+                    if mask is not None and block not in mask:
+                        preflight_errors.append(
+                            f"Class '{cls.teacher} - {cls.subject}' is fixed to {day} Block {block}, "
+                            f"but Block {block} is not a teachable block for {grade}"
+                        )
+
+    # Check 2c: Teacher lunch - fixed slots alone must not fill every candidate
+    # lunch window on any day (the teacher would have no possible lunch break)
+    if teacher_lunch_windows:
+        for lunch_teacher, cand in teacher_lunch_windows.items():
+            fixed_windows_by_day: dict[str, set[int]] = {d: set() for d in DAYS}
+            for s in sessions:
+                if s.teacher != lunch_teacher or not s.is_fixed or not s.valid_slots:
+                    continue
+                slot = s.valid_slots[0]
+                block_num = BLOCKS[slot_to_block(slot)]
+                if block_num in cand:
+                    fixed_windows_by_day[DAYS[slot_to_day(slot)]].add(block_num)
+            for day in DAYS:
+                if fixed_windows_by_day[day] >= cand:
+                    blocks_str = ', '.join(str(b) for b in sorted(cand))
+                    preflight_errors.append(
+                        f"Teacher '{lunch_teacher}' has fixed classes filling every possible "
+                        f"lunch block ({blocks_str}) on {day} - at least one must stay open "
+                        f"for a lunch break"
+                    )
 
     # Check 3: Fixed slot conflicts (same teacher, same slot)
     teacher_fixed_slots = {}
@@ -1967,7 +2273,8 @@ def generate_schedules(
             max_solutions=5,
             diagnostics=diagnostics if attempt == 0 else None,
             rules=rules,
-            active_grades=active_grades
+            active_grades=active_grades,
+            teacher_lunch_windows=teacher_lunch_windows
         )
         seeds_completed = attempt + 1
 
@@ -2011,7 +2318,7 @@ def generate_schedules(
             # Add study halls (only if study_hall_distribution rule is enabled and not skipped)
             # skip_study_halls=True means skip entirely (user will reassign after saving)
             if is_rule_enabled(rules, 'study_hall_distribution') and not skip_study_halls:
-                sh_assignments = add_study_halls(ts, gs, eligible, preserve_existing=True, rules=rules, grades=active_grades, teacher_availability=teacher_availability)
+                sh_assignments = add_study_halls(ts, gs, eligible, preserve_existing=True, rules=rules, grades=active_grades, teacher_availability=teacher_availability, grade_teachable_blocks=grade_teachable or None, teacher_lunch_windows=teacher_lunch_windows)
                 sh_placed = sum(1 for sh in sh_assignments if sh.teacher is not None)
             else:
                 sh_assignments = []
@@ -2025,7 +2332,7 @@ def generate_schedules(
             # IMPORTANT: Only redistribute for non-locked teachers to preserve locked schedules
             if is_rule_enabled(rules, 'no_btb_open'):
                 unlocked_full_time = [t for t in full_time_names if t not in locked_teacher_names]
-                redistribute_open_blocks(ts, gs, unlocked_full_time)
+                redistribute_open_blocks(ts, gs, unlocked_full_time, grade_teachable_blocks=grade_teachable or None, teacher_lunch_windows=teacher_lunch_windows)
 
             # CRITICAL: Rebuild grade schedules from teacher schedules to ensure consistency.
             # This is a destructive rebuild that ensures grade_schedules always match teacher_schedules,
@@ -2075,6 +2382,8 @@ def generate_schedules(
                     grades=active_grades,
                     max_suggestions=3,
                     trial_timeout=min(5.0, remaining / len(locked_teacher_names)) if locked_teacher_names else 5.0,
+                    blocks=blocks,
+                    grade_teachable_blocks=grade_teachable_blocks,
                 )
                 if unlock_suggestions:
                     diagnostics['unlockSuggestions'] = unlock_suggestions

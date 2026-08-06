@@ -28,6 +28,8 @@ export interface RemoteGeneratorOptions {
   randomizeScoring?: boolean; // Add noise to scoring for variety (picks suboptimal but valid solutions)
   skipStudyHalls?: boolean; // If true, skip study hall assignment during regen (reassign after saving)
   grades?: string[]; // All grade names from database - used for grade schedule initialization
+  blocks?: number[]; // Block numbers from the quarter's timetable template (absent = legacy [1..5])
+  gradeTeachableBlocks?: Record<string, number[]>; // grade NAME -> teachable block numbers (absent = all blocks)
 }
 
 export interface ScheduleDiagnostics {
@@ -129,6 +131,8 @@ export async function generateSchedulesRemote(
     randomizeScoring = false,
     skipStudyHalls = false,
     grades,
+    blocks,
+    gradeTeachableBlocks,
   } = options;
 
   // Allow UI to render before starting
@@ -191,6 +195,10 @@ export async function generateSchedulesRemote(
       randomizeScoring,
       skipStudyHalls,
       grades,
+      // Per-quarter block format; undefined keys are omitted from the JSON body,
+      // which the solver treats as the legacy 5-block format.
+      blocks,
+      grade_teachable_blocks: gradeTeachableBlocks,
     };
 
     // Start simulated progress (since we can't get real progress from the API)
