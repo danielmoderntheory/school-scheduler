@@ -29,10 +29,24 @@ export async function POST(request: NextRequest) {
     const isFirst = existing.length === 0
     const name = formatQuarterName(body.quarter_num, body.year)
 
+    // Resolve the block format (timetable template) for the new quarter:
+    // explicit choice -> inherited from the copy-source quarter -> carried over
+    // from the most recently created quarter. Falls back to NULL (oldest template).
+    let templateId: string | null = body.timetable_template_id ?? null
+    if (!templateId) {
+      const inheritFrom = body.copy_from_quarter_id
+        ? sql`SELECT timetable_template_id FROM quarters
+              WHERE id = ${body.copy_from_quarter_id}`
+        : sql`SELECT timetable_template_id FROM quarters
+              WHERE deleted_at IS NULL ORDER BY created_at DESC LIMIT 1`
+      const [source] = await inheritFrom
+      templateId = source?.timetable_template_id ?? null
+    }
+
     // Create the new quarter
     const [newQuarter] = await sql`
-      INSERT INTO quarters (name, year, quarter_num, is_active)
-      VALUES (${name}, ${body.year}, ${body.quarter_num}, ${isFirst})
+      INSERT INTO quarters (name, year, quarter_num, is_active, timetable_template_id)
+      VALUES (${name}, ${body.year}, ${body.quarter_num}, ${isFirst}, ${templateId})
       RETURNING *
     `
 

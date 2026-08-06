@@ -74,6 +74,10 @@ CREATE TABLE quarters (
     start_date DATE,
     end_date DATE,
     is_active BOOLEAN DEFAULT false,
+    -- Block format for this quarter; the template's block rows define the block count.
+    -- NULL falls back to the oldest template (the original 5-block format).
+    -- FK added after timetable_templates is created (see below).
+    timetable_template_id UUID,
     created_at TIMESTAMPTZ DEFAULT NOW(),
     updated_at TIMESTAMPTZ DEFAULT NOW(),
     deleted_at TIMESTAMPTZ DEFAULT NULL,
@@ -200,6 +204,11 @@ INSERT INTO timetable_templates (name, rows) VALUES ('Default', '[
   {"sort_order":13, "time":"2:40-2:45",    "label":"Packup for dismissal","type":"transition"},
   {"sort_order":14, "time":"2:45",         "label":"Return to home room for dismissal", "type":"transition"}
 ]');
+
+-- Quarters reference timetable templates (declared here because quarters is created first)
+ALTER TABLE quarters
+    ADD CONSTRAINT quarters_timetable_template_id_fkey
+    FOREIGN KEY (timetable_template_id) REFERENCES timetable_templates(id);
 
 -- ============================================================================
 -- INDEXES

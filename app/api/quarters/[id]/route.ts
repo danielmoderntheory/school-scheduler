@@ -31,7 +31,8 @@ export async function PUT(
         year = COALESCE(${body.year ?? null}, year),
         quarter_num = COALESCE(${body.quarter_num ?? null}, quarter_num),
         start_date = COALESCE(${body.start_date ?? null}, start_date),
-        end_date = COALESCE(${body.end_date ?? null}, end_date)
+        end_date = COALESCE(${body.end_date ?? null}, end_date),
+        timetable_template_id = COALESCE(${body.timetable_template_id ?? null}, timetable_template_id)
       WHERE id = ${id}
       RETURNING *
     `

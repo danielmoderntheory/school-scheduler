@@ -51,6 +51,8 @@ export interface Quarter {
   startDate?: string;
   endDate?: string;
   isActive: boolean;
+  // Block format for this quarter; null falls back to the original 5-block template
+  timetableTemplateId?: string | null;
 }
 
 const QUARTER_SEASONS: Record<number, string> = { 1: 'Fall', 2: 'Winter', 3: 'Spring', 4: 'Summer' };
@@ -173,7 +175,7 @@ export interface TimetableRow {
   time: string          // e.g. "8:20-9:20" or "2:45"
   label: string         // e.g. "Block 1", "Lunch/Break"
   type: TimetableRowType
-  blockNumber?: number  // Only for type='block': maps to schedule block 1-5
+  blockNumber?: number  // Only for type='block': maps to a schedule block (template-defined count)
   grade_ids?: string[]  // Grade UUIDs. Empty/absent = all grades.
 }
 
@@ -225,7 +227,7 @@ export interface PendingTransfer {
 }
 
 export interface ValidationError {
-  type: 'teacher_conflict' | 'grade_conflict' | 'subject_conflict' | 'unplaced' | 'locked_teacher_missing' | 'locked_teacher_modified' | 'session_count' | 'study_hall_coverage' | 'back_to_back' | 'fixed_slot_violation' | 'availability_violation' | 'unknown_class';
+  type: 'teacher_conflict' | 'grade_conflict' | 'subject_conflict' | 'unplaced' | 'locked_teacher_missing' | 'locked_teacher_modified' | 'session_count' | 'study_hall_coverage' | 'back_to_back' | 'fixed_slot_violation' | 'availability_violation' | 'unknown_class' | 'no_lunch';
   message: string;
   cells: CellLocation[];
   blockId?: string;

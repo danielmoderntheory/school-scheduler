@@ -73,9 +73,15 @@ export async function POST(
         newQuarterNum = 1
       }
 
+      // Inherit the source quarter's block format so restored 9-block
+      // generations don't land in a quarter that resolves to the 5-block fallback
+      const [sourceQuarter] = await sql`
+        SELECT timetable_template_id FROM quarters WHERE id = ${generation.quarter_id}
+      `
+
       const [newQuarter] = await sql`
-        INSERT INTO quarters (name, year, quarter_num, is_active)
-        VALUES (${quarterName}, ${year}, ${newQuarterNum <= 4 ? newQuarterNum : 1}, false)
+        INSERT INTO quarters (name, year, quarter_num, is_active, timetable_template_id)
+        VALUES (${quarterName}, ${year}, ${newQuarterNum <= 4 ? newQuarterNum : 1}, false, ${sourceQuarter?.timetable_template_id ?? null})
         RETURNING *
       `
 

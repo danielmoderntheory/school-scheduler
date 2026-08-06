@@ -13,10 +13,21 @@ export async function GET(request: NextRequest) {
   }
 
   try {
-    // Fetch the generation, timetable template, and grades in parallel
+    // Fetch the generation, its quarter's timetable template, and grades in parallel.
+    // The template resolves through the generation's quarter (per-quarter block
+    // formats), falling back to the oldest template for pre-format quarters.
     const [generations, templates, grades] = await Promise.all([
       sql`SELECT * FROM schedule_generations WHERE id = ${generationId}`,
-      sql`SELECT * FROM timetable_templates LIMIT 1`,
+      sql`
+        SELECT t.* FROM timetable_templates t
+        WHERE t.deleted_at IS NULL
+          AND t.id = COALESCE(
+            (SELECT q.timetable_template_id FROM quarters q
+             WHERE q.id = (SELECT g.quarter_id FROM schedule_generations g WHERE g.id = ${generationId})),
+            (SELECT t2.id FROM timetable_templates t2
+             WHERE t2.deleted_at IS NULL ORDER BY t2.created_at LIMIT 1)
+          )
+      `,
       sql`SELECT id, name, display_name, sort_order, homeroom_teachers FROM grades ORDER BY sort_order`,
     ])
 

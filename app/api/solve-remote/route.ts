@@ -55,6 +55,9 @@ interface SolveRequest {
   }>
   // Grade list for grade schedule initialization
   grades?: string[]
+  // Per-quarter block format (absent = legacy 5-block behavior)
+  blocks?: number[]
+  grade_teachable_blocks?: Record<string, number[]>
 }
 
 export async function POST(request: NextRequest) {
@@ -94,6 +97,9 @@ export async function POST(request: NextRequest) {
         skipStudyHalls: body.skipStudyHalls || false,
         // Grade list for grade schedule initialization
         grades: body.grades,
+        // Per-quarter block format (absent = legacy 5-block behavior)
+        blocks: body.blocks,
+        grade_teachable_blocks: body.grade_teachable_blocks,
       }),
     })
 
