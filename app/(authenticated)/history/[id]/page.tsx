@@ -1671,7 +1671,9 @@ export default function HistoryDetailPage() {
       setGenerationProgress({ current: 0, total: 100, message: "Starting OR-Tools solver..." })
       remoteResult = await generateSchedulesRemote(teachers, classes, {
         numOptions: 1,
-        numAttempts: 50,
+        // 20 seeds, not 50 — the 9-block model needs ~10s/seed on Cloud Run's
+        // single CPU; more attempts just starves each seed's time budget
+        numAttempts: 20,
         maxTimeSeconds: 120,
         lockedTeachers: lockedSchedules,
         teachersNeedingStudyHalls,

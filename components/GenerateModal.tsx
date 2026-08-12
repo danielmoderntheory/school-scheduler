@@ -395,7 +395,7 @@ export function GenerateModal({
     setShowConfirmDialog(false)
     setGenerating(true)
     setScheduleError(null)
-    setProgress({ current: 0, total: 150, message: "Connecting to OR-Tools solver..." })
+    setProgress({ current: 0, total: 20, message: "Connecting to OR-Tools solver..." })
 
     try {
       const { teachers: teacherList, classes: classList } = convertToSchedulerFormat()
@@ -432,7 +432,11 @@ export function GenerateModal({
 
       let result = await generateSchedulesRemote(teacherList, classList, {
         numOptions: 1,
-        numAttempts: 150,
+        // 20 seeds, not 150: the per-seed time budget is maxTime/attempts, and
+        // the 9-block model (doubles, pairing budgets, lunch windows) needs
+        // ~10s/seed on Cloud Run's single CPU. 150 attempts starved every seed
+        // to <2s and returned UNKNOWN on a schedule that solves comfortably.
+        numAttempts: 20,
         maxTimeSeconds: 280,
         rules,
         grades: gradeNames,
@@ -903,6 +907,21 @@ export function GenerateModal({
             {scheduleError?.diagnostics && (
               <div className="bg-slate-50 rounded-lg p-4 border space-y-3">
                 <p className="font-medium text-slate-800">Issues Found:</p>
+
+                {/* Fallback when no specific issues were detected: the solver
+                    ran out of time rather than proving anything impossible */}
+                {!scheduleError.diagnostics.incompleteClasses?.length &&
+                  !scheduleError.diagnostics.teacherOverload?.length &&
+                  !scheduleError.diagnostics.gradeOverload?.length &&
+                  !scheduleError.diagnostics.fixedSlotConflicts?.length && (
+                    <div className="bg-amber-50 rounded p-3 border border-amber-200 text-sm text-amber-800">
+                      No constraint problems were detected — the solver ran out of time
+                      before finding a valid arrangement. This usually isn&apos;t a data
+                      problem: try generating again (each run explores different
+                      orderings), and if it persists repeatedly, a tightly-pinned class
+                      may be the bottleneck.
+                    </div>
+                  )}
 
                 {/* Incomplete classes */}
                 {scheduleError.diagnostics.incompleteClasses &&
