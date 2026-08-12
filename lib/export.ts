@@ -2,7 +2,7 @@ import XLSX from "xlsx-js-style"
 import type { ScheduleOption, TeacherSchedule, GradeSchedule, OpenBlockLabels, TimetableRow, TimetableTemplate } from "./types"
 import { BLOCK_TYPE_OPEN, BLOCK_TYPE_STUDY_HALL, isOpenBlock, isStudyHall, isScheduledClass, getOpenBlockAt, getOpenBlockLabel, getScheduleBlockNumbers } from "./schedule-utils"
 import { formatGradeDisplayCompact } from "./grade-utils"
-import { resolveRowsForGrade, getTemplateBlocks } from "./timetable-utils"
+import { resolveRowsForGrade, getTemplateBlocks, getTeachableBlocksForGrade } from "./timetable-utils"
 
 const DAYS = ["Mon", "Tues", "Wed", "Thurs", "Fri"]
 
@@ -21,6 +21,31 @@ function resolveExportBlocks(option: ScheduleOption, metadata?: ExportMetadata):
     return getTemplateBlocks(metadata.timetableTemplate)
   }
   return dataBlocks
+}
+
+// Lunch blocks per grade, keyed by grade display name: exported blocks that are
+// NOT teachable for the grade (its band's lunch window in the timetable
+// template). Legacy exports (no template / 5-block) get an empty map, so their
+// output is byte-identical to before. A grade only appears in the map when it
+// genuinely has non-teachable blocks.
+function getLunchBlocksByGrade(exportBlocks: number[], metadata?: ExportMetadata): Record<string, number[]> {
+  const map: Record<string, number[]> = {}
+  const template = metadata?.timetableTemplate
+  if (!template || !metadata?.grades) return map
+  for (const g of metadata.grades) {
+    const teachable = getTeachableBlocksForGrade(template, g.id)
+    const lunch = exportBlocks.filter(b => !teachable.includes(b))
+    if (lunch.length > 0) map[g.display_name] = lunch
+  }
+  return map
+}
+
+// A cell renders as "Lunch" only when the block is in the grade's lunch list
+// AND the cell has no scheduled content (blank or OPEN) — a real class sitting
+// at a lunch block (data anomaly) still exports as-is so it stays visible.
+function isLunchExportCell(formatted: string, lunchBlocks: number[] | undefined, block: number): boolean {
+  if (!lunchBlocks || !lunchBlocks.includes(block)) return false
+  return formatted === "" || formatted === BLOCK_TYPE_OPEN
 }
 
 // Sort grades: Kindergarten first, then by grade number
@@ -457,8 +482,10 @@ export function generateXLSX(option: ScheduleOption, metadata?: ExportMetadata):
 
   // Sort grades: Kindergarten first, then by grade number
   const sortedGrades = Object.entries(option.gradeSchedules).sort(([a], [b]) => gradeSort(a, b))
+  const lunchBlocksByGrade = getLunchBlocksByGrade(exportBlocks, metadata)
 
   sortedGrades.forEach(([grade, schedule]) => {
+    const lunchBlocks = lunchBlocksByGrade[grade]
     gradeRowInfo.push({ type: "name", row: gradeData.length })
     gradeData.push([grade])
 
@@ -469,7 +496,8 @@ export function generateXLSX(option: ScheduleOption, metadata?: ExportMetadata):
       gradeRowInfo.push({ type: "block", row: gradeData.length })
       const row: (string | number)[] = [`Block ${block}`]
       DAYS.forEach((day) => {
-        row.push(formatGradeCell(schedule[day]?.[block]))
+        const cell = formatGradeCell(schedule[day]?.[block])
+        row.push(isLunchExportCell(cell, lunchBlocks, block) ? "Lunch" : cell)
       })
       gradeData.push(row)
     })
@@ -686,13 +714,16 @@ export function generateCSV(option: ScheduleOption, metadata?: ExportMetadata): 
   // Grade schedules
   lines.push("GRADE SCHEDULES")
   lines.push("")
+  const lunchBlocksByGrade = getLunchBlocksByGrade(exportBlocks, metadata)
   Object.entries(option.gradeSchedules).sort(([a], [b]) => gradeSort(a, b)).forEach(([grade, schedule]) => {
+    const lunchBlocks = lunchBlocksByGrade[grade]
     lines.push(grade)
     lines.push(["", ...DAYS].join(","))
     exportBlocks.forEach((block) => {
       const row: string[] = [`Block ${block}`]
       DAYS.forEach((day) => {
-        const cell = formatGradeCell(schedule[day]?.[block])
+        const rawCell = formatGradeCell(schedule[day]?.[block])
+        const cell = isLunchExportCell(rawCell, lunchBlocks, block) ? "Lunch" : rawCell
         row.push(cell ? `"${cell}"` : "")
       })
       lines.push(row.join(","))

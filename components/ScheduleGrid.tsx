@@ -25,6 +25,11 @@ interface ScheduleGridProps {
   // Block numbers to render as rows (from the quarter's timetable template).
   // Defaults to the legacy 5-block list for existing call sites.
   blocks?: number[]
+  // Grade view only: per-grade lunch blocks (grade display name -> block numbers
+  // that are NOT teachable for that grade, i.e. its band's lunch window). Cells
+  // at these blocks render as a muted "Lunch" cell instead of empty/OPEN.
+  // Absent (legacy 5-block schedules) = exactly the current behavior.
+  lunchBlocksByGrade?: Record<string, number[]>
   // Change indicator: 'pending' = changes will be applied, 'applied' = changes have been applied in preview
   changeStatus?: 'pending' | 'applied'
   // Selection mode props (regen mode)
@@ -68,6 +73,7 @@ export function ScheduleGrid({
   name,
   status,
   blocks = LEGACY_BLOCKS,
+  lunchBlocksByGrade,
   changeStatus,
   showCheckbox,
   isSelected,
@@ -158,6 +164,19 @@ export function ScheduleGrid({
     return "class"
   }
 
+  // Grade-view lunch cells: the block is not teachable for this grade (its
+  // band's lunch window). Only replaces cells with no scheduled content — if a
+  // real class somehow sits at a lunch block (data anomaly / manual edit), it
+  // still renders so it stays visible.
+  function isLunchCell(day: string, block: number): boolean {
+    if (type !== "grade" || !lunchBlocksByGrade) return false
+    const lunchBlocks = lunchBlocksByGrade[name]
+    if (!lunchBlocks || !lunchBlocks.includes(block)) return false
+    const { entry } = getCellContent(day, block)
+    const cellType = getCellType(entry)
+    return cellType === "empty" || cellType === "open"
+  }
+
   function isValidTarget(day: string, block: number): boolean {
     if (type === "grade") {
       return validTargets.some(t => t.grade === name && t.day === day && t.block === block)
@@ -220,6 +239,11 @@ export function ScheduleGrid({
   }
 
   function getCellClass(entry: [string, string] | null, day: string, block: number): string {
+    // Lunch cells (grade view) are inert: no mode styling, no hover, no cursor.
+    if (isLunchCell(day, block)) {
+      return "bg-amber-50/70"
+    }
+
     const baseClass = (() => {
       if (!entry) return "bg-muted/30"
       const [, subject] = entry
@@ -381,6 +405,9 @@ export function ScheduleGrid({
     }
 
     if (!(swapMode || manualStudyHallMode) || !onCellClick) return
+
+    // Lunch cells (grade view) are never clickable/assignable
+    if (isLunchCell(day, block)) return
 
     const { entry, isMultiple } = getCellContent(day, block)
     const cellType = getCellType(entry)
@@ -561,6 +588,14 @@ export function ScheduleGrid({
                           <div className="text-[10px] text-indigo-400 italic">
                             moved
                           </div>
+                        )
+                      }
+                      if (isLunchCell(day, block)) {
+                        // Grade-view lunch cell (block not teachable for this grade)
+                        return (
+                          <span className="text-[10px] italic text-amber-700/70">
+                            Lunch
+                          </span>
                         )
                       }
                       if (isOpenBlock(displaySecondary)) {

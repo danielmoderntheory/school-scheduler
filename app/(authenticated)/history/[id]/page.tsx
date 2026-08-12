@@ -556,6 +556,20 @@ export default function HistoryDetailPage() {
     return map
   }, [timetableTemplate, gradesData])
 
+  // Lunch blocks per grade, keyed by grade DISPLAY NAME: template blocks that
+  // are NOT teachable for the grade (its band's lunch window). Empty per grade
+  // on legacy quarters with no template (teachable == all blocks), so grade
+  // grids render exactly as before.
+  const lunchBlocksByGrade = useMemo(() => {
+    const map: Record<string, number[]> = {}
+    if (!timetableTemplate) return map
+    for (const g of gradesData) {
+      const teachable = teachableBlocksByGrade[g.display_name] || []
+      map[g.display_name] = templateBlocks.filter(b => !teachable.includes(b))
+    }
+    return map
+  }, [timetableTemplate, templateBlocks, teachableBlocksByGrade, gradesData])
+
   // Legal double-period block pairs per grade, keyed by grade DISPLAY NAME
   // (same convention as teachableBlocksByGrade). Empty per grade / overall when
   // there is no template — double-period checks are skipped in that case.
@@ -7748,6 +7762,7 @@ export default function HistoryDetailPage() {
                       name={grade}
                       classesSnapshot={generation?.stats?.classes_snapshot}
                       blocks={templateBlocks}
+                      lunchBlocksByGrade={lunchBlocksByGrade}
                     />
                   ))
             }
@@ -9620,6 +9635,7 @@ export default function HistoryDetailPage() {
                             onCellClick={handleCellClick}
                             classesSnapshot={generation?.stats?.classes_snapshot}
                             blocks={templateBlocks}
+                            lunchBlocksByGrade={lunchBlocksByGrade}
                           />
                         ))}
                 </div>
