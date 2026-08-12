@@ -43,6 +43,12 @@ interface ScheduleStatsProps {
   // Per-grade teachable blocks (display_name -> blocks). Grades' capacity and
   // gap detection use these; absent grades fall back to the full block list.
   teachableBlocksByGrade?: Record<string, number[]>
+  // True when the quarter's template masks per-grade blocks (lunch windows),
+  // meaning every teacher has one designated (non-OPEN) Lunch block per day.
+  // Teacher weekly capacity then effectively loses one block per day, which
+  // adjusts the "Avg Open" denominator and the high-avg-open threshold.
+  // Absent/false keeps the legacy display identical.
+  hasDailyLunch?: boolean
 }
 
 function InfoTooltip({ text }: { text: string }) {
@@ -70,6 +76,7 @@ export function ScheduleStats({
   validationIssues = [],
   blocks,
   teachableBlocksByGrade,
+  hasDailyLunch = false,
 }: ScheduleStatsProps) {
   const [expanded, setExpanded] = useState(defaultExpanded)
 
@@ -79,6 +86,10 @@ export function ScheduleStats({
   const DAYS = ['Mon', 'Tues', 'Wed', 'Thurs', 'Fri']
   const BLOCKS: number[] = blocks && blocks.length > 0 ? blocks : [...LEGACY_BLOCKS]
   const BLOCKS_PER_WEEK = DAYS.length * BLOCKS.length
+  // Effective weekly capacity per teacher: when a daily lunch is in effect
+  // (per-grade block masking), one block per day is the designated Lunch and
+  // is neither teachable nor counted as open, so capacity shrinks by DAYS.length.
+  const TEACHER_CAPACITY_PER_WEEK = hasDailyLunch ? BLOCKS_PER_WEEK - DAYS.length : BLOCKS_PER_WEEK
   // A grade's own block list and weekly capacity (excludes e.g. its lunch block)
   const gradeBlocksFor = (grade: string): number[] =>
     teachableBlocksByGrade?.[grade] && teachableBlocksByGrade[grade].length > 0
@@ -294,8 +305,10 @@ export function ScheduleStats({
   }
 
   // High average open blocks (more than half the week free)
-  // BLOCKS_PER_WEEK / 2 - 0.5 = 12 for the legacy 25-block week (preserves prior threshold)
-  if (avgOpenBlocks > BLOCKS_PER_WEEK / 2 - 0.5 && fullTimeTeachers.length > 0) {
+  // TEACHER_CAPACITY_PER_WEEK / 2 - 0.5 = 12 for the legacy 25-block week
+  // (preserves prior threshold); with a daily lunch the capacity — and thus
+  // the threshold — shrinks accordingly.
+  if (avgOpenBlocks > TEACHER_CAPACITY_PER_WEEK / 2 - 0.5 && fullTimeTeachers.length > 0) {
     issues.push({
       type: 'info',
       message: `Full-time teachers average ${avgOpenBlocks.toFixed(1)} open blocks. Consider adding more classes or adjusting staffing.`
@@ -505,7 +518,7 @@ export function ScheduleStats({
                 ? (fullTimeTeachers.reduce((sum, t) => sum + t.open, 0) / fullTimeTeachers.length).toFixed(1)
                 : 0}
               <span className="text-sm font-normal text-slate-500 ml-1">
-                / {BLOCKS_PER_WEEK}
+                / {TEACHER_CAPACITY_PER_WEEK}
               </span>
             </div>
             <div className="text-xs text-slate-500 mt-1">Full-time only</div>

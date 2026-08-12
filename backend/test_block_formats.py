@@ -1132,28 +1132,54 @@ def test_21():
     check("masked pair move: masked block stays untouched",
           ts['Pat'][TUE][1] == ['', 'OPEN'], str(ts['Pat'][TUE][1]))
 
-    # (e) teacher_lunch guard holds for BOTH blocks
-    # last candidate window {2}: any landing covering block 2 is refused
-    ts, gs = fresh_schedules()
+    # (e) teacher_lunch guard holds for BOTH blocks.
+    # Lunch-aware hole finding means the designated lunch is NOT open, so the
+    # scenario pins the designation (single window {3}) and leaves a genuine
+    # BTB pair elsewhere on the day (Tues open 1,2 + lunch at 3).
+    FROZEN_ALL = {('Pat', G, s)
+                  for s in ('Math', 'ELA', 'Science', 'History', 'Geography')}
+
+    def lunch_guard_schedules():
+        """Pat: Spanish pair Mon (2,3); Tues open 1,2,3 where window {3} is
+        the designated lunch -> genuine hole at (1,2). All singles frozen, so
+        only the pair can move."""
+        mon = {1: [G, 'Math'], 2: [G, 'Spanish'], 3: [G, 'Spanish'],
+               4: [G, 'ELA'], 5: [G, 'Science']}
+        tues = {1: ['', 'OPEN'], 2: ['', 'OPEN'], 3: ['', 'OPEN'],
+                4: [G, 'History'], 5: [G, 'Geography']}
+        def full_day():
+            return {1: [G, 'Math'], 2: [G, 'ELA'], 3: [G, 'Science'],
+                    4: [G, 'History'], 5: [G, 'Geography']}
+        ts = {'Pat': {MON: mon, TUE: tues, DAYS[2]: full_day(),
+                      DAYS[3]: full_day(), DAYS[4]: full_day()}}
+        gs = {G: {d: {b: None for b in B} for d in DAYS}}
+        for d in DAYS:
+            for b in B:
+                e = ts['Pat'][d][b]
+                if e and e[1] != 'OPEN':
+                    gs[G][d][b] = ['Pat', e[1]]
+        return ts, gs
+
+    # last free window {3}: the only allowed landing (2,3) would take it
+    ts, gs = lunch_guard_schedules()
     ts_orig = copy.deepcopy(ts)
     redistribute_open_blocks(ts, gs, ['Pat'],
-                             teacher_lunch_windows={'Pat': {2}},
-                             frozen_class_entries=FROZEN,
-                             class_allowed_pairs={('Pat', G, 'Spanish'): ALL_PAIRS})
+                             teacher_lunch_windows={'Pat': {3}},
+                             frozen_class_entries=FROZEN_ALL,
+                             class_allowed_pairs={('Pat', G, 'Spanish'): {(2, 3)}})
     check("pair move refused when it would take the last lunch window",
-          subject_days(ts, 'Pat', 'Spanish') == {MON: [1, 2]},
-          str(subject_days(ts, 'Pat', 'Spanish')))
-    # windows {1,2}: landing at (2,3) keeps window 1 free -> allowed
-    ts, gs = fresh_schedules()
+          ts == ts_orig, str(subject_days(ts, 'Pat', 'Spanish')))
+    # all pairs allowed: landing at (1,2) fills the hole, window 3 survives
+    ts, gs = lunch_guard_schedules()
     redistribute_open_blocks(ts, gs, ['Pat'],
-                             teacher_lunch_windows={'Pat': {1, 2}},
-                             frozen_class_entries=FROZEN,
+                             teacher_lunch_windows={'Pat': {3}},
+                             frozen_class_entries=FROZEN_ALL,
                              class_allowed_pairs={('Pat', G, 'Spanish'): ALL_PAIRS})
     spa_l = subject_days(ts, 'Pat', 'Spanish')
-    check("pair lands where a lunch window survives (Tues B2+B3)",
-          spa_l == {TUE: [2, 3]}, str(spa_l))
+    check("pair lands where a lunch window survives (Tues B1+B2)",
+          spa_l == {TUE: [1, 2]}, str(spa_l))
     check("lunch window kept free after the pair move",
-          ts['Pat'][TUE][1] == ['', 'OPEN'], str(ts['Pat'][TUE][1]))
+          ts['Pat'][TUE][3] == ['', 'OPEN'], str(ts['Pat'][TUE][3]))
 
     # (f) end-to-end: a flagged double survives redistribution intact
     # (no_btb_open enabled; the under-loaded teacher forces many BTB holes)
@@ -1180,6 +1206,136 @@ def test_21():
               and all(p in MS_PAIRS for p in pairs_e), str(spa_e))
 
 test_21()
+
+
+# =========================================================================
+# TEST 22: teacher lunch designation — a teacher's daily lunch is NOT OPEN
+# =========================================================================
+def test_22():
+    print("\nTEST 22 — lunch designation: designated lunch block is not OPEN")
+    import copy
+    from solver import (designate_teacher_lunch, count_back_to_back,
+                        compute_teacher_stats, redistribute_open_blocks,
+                        Teacher as T)
+
+    set_blocks(NINE_BLOCKS)
+    B9 = list(solver.BLOCKS)
+    G = '7th Grade'
+
+    def day(open_blocks=(), sh_blocks=()):
+        d = {}
+        for b in B9:
+            if b in open_blocks:
+                d[b] = ['', 'OPEN']
+            elif b in sh_blocks:
+                d[b] = [G, 'Study Hall']
+            else:
+                d[b] = [G, f'Subj{b}']
+        return d
+
+    # (a) candidates {5,6,7}, free at 5 and 6, teaching elsewhere:
+    # exactly one of them is designated lunch (tie -> lowest = 5) and the
+    # (5,6) open adjacency is broken by the designation
+    lena_day = day(open_blocks=(5, 6))
+    check("designation: tie between free 5 and 6 -> lowest block (5)",
+          designate_teacher_lunch(lena_day, {5, 6, 7}) == 5)
+    ts_a = {'Lena': {d: copy.deepcopy(lena_day) for d in DAYS}}
+    lena = [T(name='Lena', status='full-time')]
+    check("BTB pair (5,6) not counted when the designation breaks it (5 -> 0)",
+          count_back_to_back(ts_a, 'Lena', {5, 6, 7}) == 0
+          and count_back_to_back(ts_a, 'Lena') == 5)
+    st_lunch = compute_teacher_stats(ts_a, lena, {'Lena': {5, 6, 7}})[0]
+    st_legacy = compute_teacher_stats(ts_a, lena)[0]
+    check("stats: open excludes exactly one candidate block per day (10 -> 5)",
+          st_lunch.open == 5 and st_legacy.open == 10,
+          f"lunch={st_lunch.open} legacy={st_legacy.open}")
+    check("stats: lunch is neither teaching nor study hall (counts unchanged)",
+          st_lunch.teaching == 35 and st_lunch.study_hall == 0
+          and st_lunch.total_used == 35 and st_legacy.teaching == 35,
+          str(st_lunch))
+    check("stats: back_to_back_issues lunch-aware (5 -> 0)",
+          st_lunch.back_to_back_issues == 0
+          and st_legacy.back_to_back_issues == 5)
+
+    # (b) determinism: the free window whose exclusion MINIMIZES the day's
+    # BTB wins, even when it is not the lowest block
+    d_min6 = day(open_blocks=(5, 6, 7))
+    check("designation minimizes BTB: 6 chosen over lower 5 (splits 5|7)",
+          designate_teacher_lunch(d_min6, {5, 6}) == 6)
+    d_min5 = day(open_blocks=(4, 5, 6))
+    check("designation minimizes BTB: 5 chosen over 6 here (splits 4|6)",
+          designate_teacher_lunch(d_min5, {5, 6}) == 5)
+    ts_b = {'Kim': {DAYS[0]: d_min6, **{d: day() for d in DAYS[1:]}}}
+    check("open run 5,6,7 with lunch at 6 -> zero BTB (legacy counted 2)",
+          count_back_to_back(ts_b, 'Kim', {5, 6}) == 0
+          and count_back_to_back(ts_b, 'Kim') == 2)
+
+    # edge: no free candidate window -> designate none (Study Hall occupies)
+    check("fully booked day -> no designation",
+          designate_teacher_lunch(day(), {5, 6, 7}) is None)
+    check("Study Hall in the only window -> occupied, no designation",
+          designate_teacher_lunch(day(sh_blocks=(5,)), {5}) is None)
+    ts_sh = {'Ana': {DAYS[0]: day(open_blocks=(6,), sh_blocks=(5,)),
+                     **{d: day() for d in DAYS[1:]}}}
+    check("no designation -> Study Hall/OPEN adjacency still counts as BTB",
+          count_back_to_back(ts_sh, 'Ana', {5}) == 1)
+
+    # (c) legacy (no masks/windows): stats byte-identical to old behavior
+    set_blocks(None)
+    ts_leg = {'Sam': {d: {1: [G, 'Math'], 2: ['', 'OPEN'], 3: ['', 'OPEN'],
+                          4: [G, 'ELA'], 5: ['', 'OPEN']} for d in DAYS}}
+    sam = [T(name='Sam', status='full-time')]
+    s_none = compute_teacher_stats(ts_leg, sam)[0]
+    s_null = compute_teacher_stats(ts_leg, sam, None)[0]
+    s_empty = compute_teacher_stats(ts_leg, sam, {})[0]
+    check("legacy stats unchanged (open=15, teaching=10, btb=5)",
+          s_none.open == 15 and s_none.teaching == 10
+          and s_none.total_used == 10 and s_none.back_to_back_issues == 5,
+          str(s_none))
+    check("windows None / {} are byte-identical to the two-arg call",
+          s_none == s_null == s_empty)
+    if result_5['status'] == 'success':
+        bad5 = [s for s in result_5['options'][0]['teacherStats']
+                if s['teaching'] + s['studyHall'] + s['open'] != 25]
+        check("legacy e2e teacherStats still cover all 25 blocks", not bad5,
+              str(bad5[:2]))
+    if result_l['status'] == 'success':
+        bad_l = [s for s in result_l['options'][0]['teacherStats']
+                 if s['teaching'] + s['studyHall'] + s['open'] != 40]
+        check("masked e2e stats drop exactly one lunch block per day (45 -> 40)",
+              not bad_l, str(bad_l[:2]))
+
+    # (d) redistribution: a "hole" that is only lunch-adjacent is left alone.
+    # Pat is free Mon B6+B7; with 6 designated lunch there is no BTB issue.
+    set_blocks(NINE_BLOCKS)
+
+    def redis_schedules():
+        ts = {'Pat': {DAYS[0]: {b: (['', 'OPEN'] if b in (6, 7)
+                                    else [G, f'Mon{b}']) for b in B9}}}
+        for i, d in enumerate(DAYS[1:], start=1):
+            ts['Pat'][d] = {b: [G, f'D{i}B{b}'] for b in B9}
+        gs = {G: {d: {b: None for b in B9} for d in DAYS}}
+        for d in DAYS:
+            for b in B9:
+                e = ts['Pat'][d][b]
+                if e[1] != 'OPEN':
+                    gs[G][d][b] = ['Pat', e[1]]
+        return ts, gs
+
+    ts_r, gs_r = redis_schedules()
+    # control: without lunch windows the (6,7) hole attracts a move
+    ts_ctrl, gs_ctrl = copy.deepcopy(ts_r), copy.deepcopy(gs_r)
+    redistribute_open_blocks(ts_ctrl, gs_ctrl, ['Pat'])
+    check("control: without lunch windows the (6,7) hole attracts a move",
+          ts_ctrl != ts_r)
+    # lunch-aware: 6 designated -> no BTB -> redistribution does nothing
+    ts_l2, gs_l2 = copy.deepcopy(ts_r), copy.deepcopy(gs_r)
+    redistribute_open_blocks(ts_l2, gs_l2, ['Pat'],
+                             teacher_lunch_windows={'Pat': {6}})
+    check("lunch-aware: free 6,7 with 6 designated -> no BTB -> no move",
+          ts_l2 == ts_r and gs_l2 == gs_r)
+
+test_22()
 
 
 fails = [n for n, ok in results if not ok]

@@ -1845,6 +1845,21 @@ function ClassesPageContent() {
     teachableBlocksByGrade.set(g.id, getTeachableBlocksForGrade(timetableTemplate, g.id))
   }
 
+  // When the template masks ANY grade's blocks (per-grade lunch windows),
+  // every teacher is guaranteed a designated daily Lunch block, so weekly
+  // teaching capacity loses one block per available day. Assumption: a
+  // teacher's own available_blocks restriction is independent of where their
+  // lunch lands (we can't know the designated block here), so the one-per-day
+  // adjustment applies uniformly on top of their existing days x blocks math.
+  const hasLunchMasking = grades.some(
+    g => (teachableBlocksByGrade.get(g.id)?.length ?? templateBlocks.length) < templateBlocks.length
+  )
+  const teacherMaxBlocks = (t: { available_days?: string[] | null; available_blocks?: number[] | null }) => {
+    const days = t.available_days?.length ?? 5
+    const blocksPerDay = t.available_blocks?.length ?? templateBlocks.length
+    return Math.max(0, days * blocksPerDay - (hasLunchMasking ? days : 0))
+  }
+
   // Blocks a class can never occupy — any block that isn't teachable for one of its
   // grades (e.g. that band's lunch block under the 9-block format)
   function lunchBlocksForClass(cls: ClassEntry): number[] {
@@ -2620,7 +2635,7 @@ Maria\t6th-11th Elective\tSpanish 101\t1\tMon Block 5\t`}
             }
             const fullTimeTeachers = teachers.filter(t => isFullTime(t.status))
             const hasIssue = fullTimeTeachers.some(t => {
-              const maxBlocks = (t.available_days?.length ?? 5) * (t.available_blocks?.length ?? templateBlocks.length)
+              const maxBlocks = teacherMaxBlocks(t)
               const blocks = teacherBlocks.get(t.id) || 0
               return blocks > maxBlocks || blocks < maxBlocks - 5
             })
@@ -2656,7 +2671,7 @@ Maria\t6th-11th Elective\tSpanish 101\t1\tMon Block 5\t`}
                             .sort((a, b) => a.name.localeCompare(b.name))
                             .map(t => {
                               const blocks = teacherBlocks.get(t.id) || 0
-                              const maxBlocks = (t.available_days?.length ?? 5) * (t.available_blocks?.length ?? templateBlocks.length)
+                              const maxBlocks = teacherMaxBlocks(t)
                               const isOver = blocks > maxBlocks
                               const isUnderAllocated = blocks < maxBlocks - 5
                               return (
@@ -2687,7 +2702,7 @@ Maria\t6th-11th Elective\tSpanish 101\t1\tMon Block 5\t`}
                             .sort((a, b) => a.name.localeCompare(b.name))
                             .map(t => {
                               const blocks = teacherBlocks.get(t.id) || 0
-                              const maxBlocks = (t.available_days?.length ?? 5) * (t.available_blocks?.length ?? templateBlocks.length)
+                              const maxBlocks = teacherMaxBlocks(t)
                               return (
                                 <div key={t.id} className="px-3 py-1.5 flex items-center justify-between text-xs hover:bg-slate-50">
                                   <span className="text-slate-500 truncate">{t.name}</span>

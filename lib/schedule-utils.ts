@@ -268,6 +268,7 @@ export function getBlockType(entry: ScheduleEntry): typeof BLOCK_TYPE_OPEN | typ
 
 import type { TeacherSchedule, GradeSchedule, OpenBlockLabels, ScheduleOption, StudyHallAssignment } from "./types"
 import { BLOCKS } from "./types"
+import { parseGradeDisplayToNames } from "./grade-utils"
 
 const DAYS_ORDER = ["Mon", "Tues", "Wed", "Thurs", "Fri"]
 /** Legacy 5-block fallback, used only when schedule data contains no block keys. */
@@ -542,11 +543,139 @@ export function buildCotaughtGroups(classes: CotaughtDisplayClass[]): CotaughtGr
 }
 
 // -----------------------------------------------------------------------------
-// Recomputes teacherStats, backToBackIssues, and studyHallsPlaced from schedule data.
-// Use this after ANY modification to a ScheduleOption (regen, swap, freeform, study hall changes).
+// TEACHER LUNCH DESIGNATION
+// School decision: a teacher's daily lunch is NOT an OPEN block. On quarters
+// whose timetable template masks per-grade blocks (each band's lunch window),
+// the solvers guarantee every teacher at least one free block among their
+// candidate lunch windows each day, and designate EXACTLY ONE of them as
+// Lunch. Lunch-aware stats (open counts, back-to-back OPEN) exclude the
+// designated block. The designation rule below is locked to match both
+// solvers (backend/solver.py designate_teacher_lunch and the JS fallback).
 // -----------------------------------------------------------------------------
 
-export function recalculateOptionStats(option: ScheduleOption): ScheduleOption {
+export interface LunchContext {
+  /**
+   * Teachable blocks per grade, keyed by grade DISPLAY NAME (the same key
+   * convention as schedule entries). A template block missing from a grade's
+   * list is that band's lunch window.
+   */
+  teachableBlocksByGrade: Record<string, number[]>
+  /** Full block list of the quarter's timetable template. */
+  blocks: number[]
+}
+
+/**
+ * A teacher's candidate lunch windows, derived from the grades they actually
+ * teach in this schedule: the union, over those grades, of template blocks
+ * NOT teachable for the grade. Mirrors the history page's no-lunch validation
+ * (taught grades are parsed from scheduled-class entries' grade displays;
+ * OPEN blocks and study halls don't establish taught grades). Returns []
+ * when nothing can be derived (teacher teaches no classes, or none of their
+ * grades are masked) — callers then skip lunch designation entirely,
+ * preserving legacy behavior for that teacher.
+ */
+export function getTeacherLunchCandidates(
+  schedule: TeacherSchedule | undefined | null,
+  lunchContext: LunchContext
+): number[] {
+  if (!schedule) return []
+  const gradeNames = Object.keys(lunchContext.teachableBlocksByGrade)
+  if (gradeNames.length === 0) return []
+
+  const taughtGrades = new Set<string>()
+  for (const day of DAYS_ORDER) {
+    for (const block of lunchContext.blocks) {
+      const entry = schedule[day]?.[block]
+      if (!entry || !isScheduledClass(entry[1])) continue
+      for (const g of parseGradeDisplayToNames(entry[0], gradeNames)) {
+        taughtGrades.add(g)
+      }
+    }
+  }
+
+  const candidates = new Set<number>()
+  for (const grade of taughtGrades) {
+    const teachable = lunchContext.teachableBlocksByGrade[grade]
+    if (!teachable) continue
+    for (const block of lunchContext.blocks) {
+      if (!teachable.includes(block)) candidates.add(block)
+    }
+  }
+  return [...candidates].sort((a, b) => a - b)
+}
+
+/**
+ * Pick the teacher's designated Lunch block for ONE day.
+ *
+ * Rule (locked, matches both solvers): among the day's FREE candidate
+ * windows (cell empty or OPEN; Study Hall counts as occupied), pick the
+ * block whose exclusion from the day's "open" pattern minimizes that day's
+ * back-to-back-OPEN count, ties broken by lowest block number. For the
+ * pattern, empty/OPEN/Study Hall all count as open (a study hall is "open"
+ * for back-to-back purposes but not free for lunch). Adjacency is positional
+ * in blocksOrder.
+ *
+ * Returns null when no candidate window is free that day (guaranteed not to
+ * happen for solver output, but manual edits can occupy all windows) — then
+ * nothing is designated and the day's stats count exactly as before.
+ */
+export function designateTeacherLunch(
+  daySchedule: { [block: number]: [string, string] | null } | undefined | null,
+  candidates: number[],
+  blocksOrder: number[]
+): number | null {
+  if (!candidates || candidates.length === 0) return null
+  const sched = daySchedule || {}
+
+  const free = candidates
+    .filter(b => {
+      if (!blocksOrder.includes(b)) return false
+      const entry = sched[b]
+      return !entry || isOpenBlock(entry[1])
+    })
+    .sort((a, b) => a - b)
+  if (free.length === 0) return null
+
+  // Day "open" pattern: empty, OPEN, and Study Hall all count as open
+  const openFlags = blocksOrder.map(b => {
+    const entry = sched[b]
+    return !entry || isOpenBlock(entry[1]) || isStudyHall(entry[1])
+  })
+
+  const dayBtbExcluding = (excludeIdx: number): number => {
+    let count = 0
+    for (let i = 0; i < blocksOrder.length - 1; i++) {
+      if (openFlags[i] && i !== excludeIdx && openFlags[i + 1] && i + 1 !== excludeIdx) {
+        count++
+      }
+    }
+    return count
+  }
+
+  let best: number | null = null
+  let bestCount: number | null = null
+  for (const b of free) {
+    const c = dayBtbExcluding(blocksOrder.indexOf(b))
+    if (bestCount === null || c < bestCount) {
+      best = b
+      bestCount = c
+    }
+  }
+  return best
+}
+
+// -----------------------------------------------------------------------------
+// Recomputes teacherStats, backToBackIssues, and studyHallsPlaced from schedule data.
+// Use this after ANY modification to a ScheduleOption (regen, swap, freeform, study hall changes).
+//
+// lunchContext (optional): pass on template-driven quarters with per-grade
+// block masking so each teacher-day's designated Lunch block (see
+// designateTeacherLunch) is excluded from `open` and back-to-back counts,
+// keeping post-edit stats aligned with the solvers' lunch-aware stats.
+// Omitting it preserves the exact legacy behavior (save paths, legacy quarters).
+// -----------------------------------------------------------------------------
+
+export function recalculateOptionStats(option: ScheduleOption, lunchContext?: LunchContext): ScheduleOption {
   // Derive the block list from the option's own data so stats are correct for
   // any block format (5-block legacy, 9-block, ...). Iterating the sorted list
   // positionally means two blocks are "back-to-back" only when they are
@@ -555,13 +684,22 @@ export function recalculateOptionStats(option: ScheduleOption): ScheduleOption {
 
   const teacherStats = option.teacherStats.map(stat => {
     const schedule = option.teacherSchedules[stat.teacher]
+    // Candidate lunch windows for this teacher; [] disables lunch handling
+    // for this teacher (legacy callers and legacy quarters stay byte-identical).
+    const lunchCandidates = lunchContext ? getTeacherLunchCandidates(schedule, lunchContext) : []
     let teaching = 0, studyHall = 0, open = 0, backToBackIssues = 0
 
     for (const day of DAYS_ORDER) {
+      const lunchBlock = lunchCandidates.length > 0
+        ? designateTeacherLunch(schedule?.[day], lunchCandidates, blocksOrder)
+        : null
       let prevWasOpen = false
       for (const block of blocksOrder) {
         const entry = schedule?.[day]?.[block]
-        if (!entry || isOpenBlock(entry[1])) {
+        if (block === lunchBlock) {
+          // Designated lunch: neither open nor used, and it breaks OPEN chains
+          prevWasOpen = false
+        } else if (!entry || isOpenBlock(entry[1])) {
           open++
           if (prevWasOpen && isFullTime(stat.status)) backToBackIssues++
           prevWasOpen = true

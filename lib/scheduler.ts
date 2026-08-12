@@ -237,6 +237,55 @@ function isLunchWindowFree(
 }
 
 /**
+ * Designate the teacher's LUNCH block for one day (school decision: a
+ * teacher's daily lunch is NOT an OPEN block). Among the candidate lunch
+ * windows that are FREE (no class or study hall), exactly one is designated:
+ * the block whose treat-as-not-open exclusion minimizes that day's
+ * back-to-back-OPEN count, ties broken by lowest block number.
+ *
+ * Returns the designated block number, or null when no candidate window is
+ * free on this day (or the candidate set is empty). Purely derived from the
+ * day's free pattern — nothing is written into the schedule; cells stay OPEN.
+ */
+function designateTeacherLunch(
+  daySchedule: TeacherSchedule[string] | undefined,
+  candidates: Set<number>
+): number | null {
+  if (candidates.size === 0) return null;
+
+  // Openness per active block (OPEN and Study Hall both count as open for
+  // back-to-back purposes, matching countBackToBack)
+  const openFlags = activeBlocks.map(b => {
+    const entry = daySchedule?.[b];
+    return !entry || !isScheduledClass(entry[1]);
+  });
+
+  let best: number | null = null;
+  let bestBtb = Infinity;
+  // Ascending order so ties resolve to the lowest block number
+  for (const b of [...candidates].sort((x, y) => x - y)) {
+    const idx = activeBlocks.indexOf(b);
+    if (idx === -1) continue;
+    const entry = daySchedule?.[b];
+    if (entry && isOccupiedBlock(entry[1])) continue; // not free (class or study hall)
+
+    // Day BTB-OPEN count with block b treated as not-open
+    let btb = 0;
+    let prevOpen = false;
+    for (let i = 0; i < openFlags.length; i++) {
+      const currOpen = i === idx ? false : openFlags[i];
+      if (prevOpen && currOpen) btb++;
+      prevOpen = currOpen;
+    }
+    if (btb < bestBtb) {
+      bestBtb = btb;
+      best = b;
+    }
+  }
+  return best;
+}
+
+/**
  * Fail-closed preflight: if a teacher's fixed slots alone fill every one of
  * their candidate lunch windows on some day, no schedule can leave them a
  * lunch break — throw rather than silently produce an infeasible/violating
@@ -1781,13 +1830,24 @@ function fillOpenBlocks(teacherSchedules: Record<string, TeacherSchedule>): void
   });
 }
 
-function countBackToBack(teacherSchedules: Record<string, TeacherSchedule>, teacher: string): number {
+function countBackToBack(
+  teacherSchedules: Record<string, TeacherSchedule>,
+  teacher: string,
+  teacherLunch?: Map<string, TeacherLunchInfo>
+): number {
+  // Designated daily lunch is NOT open. The designation is derived from the
+  // day's free pattern, so it is recomputed here on every call — callers that
+  // mutate schedules (redistribution acceptance) automatically see the
+  // post-move designation.
+  const candidates = teacherLunch?.get(teacher)?.candidates;
   let count = 0;
   DAYS.forEach(day => {
+    const daySchedule = teacherSchedules[teacher]?.[day];
+    const lunchBlock = candidates ? designateTeacherLunch(daySchedule, candidates) : null;
     let prevOpen = false;
     activeBlocks.forEach(block => {
-      const entry = teacherSchedules[teacher]?.[day]?.[block];
-      const currOpen = !entry || !isScheduledClass(entry[1]);
+      const entry = daySchedule?.[block];
+      const currOpen = block !== lunchBlock && (!entry || !isScheduledClass(entry[1]));
       if (prevOpen && currOpen) count++;
       prevOpen = currOpen;
     });
@@ -1826,15 +1886,23 @@ function redistributeOpenBlocks(
   immovableClasses?: Set<string> // "teacher|subject" keys that must never be moved (fixed-slot classes)
 ): void {
   const getBackToBackSlots = (teacher: string) => {
+    // Mirror countBackToBack: the designated daily lunch is NOT open, so an
+    // adjacency that exists only through the lunch block is not a BTB hole
+    // and must never be targeted for a move.
+    const candidates = teacherLunch?.get(teacher)?.candidates;
     const pairs: { day: string; block: number }[] = [];
     DAYS.forEach(day => {
+      const daySchedule = teacherSchedules[teacher][day];
+      const lunchBlock = candidates ? designateTeacherLunch(daySchedule, candidates) : null;
       for (let i = 0; i < activeBlocks.length - 1; i++) {
-        const entry1 = teacherSchedules[teacher][day][activeBlocks[i]];
-        const entry2 = teacherSchedules[teacher][day][activeBlocks[i + 1]];
-        const isOpen1 = !entry1 || !isScheduledClass(entry1[1]);
-        const isOpen2 = !entry2 || !isScheduledClass(entry2[1]);
+        const b1 = activeBlocks[i];
+        const b2 = activeBlocks[i + 1];
+        const entry1 = daySchedule[b1];
+        const entry2 = daySchedule[b2];
+        const isOpen1 = b1 !== lunchBlock && (!entry1 || !isScheduledClass(entry1[1]));
+        const isOpen2 = b2 !== lunchBlock && (!entry2 || !isScheduledClass(entry2[1]));
         if (isOpen1 && isOpen2) {
-          pairs.push({ day, block: activeBlocks[i + 1] });
+          pairs.push({ day, block: b2 });
         }
       }
     });
@@ -2009,7 +2077,7 @@ function redistributeOpenBlocks(
   // blocks while vacating two can never oscillate, because every accepted
   // move lowers the count and no move can raise it back for free.
   const tryPairMove = (teacher: string): boolean => {
-    const btbBefore = countBackToBack(teacherSchedules, teacher);
+    const btbBefore = countBackToBack(teacherSchedules, teacher, teacherLunch);
     if (btbBefore === 0) return false;
 
     for (const sourceDay of DAYS) {
@@ -2121,7 +2189,7 @@ function redistributeOpenBlocks(
               gradeSchedules[g][destDay][p2] = [teacher, subject];
             });
 
-            if (countBackToBack(teacherSchedules, teacher) < btbBefore) {
+            if (countBackToBack(teacherSchedules, teacher, teacherLunch) < btbBefore) {
               return true;
             }
 
@@ -2196,21 +2264,90 @@ export function __testRedistributeOpenBlocks(
   redistributeOpenBlocks(teacherSchedules, gradeSchedules, fullTimeTeachers, teacherLunch, opts.immovableClasses);
 }
 
+/** Build a TeacherLunchInfo map from explicit candidate sets (test-only). */
+function lunchInfoFromCandidates(
+  lunchCandidates: Record<string, number[]>
+): Map<string, TeacherLunchInfo> {
+  const map = new Map<string, TeacherLunchInfo>();
+  for (const [teacher, cands] of Object.entries(lunchCandidates)) {
+    const candidates = new Set(cands);
+    const candidateIdxs: number[] = [];
+    activeBlocks.forEach((b, idx) => {
+      if (candidates.has(b)) candidateIdxs.push(idx);
+    });
+    map.set(teacher, { candidates, candidateIdxs, enforced: candidates.size > 0 });
+  }
+  return map;
+}
+
+/**
+ * TEST-ONLY: run lunch designation for a single day-schedule under an
+ * explicit block configuration. Not used by application code.
+ */
+export function __testDesignateTeacherLunch(
+  daySchedule: TeacherSchedule[string] | undefined,
+  candidates: number[],
+  blocks?: number[]
+): number | null {
+  applyBlockState(resolveBlockState(blocks));
+  return designateTeacherLunch(daySchedule, new Set(candidates));
+}
+
+/**
+ * TEST-ONLY: lunch-aware BTB count for one teacher with explicit candidate
+ * lunch windows. Omit lunchCandidates for legacy (lunch-unaware) counting.
+ */
+export function __testCountBackToBack(
+  teacherSchedules: Record<string, TeacherSchedule>,
+  teacher: string,
+  opts: { blocks?: number[]; lunchCandidates?: Record<string, number[]> } = {}
+): number {
+  applyBlockState(resolveBlockState(opts.blocks));
+  const teacherLunch = opts.lunchCandidates
+    ? lunchInfoFromCandidates(opts.lunchCandidates)
+    : undefined;
+  return countBackToBack(teacherSchedules, teacher, teacherLunch);
+}
+
+/**
+ * TEST-ONLY: teacher stats with explicit candidate lunch windows. Omit
+ * lunchCandidates for legacy (lunch-unaware) stats.
+ */
+export function __testCalculateStats(
+  teacherSchedules: Record<string, TeacherSchedule>,
+  teachers: Teacher[],
+  fullTimeTeachers: string[],
+  opts: { blocks?: number[]; lunchCandidates?: Record<string, number[]> } = {}
+): TeacherStat[] {
+  applyBlockState(resolveBlockState(opts.blocks));
+  const teacherLunch = opts.lunchCandidates
+    ? lunchInfoFromCandidates(opts.lunchCandidates)
+    : undefined;
+  return calculateStats(teacherSchedules, teachers, fullTimeTeachers, teacherLunch);
+}
+
 function calculateStats(
   teacherSchedules: Record<string, TeacherSchedule>,
   teachers: Teacher[],
-  fullTimeTeachers: string[]
+  fullTimeTeachers: string[],
+  teacherLunch?: Map<string, TeacherLunchInfo>
 ): TeacherStat[] {
   const fullTimeSet = new Set(fullTimeTeachers);
 
   return teachers.map(t => {
     let teaching = 0, studyHall = 0, open = 0;
+    const candidates = teacherLunch?.get(t.name)?.candidates;
 
     DAYS.forEach(day => {
+      const daySchedule = teacherSchedules[t.name]?.[day];
+      // A teacher's daily lunch is NOT OPEN: exclude the designated lunch
+      // block (at most one per day) from the open count. Cells stay OPEN in
+      // the schedule itself — only the count changes.
+      const lunchBlock = candidates ? designateTeacherLunch(daySchedule, candidates) : null;
       activeBlocks.forEach(block => {
-        const entry = teacherSchedules[t.name]?.[day]?.[block];
+        const entry = daySchedule?.[block];
         if (!entry || isOpenBlock(entry[1])) {
-          open++;
+          if (block !== lunchBlock) open++;
         } else if (isStudyHall(entry[1])) {
           studyHall++;
         } else {
@@ -2226,7 +2363,7 @@ function calculateStats(
       studyHall,
       open,
       totalUsed: teaching + studyHall,
-      backToBackIssues: fullTimeSet.has(t.name) ? countBackToBack(teacherSchedules, t.name) : 0,
+      backToBackIssues: fullTimeSet.has(t.name) ? countBackToBack(teacherSchedules, t.name, teacherLunch) : 0,
     };
   }).sort((a, b) => b.totalUsed - a.totalUsed);
 }
@@ -2698,7 +2835,7 @@ export async function generateSchedules(
 
     // Only count back-to-back issues if the rule is enabled
     const totalBtb = isRuleEnabled(rules, 'no_btb_open')
-      ? fullTime.reduce((sum, t) => sum + countBackToBack(ts, t), 0)
+      ? fullTime.reduce((sum, t) => sum + countBackToBack(ts, t, teacherLunch), 0)
       : 0;
 
     // Count spread_open issues (multiple OPEN on same day) if rule is enabled
@@ -2831,7 +2968,7 @@ export async function generateSchedules(
       teacherSchedules: c.teacherSchedules,
       gradeSchedules: c.gradeSchedules,
       studyHallAssignments: c.shAssignments,
-      teacherStats: calculateStats(c.teacherSchedules, teachers, fullTime),
+      teacherStats: calculateStats(c.teacherSchedules, teachers, fullTime, teacherLunch),
     })),
     status: 'success',
   };
@@ -3051,7 +3188,7 @@ export function reassignStudyHalls(
 
     // Calculate stats
     const fullTime = teachers.filter(t => t.status === 'full-time').map(t => t.name);
-    const totalBtb = fullTime.reduce((sum, t) => sum + countBackToBack(teacherSchedules, t), 0);
+    const totalBtb = fullTime.reduce((sum, t) => sum + countBackToBack(teacherSchedules, t, teacherLunch), 0);
 
     const newOption: ScheduleOption = {
       optionNumber: option.optionNumber,
@@ -3061,7 +3198,7 @@ export function reassignStudyHalls(
       teacherSchedules,
       gradeSchedules,
       studyHallAssignments: shAssignments,
-      teacherStats: calculateStats(teacherSchedules, teachers, fullTime),
+      teacherStats: calculateStats(teacherSchedules, teachers, fullTime, teacherLunch),
     };
 
     return {

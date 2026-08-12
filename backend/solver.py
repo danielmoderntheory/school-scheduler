@@ -1672,39 +1672,57 @@ def redistribute_open_blocks(teacher_schedules: dict, grade_schedules: dict,
                 return False
         return True
 
+    def day_btb_count(teacher: str, day_sched: dict) -> int:
+        """Lunch-aware back-to-back OPEN count for one day's schedule dict.
+        The teacher's designated lunch block (recomputed for the given
+        pattern) counts as NOT open."""
+        cand = (teacher_lunch_windows or {}).get(teacher)
+        lunch_block = designate_teacher_lunch(day_sched, cand) if cand else None
+        count = 0
+        for i in range(len(BLOCKS) - 1):
+            b1, b2 = BLOCKS[i], BLOCKS[i + 1]
+            e1 = day_sched.get(b1)
+            e2 = day_sched.get(b2)
+            is_open1 = ((not e1 or (len(e1) > 1 and e1[1] in ('OPEN', 'Study Hall')))
+                        and b1 != lunch_block)
+            is_open2 = ((not e2 or (len(e2) > 1 and e2[1] in ('OPEN', 'Study Hall')))
+                        and b2 != lunch_block)
+            if is_open1 and is_open2:
+                count += 1
+        return count
+
     def get_back_to_back_slots(teacher: str) -> list[tuple[str, int]]:
-        """Get (day, block) pairs where there's a back-to-back OPEN issue."""
+        """Get (day, block) pairs where there's a back-to-back OPEN issue.
+        The teacher's designated lunch block is NOT open: it breaks OPEN
+        chains, so a "hole" that is only lunch-adjacent is not an issue."""
         pairs = []
         schedule = teacher_schedules.get(teacher, {})
+        cand = (teacher_lunch_windows or {}).get(teacher)
         for day in DAYS:
+            day_sched = schedule.get(day, {})
+            lunch_block = designate_teacher_lunch(day_sched, cand) if cand else None
             for i in range(len(BLOCKS) - 1):
                 b1, b2 = BLOCKS[i], BLOCKS[i + 1]
-                entry1 = schedule.get(day, {}).get(b1)
-                entry2 = schedule.get(day, {}).get(b2)
-                is_open1 = not entry1 or (len(entry1) > 1 and entry1[1] in ('OPEN', 'Study Hall'))
-                is_open2 = not entry2 or (len(entry2) > 1 and entry2[1] in ('OPEN', 'Study Hall'))
+                entry1 = day_sched.get(b1)
+                entry2 = day_sched.get(b2)
+                is_open1 = (not entry1 or (len(entry1) > 1 and entry1[1] in ('OPEN', 'Study Hall'))) and b1 != lunch_block
+                is_open2 = (not entry2 or (len(entry2) > 1 and entry2[1] in ('OPEN', 'Study Hall'))) and b2 != lunch_block
                 if is_open1 and is_open2:
                     pairs.append((day, b2))  # Return the second slot to try to fill
         return pairs
 
     def would_create_btb(teacher: str, day: str, block: int) -> bool:
-        """Check if putting an OPEN at (day, block) would create a BTB issue."""
-        block_idx = BLOCKS.index(block)
-        schedule = teacher_schedules.get(teacher, {}).get(day, {})
+        """Check if putting an OPEN at (day, block) would create a BTB issue.
 
-        # Check previous block
-        if block_idx > 0:
-            prev_entry = schedule.get(BLOCKS[block_idx - 1])
-            if not prev_entry or (len(prev_entry) > 1 and prev_entry[1] in ('OPEN', 'Study Hall')):
-                return True
-
-        # Check next block
-        if block_idx < len(BLOCKS) - 1:
-            next_entry = schedule.get(BLOCKS[block_idx + 1])
-            if not next_entry or (len(next_entry) > 1 and next_entry[1] in ('OPEN', 'Study Hall')):
-                return True
-
-        return False
+        Lunch-aware: the day's BTB count is compared before/after the
+        hypothetical vacate, with the lunch designation recomputed for the
+        new pattern (freeing a candidate window can move the designation).
+        Without lunch windows this is exactly the old neighbor check."""
+        day_sched = teacher_schedules.get(teacher, {}).get(day, {})
+        before = day_btb_count(teacher, day_sched)
+        hypothetical = dict(day_sched)
+        hypothetical[block] = ['', 'OPEN']
+        return day_btb_count(teacher, hypothetical) > before
 
     def class_blocks_on_day(teacher: str, day: str, grade_display: str,
                             subject: str) -> list:
@@ -1873,7 +1891,8 @@ def redistribute_open_blocks(teacher_schedules: dict, grade_schedules: dict,
                     for g in grades if g in grade_schedules
                 }
 
-                before = count_back_to_back(teacher_schedules, teacher)
+                lunch_cand = (teacher_lunch_windows or {}).get(teacher)
+                before = count_back_to_back(teacher_schedules, teacher, lunch_cand)
                 for d, b in vacated:
                     teacher_schedules[teacher][d][b] = ['', 'OPEN']
                 for tb in tgt_pair:
@@ -1886,7 +1905,7 @@ def redistribute_open_blocks(teacher_schedules: dict, grade_schedules: dict,
                             grade_schedules[g][d][b] = None
                     for tb in tgt_pair:
                         grade_schedules[g].setdefault(issue_day, {})[tb] = [teacher, subject]
-                after = count_back_to_back(teacher_schedules, teacher)
+                after = count_back_to_back(teacher_schedules, teacher, lunch_cand)
                 if after < before:
                     return True
 
@@ -2215,24 +2234,90 @@ def fill_open_blocks(teacher_schedules: dict):
                     teacher_schedules[teacher][day][block] = ['', 'OPEN']
 
 
-def count_back_to_back(teacher_schedules: dict, teacher: str) -> int:
+def designate_teacher_lunch(teacher_schedule_day: dict, candidates) -> Optional[int]:
+    """Pick the teacher's designated Lunch block for ONE day.
+
+    A teacher's daily lunch is NOT considered OPEN (school decision): exactly
+    one FREE candidate-lunch-window block per day is designated as Lunch, and
+    all lunch-aware counters (open counts, back-to-back OPEN) exclude it.
+
+    Rule (locked, matches the JS solver): among the day's free candidate
+    windows (cell empty or OPEN; Study Hall counts as occupied), pick the
+    block whose exclusion from the day's "open" pattern minimizes that day's
+    back-to-back-OPEN count, ties broken by lowest block number.
+
+    Returns None when candidates is empty/None or no candidate window is
+    free on this day (shouldn't happen post-constraint, but manual/locked
+    data may) - then no block is designated.
+    """
+    if not candidates:
+        return None
+    day_sched = teacher_schedule_day or {}
+
+    free = []
+    for b in candidates:
+        if b not in BLOCKS:
+            continue
+        entry = day_sched.get(b)
+        if entry is None or (len(entry) > 1 and entry[1] == 'OPEN'):
+            free.append(b)
+    if not free:
+        return None
+
+    # Day "open" pattern: empty, OPEN, and Study Hall all count as open for
+    # back-to-back purposes (Study Hall is open for BTB but not free for lunch)
+    open_flags = []
+    for b in BLOCKS:
+        entry = day_sched.get(b)
+        open_flags.append(
+            entry is None or (len(entry) > 1 and entry[1] in ('OPEN', 'Study Hall'))
+        )
+
+    def day_btb_excluding(exclude_idx: int) -> int:
+        count = 0
+        for i in range(len(BLOCKS) - 1):
+            if (open_flags[i] and i != exclude_idx
+                    and open_flags[i + 1] and (i + 1) != exclude_idx):
+                count += 1
+        return count
+
+    best, best_count = None, None
+    for b in sorted(free):
+        c = day_btb_excluding(BLOCKS.index(b))
+        if best_count is None or c < best_count:
+            best, best_count = b, c
+    return best
+
+
+def count_back_to_back(teacher_schedules: dict, teacher: str,
+                       lunch_candidates=None) -> int:
     """Count back-to-back OPEN blocks for a teacher.
 
     Both OPEN and Study Hall count as "open" for this calculation, since
     consecutive free/supervision blocks should be minimized.
+
+    lunch_candidates: optional set of the teacher's candidate lunch window
+    block numbers. When provided, each day's designated Lunch block (see
+    designate_teacher_lunch) is treated as NOT open - it breaks OPEN chains.
     """
     count = 0
     schedule = teacher_schedules.get(teacher, {})
 
     for day in DAYS:
+        day_sched = schedule.get(day, {})
+        lunch_block = (designate_teacher_lunch(day_sched, lunch_candidates)
+                       if lunch_candidates else None)
         for i in range(len(BLOCKS) - 1):
             b1, b2 = BLOCKS[i], BLOCKS[i + 1]
-            cell1 = schedule.get(day, {}).get(b1)
-            cell2 = schedule.get(day, {}).get(b2)
+            cell1 = day_sched.get(b1)
+            cell2 = day_sched.get(b2)
 
-            # Both OPEN and Study Hall count as "open" for BTB detection
-            is_open1 = cell1 and len(cell1) > 1 and cell1[1] in ('OPEN', 'Study Hall')
-            is_open2 = cell2 and len(cell2) > 1 and cell2[1] in ('OPEN', 'Study Hall')
+            # Both OPEN and Study Hall count as "open" for BTB detection;
+            # the designated lunch block counts as NOT open
+            is_open1 = (cell1 and len(cell1) > 1 and cell1[1] in ('OPEN', 'Study Hall')
+                        and b1 != lunch_block)
+            is_open2 = (cell2 and len(cell2) > 1 and cell2[1] in ('OPEN', 'Study Hall')
+                        and b2 != lunch_block)
 
             if is_open1 and is_open2:
                 count += 1
@@ -2264,8 +2349,17 @@ def count_same_day_open(teacher_schedules: dict, teacher: str) -> int:
     return count
 
 
-def compute_teacher_stats(teacher_schedules: dict, teachers: list[Teacher]) -> list[TeacherStat]:
-    """Compute statistics for each teacher."""
+def compute_teacher_stats(teacher_schedules: dict, teachers: list[Teacher],
+                          teacher_lunch_windows: dict = None) -> list[TeacherStat]:
+    """Compute statistics for each teacher.
+
+    teacher_lunch_windows: optional dict mapping teacher name -> set of
+    candidate lunch block numbers. When provided, each day's designated
+    Lunch block (see designate_teacher_lunch) is excluded from the `open`
+    count (it is neither teaching nor study hall - simply not counted) and
+    from back-to-back OPEN detection. Legacy requests (no windows) are
+    byte-identical to the previous behavior.
+    """
     stats = []
     teacher_status = {t.name: t.status for t in teachers}
 
@@ -2273,10 +2367,16 @@ def compute_teacher_stats(teacher_schedules: dict, teachers: list[Teacher]) -> l
         teaching = 0
         study_hall = 0
         open_blocks = 0
+        lunch_candidates = (teacher_lunch_windows or {}).get(teacher)
 
         for day in DAYS:
+            day_sched = schedule.get(day, {})
+            lunch_block = (designate_teacher_lunch(day_sched, lunch_candidates)
+                           if lunch_candidates else None)
             for block in BLOCKS:
-                cell = schedule.get(day, {}).get(block)
+                cell = day_sched.get(block)
+                if block == lunch_block:
+                    continue  # designated lunch: neither open nor used
                 if cell is None:
                     open_blocks += 1
                 elif len(cell) > 1:
@@ -2287,7 +2387,7 @@ def compute_teacher_stats(teacher_schedules: dict, teachers: list[Teacher]) -> l
                     else:
                         teaching += 1
 
-        btb = count_back_to_back(teacher_schedules, teacher)
+        btb = count_back_to_back(teacher_schedules, teacher, lunch_candidates)
 
         stats.append(TeacherStat(
             teacher=teacher,
@@ -3015,7 +3115,12 @@ def generate_schedules(
             # Calculate score (lower is better)
             # Only count back-to-back issues if the rule is enabled
             if is_rule_enabled(rules, 'no_btb_open'):
-                total_btb = sum(count_back_to_back(ts, t) for t in full_time_names)
+                # Lunch-aware: each teacher's designated daily lunch block is
+                # not OPEN, so it never counts toward back-to-back issues
+                total_btb = sum(
+                    count_back_to_back(ts, t, (teacher_lunch_windows or {}).get(t))
+                    for t in full_time_names
+                )
             else:
                 total_btb = 0  # Don't penalize for BTB if rule is disabled
 
@@ -3114,7 +3219,8 @@ def generate_schedules(
     options = []
     solutions_to_use = unique[skip_top_solutions:skip_top_solutions + num_options] if skip_top_solutions > 0 else unique[:num_options]
     for i, c in enumerate(solutions_to_use):
-        stats = compute_teacher_stats(c['teacher_schedules'], teacher_objs)
+        stats = compute_teacher_stats(c['teacher_schedules'], teacher_objs,
+                                      teacher_lunch_windows)
 
         options.append({
             'optionNumber': i + 1,

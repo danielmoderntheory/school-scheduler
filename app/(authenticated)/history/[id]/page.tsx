@@ -43,7 +43,7 @@ import type { ScheduleOption, TeacherSchedule, GradeSchedule, Teacher, FloatingB
 import { resolveRowsForGrade, getTemplateBlocks, getTeachableBlocksForGrade, getPairableBlocksForGrade } from "@/lib/timetable-utils"
 import { parseClassesFromSnapshot, parseTeachersFromSnapshot, parseRulesFromSnapshot, hasValidSnapshots, detectClassChanges, detectTeacherChanges, applyTeacherRenames, applyTeacherChangesToSnapshot, computeExpectedTeachingSessions, findMismatchedTeachers, type GenerationStats, type ChangeDetectionResult, type CurrentClass, type ClassSnapshot, type TeacherSnapshot, type TeacherChangeResult } from "@/lib/snapshot-utils"
 import { parseGradeDisplayToNumbers, parseGradeDisplayToNames, gradesOverlap, gradesEqual, gradeNumToDisplay, isClassElective, isClassCotaught, shouldIgnoreGradeConflict, formatGradeDisplayCompact } from "@/lib/grade-utils"
-import { BLOCK_TYPE_OPEN, BLOCK_TYPE_STUDY_HALL, isOpenBlock, isStudyHall, isScheduledClass, isOccupiedBlock, entryIsOpen, entryIsOccupied, entryIsScheduledClass, isFullTime, setOpenBlockLabel, recalculateOptionStats, getFirstGradeEntry, isMultipleEntryCell } from "@/lib/schedule-utils"
+import { BLOCK_TYPE_OPEN, BLOCK_TYPE_STUDY_HALL, isOpenBlock, isStudyHall, isScheduledClass, isOccupiedBlock, entryIsOpen, entryIsOccupied, entryIsScheduledClass, isFullTime, setOpenBlockLabel, recalculateOptionStats, getFirstGradeEntry, isMultipleEntryCell, type LunchContext, getTeacherLunchCandidates, designateTeacherLunch } from "@/lib/schedule-utils"
 import toast, { successIcon, errorIcon, warningIcon } from "@/lib/toast"
 import { generateSchedules, reassignStudyHalls } from "@/lib/scheduler"
 import { generateSchedulesRemote } from "@/lib/scheduler-remote"
@@ -569,6 +569,20 @@ export default function HistoryDetailPage() {
     }
     return map
   }, [timetableTemplate, templateBlocks, teachableBlocksByGrade, gradesData])
+
+  // Lunch context for stats recalculation. Defined only when the template
+  // actually masks some grade's blocks (per-grade lunch windows) — then every
+  // teacher gets a designated daily Lunch block that is excluded from open /
+  // back-to-back counts. Passed to recalculateOptionStats at every call site
+  // so post-edit stats match the solvers' lunch-aware stats. Undefined on
+  // legacy/unmasked quarters (recalc behaves exactly as before).
+  const lunchContext = useMemo<LunchContext | undefined>(() => {
+    if (!timetableTemplate) return undefined
+    const hasMasking = Object.values(teachableBlocksByGrade).some(
+      tb => tb.length < templateBlocks.length
+    )
+    return hasMasking ? { teachableBlocksByGrade, blocks: templateBlocks } : undefined
+  }, [timetableTemplate, teachableBlocksByGrade, templateBlocks])
 
   // Legal double-period block pairs per grade, keyed by grade DISPLAY NAME
   // (same convention as teachableBlocksByGrade). Empty per grade / overall when
@@ -2052,7 +2066,7 @@ export default function HistoryDetailPage() {
         teacherSchedules: mergedTeacherSchedules,
         gradeSchedules: mergedGradeSchedules,
         studyHallAssignments: mergedStudyHalls,
-      })
+      }, lunchContext)
 
       const allTeachers = Object.keys(originalOption.teacherSchedules)
       const lockedTeacherNames = allTeachers.filter(t => !previewTeachers.has(t))
@@ -2566,7 +2580,7 @@ export default function HistoryDetailPage() {
       teacherSchedules: newTeacherSchedules,
       gradeSchedules: newGradeSchedules,
       studyHallAssignments: newAssignments,
-    })
+    }, lunchContext)
 
     if (clearedCount === 0) {
       toast("No study halls to clear")
@@ -2899,7 +2913,7 @@ export default function HistoryDetailPage() {
       teacherSchedules: newTeacherSchedules,
       gradeSchedules: newGradeSchedules,
       studyHallAssignments: newAssignments,
-    })
+    }, lunchContext)
 
     setPreviewOption(updatedOption)
     setPreviewType("study-hall")
@@ -2954,7 +2968,7 @@ export default function HistoryDetailPage() {
       teacherSchedules: newTeacherSchedules,
       gradeSchedules: newGradeSchedules,
       studyHallAssignments: newAssignments,
-    })
+    }, lunchContext)
 
     setPreviewOption(updatedOption)
     setPreviewType("study-hall")
@@ -3935,7 +3949,7 @@ export default function HistoryDetailPage() {
       teacherSchedules: swapWorkingSchedules.teacherSchedules,
       gradeSchedules: rebuiltGradeSchedules,
       studyHallAssignments: swapWorkingSchedules.studyHallAssignments,
-    })
+    }, lunchContext)
 
     // Define the save function to pass to validation modal
     const doSave = async () => {
@@ -6341,14 +6355,24 @@ export default function HistoryDetailPage() {
           const schedule = option.teacherSchedules[teacher]
           if (!schedule) continue
 
+          // On lunch-masked quarters each day's designated Lunch block is NOT
+          // open — exclude it so this warning agrees with the lunch-aware
+          // stats from the solvers / recalculateOptionStats.
+          const lunchCandidates = lunchContext ? getTeacherLunchCandidates(schedule, lunchContext) : []
+
           let backToBackCount = 0
           for (const day of DAYS) {
+            const lunchBlock = lunchCandidates.length > 0
+              ? designateTeacherLunch(schedule[day], lunchCandidates, templateBlocks)
+              : null
             for (let i = 0; i < templateBlocks.length - 1; i++) {
-              const entry1 = schedule[day]?.[templateBlocks[i]]
-              const entry2 = schedule[day]?.[templateBlocks[i + 1]]
+              const b1 = templateBlocks[i]
+              const b2 = templateBlocks[i + 1]
+              const entry1 = schedule[day]?.[b1]
+              const entry2 = schedule[day]?.[b2]
 
-              const isOpen1 = !entry1 || isOpenBlock(entry1[1]) || isStudyHall(entry1[1])
-              const isOpen2 = !entry2 || isOpenBlock(entry2[1]) || isStudyHall(entry2[1])
+              const isOpen1 = (!entry1 || isOpenBlock(entry1[1]) || isStudyHall(entry1[1])) && b1 !== lunchBlock
+              const isOpen2 = (!entry2 || isOpenBlock(entry2[1]) || isStudyHall(entry2[1])) && b2 !== lunchBlock
 
               if (isOpen1 && isOpen2) {
                 backToBackCount++
@@ -7369,7 +7393,7 @@ export default function HistoryDetailPage() {
       ...(pendingTransfers.length > 0 && updatedStats?.snapshotVersion && {
         builtWithSnapshotVersion: updatedStats.snapshotVersion,
       }),
-    })
+    }, lunchContext)
 
     const hasTransferSnapshots = pendingTransfers.length > 0
 
@@ -8101,6 +8125,7 @@ export default function HistoryDetailPage() {
                     validationIssues={savedScheduleValidationIssues}
                     blocks={templateBlocks}
                     teachableBlocksByGrade={teachableBlocksByGrade}
+                    hasDailyLunch={!!lunchContext}
                   />
                 </div>
               )}
