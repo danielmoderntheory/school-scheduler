@@ -270,8 +270,15 @@ export function GenerateModal({
   }
 
   function convertToSchedulerFormat(): { teachers: Teacher[]; classes: RemoteClassEntry[] } {
+    // Only teachers who actually teach a class this quarter go to the solver.
+    // Zero-class teachers contribute no sessions but would come back as
+    // all-OPEN rows and pollute teacher stats.
+    const assignedTeacherNames = new Set(
+      classes.map((c) => c.teacher?.name).filter(Boolean)
+    )
+    const activeTeachers = teachers.filter((t) => assignedTeacherNames.has(t.name))
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const teacherList: Teacher[] = teachers.map((t: any) => ({
+    const teacherList: Teacher[] = activeTeachers.map((t: any) => ({
       id: t.id,
       name: t.name,
       status: t.status,
