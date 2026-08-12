@@ -391,6 +391,15 @@ interface Session {
    * distinct day" independently of the toggleable no_duplicate_subjects rule.
    */
   classKey?: number;
+  /**
+   * UNFLAGGED classes only, when the class has >=1 legal block pair: identity
+   * of the source class (index into the class list) for OPTIONAL same-day
+   * pairing. A second lesson of the class may share a day iff the two blocks
+   * form a legal pair (back-to-back allowed, never required); never a third.
+   */
+  pairClassKey?: number;
+  /** Legal [earlier, later] block pairs usable for an optional same-day pair */
+  optionalPairs?: [number, number][];
 }
 
 /**
@@ -429,18 +438,41 @@ function buildSessions(classes: ClassEntry[], teachers?: Teacher[]): Session[] {
   classes.forEach((cls, clsIdx) => {
     const isDouble = (cls as SchedulerClassEntry).isDouble === true;
     const gradeNames = parseGrades(cls.grade);
-    const legalPairs = isDouble ? getLegalPairsForGrades(gradeNames) : [];
+    const legalPairs = getLegalPairsForGrades(gradeNames);
     const useDoubles = isDouble && legalPairs.length > 0;
     const L = cls.daysPerWeek;
     // classKey marks sessions of double-period classes so every meeting of the
     // class (double or single) lands on a distinct day.
     const classKey = isDouble ? clsIdx : undefined;
+    // Unflagged classes with legal pairs may OPTIONALLY pair: a second lesson
+    // may share a day iff the two blocks form a legal pair (never required,
+    // never a third same-day lesson). Flagged classes never get these fields.
+    const optionalPairing = !isDouble && legalPairs.length > 0;
+    const pairClassKey = optionalPairing ? clsIdx : undefined;
+    const optionalPairs = optionalPairing
+      ? legalPairs.map(p => [p[0], p[1]] as [number, number])
+      : undefined;
 
-    // Preflight: unflagged classes can hold at most 5 single lessons (one per day)
-    if (!isDouble && L > 5) {
+    // Preflight: unflagged classes cap at 5 lessons (one per day) when the
+    // class has no legal pairs, or 10 (one optional pair per day) when it does.
+    if (!isDouble && legalPairs.length === 0 && L > 5) {
+      if (!activeGradePairs) {
+        // Legacy call (no gradeBlockPairs map): byte-identical behavior
+        throw new Error(
+          `Class '${cls.teacher} - ${cls.subject}' has ${L} lessons per week, ` +
+          `but '${cls.subject}' is not a double-period subject; at most 5 single lessons fit in a week`
+        );
+      }
       throw new Error(
         `Class '${cls.teacher} - ${cls.subject}' has ${L} lessons per week, ` +
-        `but '${cls.subject}' is not a double-period subject; at most 5 single lessons fit in a week`
+        `but there are no legal consecutive block pairs shared by all of its grades (${cls.grade}); ` +
+        `at most 5 single lessons fit in a week`
+      );
+    }
+    if (!isDouble && L > 10) {
+      throw new Error(
+        `Class '${cls.teacher} - ${cls.subject}' has ${L} lessons per week; ` +
+        `even with one double period per day they cannot fit in a 5-day week`
       );
     }
     // Preflight: flagged class with no legal shared pairs fails closed for any
@@ -564,6 +596,8 @@ function buildSessions(classes: ClassEntry[], teachers?: Teacher[]): Session[] {
             isElective: cls.isElective,
             isCotaught: cls.isCotaught,
             classKey,
+            pairClassKey,
+            optionalPairs,
           });
         });
       }
@@ -647,6 +681,8 @@ function buildSessions(classes: ClassEntry[], teachers?: Teacher[]): Session[] {
             isElective: cls.isElective,
             isCotaught: cls.isCotaught,
             classKey,
+            pairClassKey,
+            optionalPairs,
           });
         }
       }
@@ -759,6 +795,10 @@ function solveBacktracking(
   // Enforced unconditionally (not gated on no_duplicate_subjects): every
   // meeting of a flagged class must land on a distinct day.
   const classDayUsed = new Map<number, Set<number>>();
+  // pairClassKey -> dayIdx -> slots currently held by that UNFLAGGED class on
+  // that day. Supports optional same-day pairing: a second lesson may join a
+  // day only as a legal consecutive pair with the existing lone lesson.
+  const pairClassDaySlots = new Map<number, Map<number, number[]>>();
 
   // Track which co-taught sessions have been assigned (to skip them in main loop)
   const assignedCotaughtSessions = new Set<number>();
@@ -831,13 +871,33 @@ function solveBacktracking(
       if (!isElective && electiveGradeSlots.get(g)?.has(slot)) return false;
     }
 
-    // Check subject/day conflict - CAN be toggled via rules
-    // (same subject can't appear twice on same day for same grade)
+    // Check subject/day conflict - CAN be toggled via rules.
+    // Same subject can't appear twice on same day for same grade, with ONE
+    // exception: a second lesson of the SAME unflagged class may join the day
+    // iff its block forms a legal consecutive pair with the class's existing
+    // lone lesson (optional double period — allowed, never required). A third
+    // same-day lesson, a non-pair block, or another class's lesson still fail.
     if (isRuleEnabled(rules, 'no_duplicate_subjects')) {
       const day = slotToDay(slot);
+      let subjectOnDay = false;
       for (const g of grades) {
         const key = `${g}|${session.subject}`;
-        if (gradeSubjectDay.get(key)?.has(day)) return false;
+        if (gradeSubjectDay.get(key)?.has(day)) { subjectOnDay = true; break; }
+      }
+      if (subjectOnDay) {
+        if (session.pairClassKey === undefined || !session.optionalPairs) return false;
+        const slotsToday = pairClassDaySlots.get(session.pairClassKey)?.get(day);
+        // Exactly one existing lesson, and it must be THIS class's (if the
+        // day was marked by another class/locked teacher, slotsToday is empty)
+        if (!slotsToday || slotsToday.length !== 1) return false;
+        const idxExisting = slotToBlock(slotsToday[0]);
+        const idxNew = slotToBlock(slot);
+        const [firstIdx, secondIdx] = idxExisting <= idxNew
+          ? [idxExisting, idxNew]
+          : [idxNew, idxExisting];
+        const first = activeBlocks[firstIdx];
+        const second = activeBlocks[secondIdx];
+        if (!session.optionalPairs.some(([a, b]) => a === first && b === second)) return false;
       }
     }
 
@@ -1020,6 +1080,15 @@ function solveBacktracking(
       if (!classDayUsed.has(session.classKey)) classDayUsed.set(session.classKey, new Set());
       classDayUsed.get(session.classKey)!.add(day);
     }
+
+    if (session.pairClassKey !== undefined) {
+      if (!pairClassDaySlots.has(session.pairClassKey)) {
+        pairClassDaySlots.set(session.pairClassKey, new Map());
+      }
+      const byDay = pairClassDaySlots.get(session.pairClassKey)!;
+      if (!byDay.has(day)) byDay.set(day, []);
+      byDay.get(day)!.push(slot);
+    }
   }
 
   // Assign all sessions in a co-taught group to the same slot
@@ -1041,6 +1110,18 @@ function solveBacktracking(
     const day = slotToDay(slot);
     const isElective = session.isElective === true;
 
+    // Optionally-paired classes may hold TWO same-day lessons; only clear the
+    // subject/day marker once the class's last lesson leaves the day.
+    let classStillOnDay = false;
+    if (session.pairClassKey !== undefined) {
+      const slotsToday = pairClassDaySlots.get(session.pairClassKey)?.get(day);
+      if (slotsToday) {
+        const i = slotsToday.indexOf(slot);
+        if (i !== -1) slotsToday.splice(i, 1);
+        classStillOnDay = slotsToday.length > 0;
+      }
+    }
+
     grades.forEach(g => {
       // Remove from appropriate slot map based on elective status
       if (isElective) {
@@ -1049,7 +1130,7 @@ function solveBacktracking(
         gradeSlots.get(g)!.delete(slot);
       }
       const key = `${g}|${session.subject}`;
-      gradeSubjectDay.get(key)?.delete(day);
+      if (!classStillOnDay) gradeSubjectDay.get(key)?.delete(day);
     });
 
     if (session.classKey !== undefined) {
@@ -1736,6 +1817,20 @@ function redistributeOpenBlocks(
             // pair (or even its odd single) would break the pairing invariant.
             if (immovableClasses?.has(`${teacher}|${entry[1]}`)) continue;
 
+            // Never split a same-day pair (optional or required): if this
+            // class meets again on targetDay, the two sessions are a legal
+            // consecutive pair — moving one half would strand the other.
+            let hasSameDayTwin = false;
+            for (const b of activeBlocks) {
+              if (b === targetBlock) continue;
+              const twin = teacherSchedules[teacher][targetDay][b];
+              if (twin && twin[0] === entry[0] && twin[1] === entry[1]) {
+                hasSameDayTwin = true;
+                break;
+              }
+            }
+            if (hasSameDayTwin) continue;
+
             if (wouldCreateBTB(teacher, targetDay, targetBlock)) continue;
 
             const [gradeDisplay, subject] = entry;
@@ -1938,10 +2033,12 @@ function getStudyHallEligibleStatuses(rules: SchedulingRule[] | undefined): Set<
  *   A grade absent from the map may use all blocks. Classes covering multiple
  *   grades are restricted to the intersection of their grades' teachable blocks.
  * @param gradeBlockPairs - Optional map of grade NAME -> allowed [earlier, later]
- *   block pairs for double periods. A double-period class may only use pairs
- *   present for EVERY grade it covers. Absent (or empty for a covered grade) =
- *   no pairing; flagged classes then schedule as singles and fail preflight
- *   when their lessons can't fit.
+ *   block pairs for double periods. A class may only use pairs present for
+ *   EVERY grade it covers. When in effect, EVERY class may OPTIONALLY hold two
+ *   same-day lessons as a legal pair (back-to-back allowed, never required;
+ *   never a third same-day lesson), raising its weekly lesson cap from 5 to 10.
+ *   Classes flagged isDouble must pair (atomic pair meetings, odd lesson as a
+ *   single, all on distinct days) and fail preflight with no legal pairs.
  */
 export async function generateSchedules(
   teachers: Teacher[],
@@ -2041,9 +2138,11 @@ export async function generateSchedules(
 
   // Sessions of double-period classes are pinned during back-to-back
   // redistribution — moving one block of a pair would split the double.
+  // Fixed-slot classes are pinned too: the solver honors user pins, and
+  // post-processing must not undo them (mirrors the Python solver).
   const immovableClasses = new Set<string>();
   for (const c of classes) {
-    if (c.isDouble === true) {
+    if (c.isDouble === true || (c.fixedSlots && c.fixedSlots.length > 0)) {
       immovableClasses.add(`${c.teacher}|${c.subject}`);
     }
   }

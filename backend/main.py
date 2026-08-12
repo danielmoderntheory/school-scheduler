@@ -70,8 +70,10 @@ class ClassEntry(BaseModel):
     daysPerWeek: int = 1  # Lessons (blocks) per week - may exceed 5 for double-period subjects
     isElective: bool = False  # Electives skip grade conflicts
     isCotaught: bool = False  # Co-taught classes must be scheduled together
-    # Subject requires double periods: meetings are two consecutive blocks.
-    # Accept either key; the solver reads both (is_double wins if set).
+    # Subject REQUIRES double periods: every meeting is two consecutive blocks
+    # (odd lesson = one single), meetings on distinct days. Unflagged classes may
+    # still OPTIONALLY double up (see grade_block_pairs below) - this flag makes
+    # pairing mandatory. Accept either key; the solver reads both.
     is_double: Optional[bool] = None
     requires_double_periods: Optional[bool] = None
     availableDays: Optional[list[str]] = None
@@ -105,6 +107,8 @@ class SolveRequest(BaseModel):
     grade_teachable_blocks: Optional[dict[str, list[int]]] = None  # grade name -> teachable block numbers
     # Legal double-period pairs per grade: grade display name -> [[earlierBlock, laterBlock], ...].
     # Built upstream from the timetable (pairs never straddle a break or the grade's lunch).
+    # When provided, EVERY class may hold a day's lessons as one legal double (allowed,
+    # never required); is_double classes must pair every meeting.
     # Absent = no pairing available (legacy requests unchanged).
     grade_block_pairs: Optional[dict[str, list[list[int]]]] = None
 

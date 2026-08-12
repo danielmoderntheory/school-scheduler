@@ -231,8 +231,9 @@ export default function SubjectsSettingsPage() {
             directly from the Classes page.
           </p>
           <p className="text-sm text-muted-foreground mt-1">
-            Double periods: lessons pair into back-to-back blocks (e.g. 7 lessons = 3
-            doubles + 1 single).
+            Double periods: back-to-back required (6th grade and up). Classes in 6th
+            grade and up meet in back-to-back double blocks. Lower grades and unflagged
+            subjects may still be paired by the scheduler when it helps.
           </p>
         </div>
 
@@ -250,8 +251,10 @@ export default function SubjectsSettingsPage() {
                     </TooltipTrigger>
                     <TooltipContent className="max-w-[260px]">
                       <p>
-                        Lessons pair into back-to-back blocks (e.g. 7 lessons = 3
-                        doubles + 1 single)
+                        Back-to-back required (6th grade and up). Classes in 6th grade
+                        and up meet in back-to-back double blocks. Lower grades and
+                        unflagged subjects may still be paired by the scheduler when it
+                        helps.
                       </p>
                     </TooltipContent>
                   </Tooltip>

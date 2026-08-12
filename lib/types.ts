@@ -163,6 +163,12 @@ export interface GenerationResult {
 export const DAYS = ['Mon', 'Tues', 'Wed', 'Thurs', 'Fri'] as const;
 export const BLOCKS = [1, 2, 3, 4, 5] as const;
 
+// A subject flagged requires_double_periods MUST pair its lessons into
+// back-to-back doubles for classes whose grades are all at or above this
+// sort_order (6th grade and up). Below the threshold — and for unflagged
+// subjects everywhere — pairing is allowed but never required.
+export const DOUBLE_REQUIRED_FROM_SORT_ORDER = 6;
+
 export type Day = typeof DAYS[number];
 export type Block = typeof BLOCKS[number];
 // Grade type is now dynamic - grades come from the database

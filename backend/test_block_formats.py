@@ -18,17 +18,30 @@ Covers:
   (i) legacy requests (no grade_teachable_blocks) -> no lunch constraint
   (j) study hall assignment never takes a supervisor's last free candidate
       lunch window
-  (k) double periods: flagged L=7 -> 3 legal-pair doubles + 1 single on 4
-      distinct days; flagged L=4 -> 2 doubles on 2 days; multi-grade flagged
-      class uses only the intersection of its grades' pairs; pairs never
-      straddle a covered grade's lunch
-  (l) double-period preflight: unflagged L>5 errors suggesting the subject
-      flag; flagged class with zero shared legal pairs errors naming class
-      and grades; fixed slots must form same-day legal pairs (+ at most one
-      lone single)
+  (k) double periods REQUIRED mode (is_double): flagged L=7 -> 3 legal-pair
+      doubles + 1 single on 4 distinct days; flagged L=4 -> 2 doubles on 2
+      days; multi-grade flagged class uses only the intersection of its
+      grades' pairs; pairs never straddle a covered grade's lunch
+  (l) required-mode preflight: flagged class with zero shared legal pairs
+      errors naming class and grades; fixed slots must form same-day legal
+      pairs (+ at most one lone single)
   (m) pinned pairs solve (duplicate-subject rule exempts within-pair repeats
-      only); a same-day repeat that is NOT a pair stays forbidden; legacy
+      only); a same-day repeat that is NOT a legal pair fails; legacy
       requests carry no pairing metadata
+  (n) optional doubles DEFAULT mode: when grade_block_pairs is provided,
+      ANY class may hold a day's lessons as one legal double (allowed, never
+      required) - unflagged L=7 solves with every day one single or one
+      legal pair; unflagged L=4 solves (legality-only assertions); a pinned
+      legal pair on an unflagged class solves
+  (o) optional-doubles preflight: unflagged L=7 with NO legal pairs errors;
+      >2 same-day fixed lessons error; 2 same-day fixed lessons that are not
+      a legal pair error
+  (p) three same-day occurrences are impossible at the model level too
+      (availability-forced, infeasible without preflight errors)
+  (q) no_duplicate_subjects disabled -> same-day repeats unrestricted (the
+      existing escape hatch, unchanged)
+  (r) legacy requests (no pairs map): unflagged L=7 still errors with the
+      old message; L=5 solves singles-only
 
 Run: ./venv/bin/python test_block_formats.py
 """
@@ -538,19 +551,70 @@ if res_d['status'] == 'success':
           all(6 not in d and 7 not in d for d in deb_doubles), str(deb_doubles))
 
 # ================================================================ TEST 12
-print("\nTEST 12 — preflight: unflagged L=7 is impossible, suggests the flag")
+print("\nTEST 12 — optional doubles: unflagged L=7 WITH legal pairs solves")
+
+
+def day_legality_issues(day_blocks, legal_pairs):
+    """Every day must hold ONE meeting: a lone single or one legal pair."""
+    issues = []
+    for day, blocks in day_blocks.items():
+        if len(blocks) == 1:
+            continue
+        if len(blocks) == 2 and tuple(sorted(blocks)) in legal_pairs:
+            continue
+        issues.append((day, blocks))
+    return issues
+
+
 res_u7 = generate_schedules(
     teachers=TEACHERS_D,
     classes=[make_class('Sofia', ['7th Grade'], 'Spanish', 7)], rules=RULES,
-    num_options=1, num_attempts=1, max_time_seconds=10.0, grades=GRADES,
+    num_options=1, num_attempts=2, max_time_seconds=30.0, grades=GRADES,
     blocks=NINE_BLOCKS, grade_teachable_blocks=MASKS, grade_block_pairs=PAIRS,
 )
-errs_u7 = (res_u7.get('diagnostics') or {}).get('preflightErrors', [])
-check("unflagged L=7 fails preflight", res_u7['status'] == 'infeasible',
+check("unflagged L=7 with legal pairs solves", res_u7['status'] == 'success',
       res_u7.get('message', ''))
-check("error names the class and suggests double periods",
-      any('Sofia - Spanish' in e and 'double period' in e for e in errs_u7),
-      str(errs_u7[:2]))
+if res_u7['status'] == 'success':
+    spa_u7 = find_subject_days(res_u7['options'][0]['teacherSchedules'],
+                               'Sofia', 'Spanish')
+    check("optional L=7: all 7 lessons placed",
+          sum(len(v) for v in spa_u7.values()) == 7, str(spa_u7))
+    check("optional L=7: every day is one single or one legal MS pair",
+          not day_legality_issues(spa_u7, MS_PAIRS),
+          str(day_legality_issues(spa_u7, MS_PAIRS)))
+
+# unflagged L=4: pairing stays OPTIONAL - assert only legality of the result
+res_u4 = generate_schedules(
+    teachers=TEACHERS_D,
+    classes=[make_class('Sofia', ['7th Grade'], 'Spanish', 4)], rules=RULES,
+    num_options=1, num_attempts=2, max_time_seconds=30.0, grades=GRADES,
+    blocks=NINE_BLOCKS, grade_teachable_blocks=MASKS, grade_block_pairs=PAIRS,
+)
+check("unflagged L=4 with legal pairs solves", res_u4['status'] == 'success',
+      res_u4.get('message', ''))
+if res_u4['status'] == 'success':
+    spa_u4 = find_subject_days(res_u4['options'][0]['teacherSchedules'],
+                               'Sofia', 'Spanish')
+    check("optional L=4: all 4 lessons placed",
+          sum(len(v) for v in spa_u4.values()) == 4, str(spa_u4))
+    check("optional L=4: same-day occurrences are exactly a legal pair or a lone single",
+          not day_legality_issues(spa_u4, MS_PAIRS),
+          str(day_legality_issues(spa_u4, MS_PAIRS)))
+
+# unflagged L=7 with NO legal pairs -> preflight error (fail closed)
+res_u7np = generate_schedules(
+    teachers=TEACHERS_D,
+    classes=[make_class('Sofia', ['7th Grade'], 'Spanish', 7)], rules=RULES,
+    num_options=1, num_attempts=1, max_time_seconds=10.0, grades=GRADES,
+    blocks=NINE_BLOCKS, grade_teachable_blocks=MASKS,
+    grade_block_pairs={'7th Grade': []},
+)
+errs_u7np = (res_u7np.get('diagnostics') or {}).get('preflightErrors', [])
+check("unflagged L=7 with NO legal pairs fails preflight",
+      res_u7np['status'] == 'infeasible'
+      and any('Sofia - Spanish' in e and 'no legal consecutive block pairs' in e
+              for e in errs_u7np),
+      str(errs_u7np[:2]))
 
 # ================================================================ TEST 13
 print("\nTEST 13 — preflight: flagged class with zero shared legal pairs")
@@ -651,7 +715,8 @@ check("third same-day occurrence next to a pinned pair is infeasible",
       res_3rd['status'] == 'infeasible' and not errs_3rd,
       f"status={res_3rd['status']} preflight={errs_3rd[:1]}")
 
-# unflagged same-day repeat (not a pair) stays forbidden by the solver
+# unflagged same-day repeat that is NOT a legal pair stays forbidden
+# (now caught in preflight with a readable message)
 rep = make_class('Sofia', ['7th Grade'], 'Spanish', 2,
                  fixed=[('Mon', 1), ('Mon', 3)])
 res_rep = generate_schedules(
@@ -660,9 +725,54 @@ res_rep = generate_schedules(
     blocks=NINE_BLOCKS, grade_teachable_blocks=MASKS, grade_block_pairs=PAIRS,
 )
 errs_rep = (res_rep.get('diagnostics') or {}).get('preflightErrors', [])
-check("unflagged same-day repeat still infeasible (solver, not preflight)",
-      res_rep['status'] == 'infeasible' and not errs_rep,
+check("unflagged non-pair same-day repeat still forbidden (preflight)",
+      res_rep['status'] == 'infeasible'
+      and any('not a legal double-period pair' in e for e in errs_rep),
       f"status={res_rep['status']} preflight={errs_rep[:1]}")
+
+# ...but an unflagged same-day repeat that IS a legal pair now solves
+rep_ok = make_class('Sofia', ['7th Grade'], 'Spanish', 2,
+                    fixed=[('Mon', 1), ('Mon', 2)])
+res_rep_ok = generate_schedules(
+    teachers=TEACHERS_D, classes=[rep_ok], rules=RULES,
+    num_options=1, num_attempts=1, max_time_seconds=15.0, grades=GRADES,
+    blocks=NINE_BLOCKS, grade_teachable_blocks=MASKS, grade_block_pairs=PAIRS,
+)
+check("unflagged pinned LEGAL pair solves (optional double)",
+      res_rep_ok['status'] == 'success', res_rep_ok.get('message', ''))
+if res_rep_ok['status'] == 'success':
+    placed_ok = find_subject_days(res_rep_ok['options'][0]['teacherSchedules'],
+                                  'Sofia', 'Spanish')
+    check("pinned optional double lands exactly at Mon B1+B2",
+          placed_ok == {'Mon': [1, 2]}, str(placed_ok))
+
+# three same-day fixed lessons -> preflight (at most 2, forming one double)
+rep3 = make_class('Sofia', ['7th Grade'], 'Spanish', 3,
+                  fixed=[('Mon', 1), ('Mon', 2), ('Mon', 3)])
+res_rep3 = generate_schedules(
+    teachers=TEACHERS_D, classes=[rep3], rules=RULES,
+    num_options=1, num_attempts=1, max_time_seconds=10.0, grades=GRADES,
+    blocks=NINE_BLOCKS, grade_teachable_blocks=MASKS, grade_block_pairs=PAIRS,
+)
+errs_rep3 = (res_rep3.get('diagnostics') or {}).get('preflightErrors', [])
+check("three same-day fixed lessons fail preflight",
+      res_rep3['status'] == 'infeasible'
+      and any('at most 2' in e for e in errs_rep3),
+      str(errs_rep3[:2]))
+
+# model level: three same-day occurrences are impossible even without fixed
+# slots (availability forces all three onto Mon) - infeasible, no preflight
+rep3m = make_class('Sofia', ['7th Grade'], 'Spanish', 3)
+rep3m['availableDays'] = ['Mon']
+res_rep3m = generate_schedules(
+    teachers=TEACHERS_D, classes=[rep3m], rules=RULES,
+    num_options=1, num_attempts=1, max_time_seconds=15.0, grades=GRADES,
+    blocks=NINE_BLOCKS, grade_teachable_blocks=MASKS, grade_block_pairs=PAIRS,
+)
+errs_rep3m = (res_rep3m.get('diagnostics') or {}).get('preflightErrors', [])
+check("three same-day occurrences infeasible at the model level (no preflight)",
+      res_rep3m['status'] == 'infeasible' and not errs_rep3m,
+      f"status={res_rep3m['status']} preflight={errs_rep3m[:1]}")
 
 # ================================================================ TEST 16
 print("\nTEST 16 — legacy requests carry no pairing metadata")
@@ -670,8 +780,59 @@ set_blocks(None)
 sess_leg = build_sessions(class_objs(legacy_classes), grades=legacy_grades)
 check("legacy sessions: no pair ids, no double-class flags",
       all(s.pair_id is None and not s.is_double_class and s.pair_slots is None
+          and s.allowed_block_pairs is None
           for s in sess_leg),
       str([(s.teacher, s.subject) for s in sess_leg if s.pair_id is not None][:3]))
+
+# ================================================================ TEST 17
+print("\nTEST 17 — no_duplicate_subjects disabled: same-day repeats unrestricted")
+RULES_DUP_OFF = [r for r in RULES if r['rule_key'] != 'no_duplicate_subjects'] + [
+    {'rule_key': 'no_duplicate_subjects', 'enabled': False, 'config': None},
+]
+# The exact scenario preflight rejects when the rule is ON (Mon B1+B3 is not
+# a legal pair) must sail through with the rule OFF - scattered repeats allowed
+scatter = make_class('Sofia', ['7th Grade'], 'Spanish', 2,
+                     fixed=[('Mon', 1), ('Mon', 3)])
+res_scatter = generate_schedules(
+    teachers=TEACHERS_D, classes=[scatter], rules=RULES_DUP_OFF,
+    num_options=1, num_attempts=1, max_time_seconds=15.0, grades=GRADES,
+    blocks=NINE_BLOCKS, grade_teachable_blocks=MASKS, grade_block_pairs=PAIRS,
+)
+check("rule off: non-pair same-day repeat solves", res_scatter['status'] == 'success',
+      res_scatter.get('message', ''))
+if res_scatter['status'] == 'success':
+    placed_sc = find_subject_days(res_scatter['options'][0]['teacherSchedules'],
+                                  'Sofia', 'Spanish')
+    check("rule off: repeats land exactly at Mon B1+B3",
+          placed_sc == {'Mon': [1, 3]}, str(placed_sc))
+
+# ================================================================ TEST 18
+print("\nTEST 18 — legacy (no pairs map): unflagged L=7 errors, L=5 singles-only")
+res_leg7 = generate_schedules(
+    teachers=TEACHERS_D,
+    classes=[make_class('Sofia', ['7th Grade'], 'Spanish', 7)], rules=RULES,
+    num_options=1, num_attempts=1, max_time_seconds=10.0, grades=GRADES,
+)
+errs_leg7 = (res_leg7.get('diagnostics') or {}).get('preflightErrors', [])
+check("legacy unflagged L=7 fails preflight with the old message",
+      res_leg7['status'] == 'infeasible'
+      and any('Sofia - Spanish' in e and "requires double periods" in e
+              for e in errs_leg7),
+      str(errs_leg7[:2]))
+
+res_leg5 = generate_schedules(
+    teachers=TEACHERS_D,
+    classes=[make_class('Sofia', ['7th Grade'], 'Spanish', 5)], rules=RULES,
+    num_options=1, num_attempts=2, max_time_seconds=30.0, grades=GRADES,
+)
+check("legacy unflagged L=5 solves", res_leg5['status'] == 'success',
+      res_leg5.get('message', ''))
+if res_leg5['status'] == 'success':
+    spa_leg = find_subject_days(res_leg5['options'][0]['teacherSchedules'],
+                                'Sofia', 'Spanish')
+    check("legacy L=5 is singles-only (one lesson per day, 5 days)",
+          len(spa_leg) == 5 and all(len(v) == 1 for v in spa_leg.values()),
+          str(spa_leg))
 
 # ================================================================ summary
 print("\n" + "=" * 60)

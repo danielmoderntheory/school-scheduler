@@ -40,6 +40,7 @@ import { Textarea } from "@/components/ui/textarea"
 import { Label } from "@/components/ui/label"
 import Link from "next/link"
 import type { ScheduleOption, TeacherSchedule, GradeSchedule, Teacher, FloatingBlock, PendingPlacement, ValidationError, CellLocation, ClassEntry, OpenBlockLabels, PendingTransfer, TimetableTemplate } from "@/lib/types"
+import { DOUBLE_REQUIRED_FROM_SORT_ORDER } from "@/lib/types"
 import { resolveRowsForGrade, getTemplateBlocks, getTeachableBlocksForGrade, getPairableBlocksForGrade } from "@/lib/timetable-utils"
 import { parseClassesFromSnapshot, parseTeachersFromSnapshot, parseRulesFromSnapshot, hasValidSnapshots, detectClassChanges, detectTeacherChanges, applyTeacherRenames, applyTeacherChangesToSnapshot, computeExpectedTeachingSessions, findMismatchedTeachers, type GenerationStats, type ChangeDetectionResult, type CurrentClass, type ClassSnapshot, type TeacherSnapshot, type TeacherChangeResult } from "@/lib/snapshot-utils"
 import { parseGradeDisplayToNumbers, parseGradeDisplayToNames, gradesOverlap, gradesEqual, gradeNumToDisplay, isClassElective, isClassCotaught, shouldIgnoreGradeConflict, formatGradeDisplayCompact } from "@/lib/grade-utils"
@@ -602,16 +603,35 @@ export default function HistoryDetailPage() {
   // template-driven quarter that default would read as a restriction to blocks
   // 1-5, so widen classes with no explicit available_blocks restriction to all
   // template blocks. No-op when there is no template (legacy behavior).
+  //
+  // Also applies the double-period grade threshold: the snapshot's isDouble
+  // carries the raw subject flag, but doubles are REQUIRED only when every
+  // covered grade is at/above DOUBLE_REQUIRED_FROM_SORT_ORDER (mirrors
+  // GenerateModal). Below the threshold the flag is advisory — pairing stays
+  // allowed for any class, it just isn't enforced/warned on.
   function parseClassesForTemplate(snapshot: ClassSnapshot[]): ClassEntry[] {
     const classes = parseClassesFromSnapshot(snapshot)
-    if (timetableTemplate) {
-      classes.forEach((cls, i) => {
+    const sortOrderByGradeId = new Map(gradesData.map(g => [g.id, g.sort_order]))
+    classes.forEach((cls, i) => {
+      if (timetableTemplate) {
         const hasBlockRestriction = (snapshot[i]?.restrictions || []).some(
           r => r.restriction_type === 'available_blocks'
         )
         if (!hasBlockRestriction) cls.availableBlocks = [...templateBlocks]
-      })
-    }
+      }
+      if (cls.isDouble === true) {
+        const gradeIds = snapshot[i]?.grade_ids?.length
+          ? snapshot[i].grade_ids
+          : (snapshot[i]?.grades || []).map(g => g.id)
+        const doubleFlagBinds =
+          gradeIds.length > 0 &&
+          gradeIds.every(gid => {
+            const sortOrder = sortOrderByGradeId.get(gid)
+            return sortOrder !== undefined && sortOrder >= DOUBLE_REQUIRED_FROM_SORT_ORDER
+          })
+        if (!doubleFlagBinds) cls.isDouble = false
+      }
+    })
     return classes
   }
 
@@ -698,7 +718,7 @@ export default function HistoryDetailPage() {
 
     // Use core validation functions and map results to include placement details
     const gradeErrors = checkGradeConflictsCore(workingSchedules.teacherSchedules, classesSnapshot)
-    const subjectErrors = checkSubjectConflictsCore(workingSchedules.teacherSchedules, effectiveFreeformClasses ?? undefined)
+    const subjectErrors = checkSubjectConflictsCore(workingSchedules.teacherSchedules)
 
     // Map errors back to placements - only include conflicts involving pending placements
     for (const placement of pendingPlacements) {
@@ -1427,6 +1447,10 @@ export default function HistoryDetailPage() {
         // Get grade display names from database
         grades = gradesRaw.map((g: { display_name: string }) => g.display_name)
 
+        const sortOrderByGradeId = new Map<string, number>(
+          gradesRaw.map((g: { id: string; sort_order: number }) => [g.id, g.sort_order])
+        )
+
         classes = classesRaw.map((c: CurrentClass & { requires_double_periods?: boolean }) => {
           const restrictions = c.restrictions || []
           const fixedSlots: [string, number][] = []
@@ -1446,6 +1470,16 @@ export default function HistoryDetailPage() {
 
           const gradeNames = c.grades?.map(g => g.display_name) || (c.grade ? [c.grade.display_name] : [])
 
+          // Doubles are REQUIRED only when the subject is flagged AND every
+          // covered grade is at/above the threshold (mirrors GenerateModal).
+          const coveredGrades = c.grades && c.grades.length > 0 ? c.grades : (c.grade ? [c.grade] : [])
+          const doubleFlagBinds =
+            coveredGrades.length > 0 &&
+            coveredGrades.every(g => {
+              const sortOrder = sortOrderByGradeId.get(g.id)
+              return sortOrder !== undefined && sortOrder >= DOUBLE_REQUIRED_FROM_SORT_ORDER
+            })
+
           return {
             teacher: c.teacher?.name || '',
             grade: gradeNames[0] || '',
@@ -1455,8 +1489,9 @@ export default function HistoryDetailPage() {
             isElective: c.is_elective || false,
             isCotaught: c.is_cotaught || false,
             // Double-period flag: /api/classes surfaces the subject-level
-            // requires_double_periods on each class row
-            isDouble: c.requires_double_periods === true,
+            // requires_double_periods on each class row; required only when
+            // every covered grade meets the grade threshold
+            isDouble: c.requires_double_periods === true && doubleFlagBinds,
             availableDays,
             availableBlocks,
             fixedSlots: fixedSlots.length > 0 ? fixedSlots : undefined,
@@ -4481,12 +4516,12 @@ export default function HistoryDetailPage() {
     )
     // 2. Cross-day splits: picking the block up already removed its pair
     //    partner from the working schedule, so before/after comparison can't
-    //    see a pair split across days. Once every lesson of a flagged class is
-    //    placed, more lone singles than daysPerWeek allows (L mod 2) means a
-    //    double was split.
+    //    see a pair split across days. Once every lesson of a required-double
+    //    class is placed, more lone singles than daysPerWeek allows (L mod 2)
+    //    means a double was split.
     if (dblClasses && timetableTemplate) {
       const cls = dblClasses.find(c =>
-        (c as DoubleAwareClass).isDouble === true &&
+        c.isDouble === true &&
         c.teacher === location.teacher &&
         c.subject === block.subject &&
         gradesOverlap(block.grade, c.gradeDisplay || c.grade)
@@ -5529,38 +5564,19 @@ export default function HistoryDetailPage() {
     return errors
   }
 
-  // ClassEntry with the double-period flag emitted by parseClassesFromSnapshot.
-  // The shared ClassEntry type in lib/types.ts hasn't caught up yet — same
-  // pattern as the 'no_lunch' ValidationError type below.
-  type DoubleAwareClass = ClassEntry & { isDouble?: boolean }
-
-  /** True when `classes` contains a double-period-flagged class matching (teacher, subject, overlapping grade). */
-  function isDoubleFlaggedClass(
-    teacher: string,
-    gradeDisplay: string,
-    subject: string,
-    classes: ClassEntry[]
-  ): boolean {
-    return classes.some(cls =>
-      (cls as DoubleAwareClass).isDouble === true &&
-      cls.teacher === teacher &&
-      cls.subject === subject &&
-      gradesOverlap(gradeDisplay, cls.gradeDisplay || cls.grade)
-    )
-  }
-
   /**
    * CORE: Check for subject conflicts - same subject twice on same day for a grade.
    * Rule: A grade shouldn't have the same subject at different times on the same day.
    * (Multiple teachers at same block = electives/co-taught, which is valid)
    *
-   * When class definitions are provided, a legal double period — a flagged
-   * class meeting in exactly two back-to-back pairable blocks — is NOT a
-   * duplicate-subject conflict. Non-pair repeats are still flagged.
+   * A legal double period — the subject meeting in exactly two back-to-back
+   * pairable blocks for the grade — is NOT a duplicate-subject conflict for
+   * ANY class (doubles are allowed everywhere; the requires-double flag only
+   * governs the separate pairing warnings). Three-plus occurrences and
+   * non-pair repeats are still flagged.
    */
   function checkSubjectConflictsCore(
-    teacherSchedules: Record<string, TeacherSchedule>,
-    classes?: ClassEntry[]
+    teacherSchedules: Record<string, TeacherSchedule>
   ): ValidationError[] {
     const errors: ValidationError[] = []
     const DAYS = ["Mon", "Tues", "Wed", "Thurs", "Fri"]
@@ -5598,14 +5614,11 @@ export default function HistoryDetailPage() {
         for (const [subject, occurrences] of subjectMap) {
           const uniqueBlocks = new Set(occurrences.map(o => o.block))
           if (uniqueBlocks.size > 1) {
-            // Legal double period: exactly two adjacent pairable blocks of a
-            // flagged class (every involved teacher's class must be flagged —
-            // covers co-taught doubles, where both teachers share the pair)
-            if (classes && uniqueBlocks.size === 2) {
+            // Legal double period: exactly two adjacent pairable blocks for
+            // the grade — allowed for any class, flagged or not
+            if (uniqueBlocks.size === 2) {
               const [b1, b2] = [...uniqueBlocks]
-              const teachersInvolved = [...new Set(occurrences.map(o => o.teacher))]
-              const allFlagged = teachersInvolved.every(t => isDoubleFlaggedClass(t, grade, subject, classes))
-              if (allFlagged && isLegalDoublePair(grade, b1, b2)) continue
+              if (isLegalDoublePair(grade, b1, b2)) continue
             }
             errors.push({
               type: 'subject_conflict',
@@ -5641,11 +5654,14 @@ export default function HistoryDetailPage() {
 
   /**
    * CORE: Check double-period pairing (soft warning, like no_lunch).
-   * A flagged class (subject requires double periods) may meet at most once per
-   * day: either a lone single lesson, or exactly two lessons in a legal
-   * back-to-back pair for every grade of the class. Anything else — a third
-   * same-day occurrence, or a same-day pair that is not adjacent/pairable —
-   * gets a [Double Periods] warning. Skipped on legacy quarters (no template).
+   * Applies only to REQUIRED-double classes (isDouble: subject flagged AND
+   * every covered grade at/above DOUBLE_REQUIRED_FROM_SORT_ORDER — producers
+   * apply the threshold). Such a class may meet at most once per day: either
+   * a lone single lesson, or exactly two lessons in a legal back-to-back pair
+   * for every grade of the class. Anything else — a third same-day occurrence,
+   * or a same-day pair that is not adjacent/pairable — gets a [Double Periods]
+   * warning. Unflagged/below-threshold classes are never warned on (pairing is
+   * allowed but optional for them). Skipped on legacy quarters (no template).
    */
   function checkDoublePeriodPairings(
     teacherSchedules: Record<string, TeacherSchedule>,
@@ -5658,7 +5674,7 @@ export default function HistoryDetailPage() {
     const seen = new Set<string>()
 
     for (const cls of classes) {
-      if ((cls as DoubleAwareClass).isDouble !== true) continue
+      if (cls.isDouble !== true) continue
       if (!cls.teacher || !cls.subject) continue
       if (teacherFilter && !teacherFilter.has(cls.teacher)) continue
 
@@ -5688,11 +5704,13 @@ export default function HistoryDetailPage() {
   }
 
   /**
-   * EDITING: Warn (toast) when a swap/move leaves a double-period-flagged
-   * class's lessons unpaired — e.g. moving one half of a pair without the
-   * other. Soft by design: the edit still applies (humans may override); the
-   * same condition resurfaces as a [Double Periods] warning at save-time
-   * validation. Compares before/after so pre-existing issues don't re-toast.
+   * EDITING: Warn (toast) when a swap/move leaves a REQUIRED-double class's
+   * lessons unpaired — e.g. moving one half of a pair without the other.
+   * Applies only to classes whose isDouble survived the grade threshold;
+   * optional pairing on other classes never toasts. Soft by design: the edit
+   * still applies (humans may override); the same condition resurfaces as a
+   * [Double Periods] warning at save-time validation. Compares before/after
+   * so pre-existing issues don't re-toast.
    */
   function warnIfDoublePairsBroken(
     before: Record<string, TeacherSchedule>,
@@ -5707,7 +5725,7 @@ export default function HistoryDetailPage() {
     const warned = new Set<string>()
 
     for (const cls of classes) {
-      if ((cls as DoubleAwareClass).isDouble !== true) continue
+      if (cls.isDouble !== true) continue
       if (!cls.teacher || !cls.subject || !filter.has(cls.teacher)) continue
       const clsGrade = cls.gradeDisplay || cls.grade
 
@@ -6072,8 +6090,8 @@ export default function HistoryDetailPage() {
     errors.push(...gradeConflictErrors)
 
     // 5. Subject conflicts - use shared core function
-    // (class defs let legal double-period pairs through)
-    const subjectConflictErrors = checkSubjectConflictsCore(workingSchedules.teacherSchedules, effectiveFreeformClasses ?? undefined)
+    // (legal double-period pairs are let through for any class)
+    const subjectConflictErrors = checkSubjectConflictsCore(workingSchedules.teacherSchedules)
     errors.push(...subjectConflictErrors)
 
     // 6. Fixed slot & availability - use shared core functions if class definitions available
@@ -6171,11 +6189,8 @@ export default function HistoryDetailPage() {
     errors.push(...gradeConflictErrors)
 
     // 2. Subject conflicts - use shared core function
-    // (class defs let legal double-period pairs through)
-    const subjectConflictErrors = checkSubjectConflictsCore(
-      option.teacherSchedules,
-      stats?.classes_snapshot ? parseClassesForTemplate(stats.classes_snapshot) : undefined
-    )
+    // (legal double-period pairs are let through for any class)
+    const subjectConflictErrors = checkSubjectConflictsCore(option.teacherSchedules)
     errors.push(...subjectConflictErrors)
 
     // 3. Grade consistency - use shared core function
@@ -6383,7 +6398,8 @@ export default function HistoryDetailPage() {
         errors.push(...availabilityErrors)
       }
 
-      // 9b. Double-Period Pairing (soft warning) - flagged classes must meet as
+      // 9b. Double-Period Pairing (soft warning) - required-double classes
+      // (subject flagged AND all grades at/above the threshold) must meet as
       // one back-to-back pair (or a lone single lesson) per day. Uses the
       // freeform working classes when transfers are pending, same as the
       // session-count check above.

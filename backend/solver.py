@@ -125,8 +125,11 @@ class ClassEntry:
     grade_display: str = ''  # Display name for schedules (e.g., '6th-7th Grade')
     is_elective: bool = False  # Electives skip grade conflicts
     is_cotaught: bool = False  # Co-taught classes must be scheduled together
-    is_double: bool = False  # Subject requires double periods (two consecutive blocks per meeting)
-    allowed_pairs: list = field(default_factory=list)  # [(earlierBlock, laterBlock), ...] legal double pairs
+    is_double: bool = False  # Subject REQUIRES double periods (every meeting is two consecutive blocks)
+    # [(earlierBlock, laterBlock), ...] legal double pairs (intersection of every
+    # covered grade's pairs). Computed for EVERY class when grade_block_pairs is
+    # provided: flagged classes MUST use them; unflagged classes MAY (solver's choice).
+    allowed_pairs: list = field(default_factory=list)
     available_days: list = field(default_factory=lambda: DAYS.copy())
     available_blocks: list = field(default_factory=lambda: BLOCKS.copy())
     fixed_slots: list = field(default_factory=list)  # [(day, block), ...]
@@ -145,10 +148,14 @@ class Session:
     is_cotaught: bool = False  # Co-taught classes must be scheduled together
     # Double-period metadata:
     class_key: int = -1  # Index of the originating class (groups a class's meetings)
-    is_double_class: bool = False  # Session belongs to a double-period-flagged class
+    is_double_class: bool = False  # Session belongs to a class REQUIRING double periods
     pair_id: Optional[int] = None  # Shared by the two halves of one double meeting
     pair_pos: int = 0  # 0 = first half (or single/meeting representative), 1 = second half
     pair_slots: Optional[list] = None  # (first_slot, second_slot) tuples; stored on first half
+    # Optional doubles (default mode): the class's legal (earlierBlock, laterBlock)
+    # pairs. Set on every session of an UNFLAGGED class that has >=1 legal pair;
+    # lets two same-class sessions share a day iff their blocks form a legal pair.
+    allowed_block_pairs: Optional[list] = None
 
 
 @dataclass
@@ -423,6 +430,10 @@ def build_sessions(
     # Build sessions
     next_pair_id = 0
     for class_key, cls in enumerate(classes):
+        # Optional-double metadata: unflagged classes with >=1 legal pair may
+        # (but never must) hold a day's two lessons as a legal consecutive pair.
+        # Flagged (required) classes use the pair_id/pair_slots machinery instead.
+        opt_pairs = list(cls.allowed_pairs) if (cls.allowed_pairs and not cls.is_double) else None
         if cls.fixed_slots:
             class_fixed_sessions = []
             for day, block in cls.fixed_slots:
@@ -442,6 +453,7 @@ def build_sessions(
                         is_cotaught=cls.is_cotaught,
                         class_key=class_key,
                         is_double_class=cls.is_double,
+                        allowed_block_pairs=opt_pairs,
                     )
                     sessions.append(s)
                     class_fixed_sessions.append(s)
@@ -521,6 +533,7 @@ def build_sessions(
                     pair_id=pair_id,
                     pair_pos=pair_pos,
                     pair_slots=pair_slots,
+                    allowed_block_pairs=opt_pairs,
                 )
 
             if cls.is_double:
@@ -1060,8 +1073,29 @@ def solve_with_cpsat(sessions: list[Session], seed: int = 0, time_limit: float =
     # Note: Also skip electives for this constraint
     # Note: Co-taught sessions (same subject, different teachers) are allowed on same day
     #       because they're constrained to be at the SAME time slot
+    # Exception (optional doubles): two sessions of the SAME unflagged class may
+    # share a day iff their blocks form one of the class's legal consecutive
+    # pairs (allowed_block_pairs) - i.e. a day holds one single OR one legal
+    # double, the solver's choice. Pairwise legality also caps a grade+subject
+    # at two lessons per day: a legal pair has exactly two distinct blocks, so
+    # three same-day sessions can never be pairwise-paired.
     # This constraint can be toggled via the 'no_duplicate_subjects' rule
     if is_rule_enabled(rules, 'no_duplicate_subjects'):
+        # Lazily-created per-session day/block vars, shared by the optional-double
+        # branch below (a multi-grade class hits the same session pair once per
+        # covered grade; relaxed_pairs_done dedupes the reified machinery).
+        dup_day_block_vars: dict[int, tuple] = {}
+        relaxed_pairs_done: set[tuple] = set()
+
+        def get_day_block_vars(sess):
+            if sess.id not in dup_day_block_vars:
+                dv = model.NewIntVar(0, len(DAYS) - 1, f'dupday_{sess.id}')
+                model.AddDivisionEquality(dv, slot_vars[sess.id], len(BLOCKS))
+                bv = model.NewIntVar(0, len(BLOCKS) - 1, f'dupblk_{sess.id}')
+                model.AddModuloEquality(bv, slot_vars[sess.id], len(BLOCKS))
+                dup_day_block_vars[sess.id] = (dv, bv)
+            return dup_day_block_vars[sess.id]
+
         for grade in active_grades:
             subjects_for_grade = set()
             for s in active_sessions:
@@ -1084,12 +1118,46 @@ def solve_with_cpsat(sessions: list[Session], seed: int = 0, time_limit: float =
                             # Skip if both are co-taught (they'll be at same slot anyway)
                             if s1.is_cotaught and s2.is_cotaught and s1.teacher != s2.teacher:
                                 continue
-                            # Skip the two halves of one double meeting - a double is
-                            # the ONLY allowed same-day repeat. Halves of DIFFERENT
-                            # meetings (or a single vs. a pair half) still get the
-                            # different-day constraint, so a third same-day occurrence
-                            # and two meetings of one class per day stay forbidden.
+                            # Skip the two halves of one double meeting of a REQUIRED
+                            # class - halves of DIFFERENT meetings (or a single vs. a
+                            # pair half) still get the different-day constraint, so a
+                            # third same-day occurrence and two meetings of one class
+                            # per day stay forbidden.
                             if s1.pair_id is not None and s1.pair_id == s2.pair_id:
+                                continue
+                            # Optional doubles: two sessions of the same UNFLAGGED
+                            # class may share a day iff their blocks form one of the
+                            # class's legal pairs. (Required classes keep the strict
+                            # path - their pairing is modeled via pair_id above and
+                            # constraint 3b below.)
+                            if (s1.class_key >= 0 and s1.class_key == s2.class_key
+                                    and not s1.is_double_class and s1.allowed_block_pairs):
+                                pkey = (min(s1.id, s2.id), max(s1.id, s2.id))
+                                if pkey in relaxed_pairs_done:
+                                    continue
+                                relaxed_pairs_done.add(pkey)
+                                d1, b1 = get_day_block_vars(s1)
+                                d2, b2 = get_day_block_vars(s2)
+                                same_day = model.NewBoolVar(f'sameday_{s1.id}_{s2.id}')
+                                model.Add(d1 == d2).OnlyEnforceIf(same_day)
+                                model.Add(d1 != d2).OnlyEnforceIf(same_day.Not())
+                                # same_day => the two blocks are a legal pair
+                                # (either orientation; sessions are interchangeable)
+                                pair_lits = []
+                                for pa, pb in s1.allowed_block_pairs:
+                                    if pa not in BLOCKS or pb not in BLOCKS:
+                                        continue
+                                    ia, ib = BLOCKS.index(pa), BLOCKS.index(pb)
+                                    for x, y in ((ia, ib), (ib, ia)):
+                                        lit = model.NewBoolVar(
+                                            f'optdbl_{s1.id}_{s2.id}_{x}_{y}')
+                                        model.Add(b1 == x).OnlyEnforceIf(lit)
+                                        model.Add(b2 == y).OnlyEnforceIf(lit)
+                                        pair_lits.append(lit)
+                                if pair_lits:
+                                    model.AddBoolOr(pair_lits).OnlyEnforceIf(same_day)
+                                else:
+                                    model.Add(d1 != d2)
                                 continue
                             # day = slot // num_blocks, so different days means
                             # slot1 // num_blocks != slot2 // num_blocks
@@ -2007,9 +2075,13 @@ def generate_schedules(
         grade_block_pairs: Dict mapping grade name to a list of [earlierBlock, laterBlock]
             pairs the grade can hold a double period in (never straddling a break or
             that grade's lunch - built upstream from the timetable template). A class
-            flagged for double periods may only use pairs present for EVERY grade it
-            covers (intersection). Absent field = no pairing available; flagged classes
-            needing at least one double then fail preflight.
+            may only use pairs present for EVERY grade it covers (intersection).
+            When provided, EVERY class may schedule a day's lessons as one single or
+            one legal double (the solver's choice, never required); classes flagged
+            is_double MUST pair every meeting (odd lesson = one single), meetings on
+            distinct days. Absent field = no pairing available: unflagged classes are
+            strictly one lesson per day (legacy behavior); flagged classes needing at
+            least one double fail preflight.
 
     Returns:
         Dict with status, options, message, seeds_completed
@@ -2181,8 +2253,11 @@ def generate_schedules(
         # Legal pairs for this class = intersection of every covered grade's pairs.
         # A grade missing from grade_block_pairs contributes an empty list (fail
         # closed - we cannot know which pairs avoid that grade's lunch/breaks).
+        # Computed for EVERY class: flagged classes MUST pair every meeting;
+        # unflagged classes MAY pair a day's two lessons (solver's choice).
+        # Legacy requests (no grade_block_pairs) leave this empty for all classes.
         allowed_pairs = []
-        if is_double and grades_list:
+        if grades_list:
             pair_sets = [set(grade_pairs.get(g, [])) for g in grades_list]
             common = set.intersection(*pair_sets) if pair_sets else set()
             allowed_pairs = sorted(common)
@@ -2204,10 +2279,14 @@ def generate_schedules(
 
     full_time_names = [t.name for t in teacher_objs if t.status == 'full-time']
 
-    # Sessions of double-period classes must never be moved by post-processing
-    # (the two halves of a double stay together or don't move at all)
+    # Sessions of these classes must never be moved by post-processing:
+    # - required double-period classes (the two halves of a double stay together
+    #   or don't move at all)
+    # - classes with fixed slots (user-pinned; the solver honors the pin as a
+    #   hard constraint, so back-to-back redistribution must not undo it)
     frozen_class_entries = {
-        (c.teacher, c.grade_display, c.subject) for c in class_objs if c.is_double
+        (c.teacher, c.grade_display, c.subject)
+        for c in class_objs if c.is_double or c.fixed_slots
     } or None
 
     # Handle locked teachers for partial regeneration
@@ -2316,19 +2395,72 @@ def generate_schedules(
         diagnostics['incompleteClasses'] = incomplete_classes
 
     # Check 0b: Double periods - lesson counts, legal pairs, and fixed-slot pairing
+    #
+    # Two modes when grade_block_pairs is provided:
+    # - Default (unflagged classes): back-to-back is ALLOWED but never required.
+    #   A day holds one single or one legal double (solver's choice), so the
+    #   weekly cap is 2 lessons x days when the class has >=1 legal pair, else
+    #   1 x days. Legacy requests (no pairs map) keep the old 1-per-day cap.
+    # - Required (is_double classes): every meeting is a legal double (plus one
+    #   odd single), meetings on distinct days - unchanged.
+    dup_rule_on = is_rule_enabled(rules, 'no_duplicate_subjects')
     for cls in class_objs:
         lessons = len(cls.fixed_slots) if cls.fixed_slots else cls.days_per_week
         label = f"'{cls.teacher} - {cls.subject}' ({cls.grade_display})"
 
         if not cls.is_double:
-            # Unflagged classes need one distinct day per lesson
-            if lessons > len(DAYS):
-                preflight_errors.append(
-                    f"Class {label} needs {lessons} lessons per week, but a subject "
-                    f"without double periods can meet at most once per day "
-                    f"({len(DAYS)} days). Enable 'requires double periods' on subject "
-                    f"'{cls.subject}' to allow two consecutive blocks per day."
-                )
+            has_pairs = bool(cls.allowed_pairs)
+            max_lessons = (2 * len(DAYS)) if has_pairs else len(DAYS)
+            if lessons > max_lessons:
+                if has_pairs:
+                    preflight_errors.append(
+                        f"Class {label} needs {lessons} lessons per week, but at most "
+                        f"{max_lessons} fit ({len(DAYS)} days × 2 lessons as a double "
+                        f"period per day)."
+                    )
+                elif grade_pairs:
+                    grades_str = ', '.join(cls.grades) if cls.grades else '(no grades)'
+                    preflight_errors.append(
+                        f"Class {label} needs {lessons} lessons per week, but it can "
+                        f"meet at most once per day ({len(DAYS)} days): there are no "
+                        f"legal consecutive block pairs shared by all of its grades "
+                        f"({grades_str}), so double periods are impossible. Check the "
+                        f"quarter's timetable for pairable blocks common to these grades."
+                    )
+                else:
+                    preflight_errors.append(
+                        f"Class {label} needs {lessons} lessons per week, but a subject "
+                        f"without double periods can meet at most once per day "
+                        f"({len(DAYS)} days). Enable 'requires double periods' on subject "
+                        f"'{cls.subject}' to allow two consecutive blocks per day."
+                    )
+            # Same-day fixed lessons must form one legal double (at most 2 per day).
+            # Only checked when the pairs map was provided (legacy requests keep the
+            # old behavior: the solver reports plain infeasibility), the duplicate-
+            # subject rule is on (disabled = same-day repeats unrestricted), and the
+            # class is not an elective (electives skip the duplicate-subject rule).
+            if grade_pairs and dup_rule_on and not cls.is_elective and cls.fixed_slots:
+                fixed_by_day: dict[str, list] = {}
+                for day, block in cls.fixed_slots:
+                    fixed_by_day.setdefault(day, []).append(block)
+                pair_set = set(cls.allowed_pairs)
+                problems = []
+                for day, blist in fixed_by_day.items():
+                    if len(blist) == 2:
+                        ordered = sorted(blist, key=lambda b: BLOCKS.index(b) if b in BLOCKS else -1)
+                        if (ordered[0], ordered[1]) not in pair_set:
+                            problems.append(
+                                f"{day} blocks {ordered[0]}+{ordered[1]} are not a legal double-period pair"
+                            )
+                    elif len(blist) > 2:
+                        problems.append(
+                            f"{day} has {len(blist)} fixed lessons (at most 2, forming one double period)"
+                        )
+                if problems:
+                    preflight_errors.append(
+                        f"Class {label} has same-day fixed lessons that don't form a "
+                        f"legal double period: " + '; '.join(problems)
+                    )
             continue
 
         num_doubles = lessons // 2

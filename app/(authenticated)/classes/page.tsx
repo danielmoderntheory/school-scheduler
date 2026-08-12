@@ -31,7 +31,7 @@ import { GenerateModal } from "@/components/GenerateModal"
 import { useQuarterSelection } from "@/lib/hooks/useQuarterSelection"
 import { TEACHER_STATUS_FULL_TIME, isPartTime, isFullTime, calculateGradeBlocks, buildCotaughtGroups, type TeacherStatus } from "@/lib/schedule-utils"
 import { getTemplateBlocks, getTeachableBlocksForGrade } from "@/lib/timetable-utils"
-import type { TimetableTemplate } from "@/lib/types"
+import { DOUBLE_REQUIRED_FROM_SORT_ORDER, type TimetableTemplate } from "@/lib/types"
 import type { SchedulingRule } from "@/lib/scheduler-remote"
 import toast from "@/lib/toast"
 
@@ -101,6 +101,17 @@ interface Quarter {
 const DAYS = ["Mon", "Tues", "Wed", "Thurs", "Fri"]
 // Legacy fallback — the real block list comes from the quarter's timetable template
 const DEFAULT_BLOCKS = [1, 2, 3, 4, 5]
+
+// The subject "Double periods" flag only binds (back-to-back REQUIRED) when every
+// covered grade is 6th and up. Below that — and for unflagged subjects — the
+// scheduler may still pair lessons into doubles, but isn't required to.
+function doubleFlagBindsForGrades(gradeIds: string[], grades: Grade[]): boolean {
+  if (gradeIds.length === 0) return false
+  return gradeIds.every((id) => {
+    const grade = grades.find((g) => g.id === id)
+    return grade !== undefined && grade.sort_order >= DOUBLE_REQUIRED_FROM_SORT_ORDER
+  })
+}
 // NOTE: Study hall grades are now configured in the rules, fetched below
 
 function formatTimeAgo(timestamp: string): string {
@@ -2234,23 +2245,10 @@ Maria\t6th-11th Elective\tSpanish 101\t1\tMon Block 5`}
                     warnings.push(`New subjects will be created: ${Array.from(newSubjects).join(', ')}`)
                   }
 
-                  // Classes over 5 blocks/week need their subject flagged for double
-                  // periods. Imported subjects are created unflagged, so warn (don't
-                  // block) — the flag lives in Settings → Subjects.
-                  const doublePeriodRows = pendingImport.filter(row => {
-                    if (row.daysPerWeek <= 5) return false
-                    const subject = subjects.find(s => s.name.toLowerCase() === row.subjectName.toLowerCase())
-                    return !subject || subject.requires_double_periods !== true
-                  })
-                  if (doublePeriodRows.length > 0) {
-                    const rowList = doublePeriodRows
-                      .slice(0, 3)
-                      .map(r => `${r.teacherName} - ${r.gradeStr} - ${r.subjectName} (${r.daysPerWeek} blocks)`)
-                      .join('; ')
-                    warnings.push(
-                      `Over 5 blocks/week — the subject will need the "Double periods" flag (Settings → Subjects) before generating: ${rowList}${doublePeriodRows.length > 3 ? ` (+${doublePeriodRows.length - 3} more)` : ''}`
-                    )
-                  }
+                  // More than 5 lessons/week is legal for any subject — the scheduler
+                  // pairs lessons into back-to-back doubles as needed. Surface a
+                  // neutral note, not a warning.
+                  const highBlockCount = pendingImport.filter(row => row.daysPerWeek > 5).length
 
                   // Check for duplicates within import
                   const seen = new Map<string, number>()
@@ -2296,6 +2294,12 @@ Maria\t6th-11th Elective\tSpanish 101\t1\tMon Block 5`}
                           <ul className="list-disc list-inside space-y-0.5">
                             {warnings.map((w, i) => <li key={i}>{w}</li>)}
                           </ul>
+                        </div>
+                      )}
+                      {highBlockCount > 0 && (
+                        <div className="bg-blue-50 border border-blue-200 rounded-lg p-3 text-sm text-blue-800">
+                          {highBlockCount} {highBlockCount === 1 ? "row has" : "rows have"} more than 5
+                          lessons — these will use back-to-back doubles as needed.
                         </div>
                       )}
                       <div className="bg-emerald-50 border border-emerald-200 rounded-lg p-3 text-sm text-emerald-800">
@@ -2968,11 +2972,14 @@ function ClassRow({
       </td>
       <td className="px-1 py-1">
         {(() => {
-          const requiresDouble =
+          const subjectFlagged =
             cls.requires_double_periods === true ||
             cls.subject?.requires_double_periods === true ||
             subjects.find((s) => s.id === cls.subject_id)?.requires_double_periods === true
-          const needsDoubleFlag = !requiresDouble && cls.days_per_week > 5
+          // Badge only when the flag actually binds: all covered grades 6th and up
+          const requiresDouble =
+            subjectFlagged &&
+            doubleFlagBindsForGrades(cls.grade_ids || (cls.grade_id ? [cls.grade_id] : []), grades)
           return (
             <div className="flex items-center gap-1">
               <NumberCell
@@ -2983,18 +2990,10 @@ function ClassRow({
               />
               {requiresDouble && (
                 <span
-                  title="Double periods — lessons pair into back-to-back blocks (e.g. 7 lessons = 3 doubles + 1 single)"
+                  title="Double periods required — lessons pair into back-to-back blocks (e.g. 7 lessons = 3 doubles + 1 single)"
                   className="px-1 rounded bg-violet-100 text-violet-700 text-[10px] font-semibold cursor-help flex-shrink-0"
                 >
                   2×
-                </span>
-              )}
-              {needsDoubleFlag && (
-                <span
-                  title={'More than 5 blocks needs the subject’s "Double periods" flag (Settings → Subjects) or ≤5 lessons'}
-                  className="cursor-help flex-shrink-0"
-                >
-                  <AlertTriangle className="h-3.5 w-3.5 text-amber-500" />
                 </span>
               )}
             </div>
@@ -3121,9 +3120,10 @@ function NewClassRow({
       </td>
       <td className="px-1 py-1">
         {isActive && (() => {
-          const requiresDouble =
+          const subjectFlagged =
             subjects.find((s) => s.id === data.subject_id)?.requires_double_periods === true
-          const needsDoubleFlag = !requiresDouble && data.days_per_week > 5
+          // Badge only when the flag actually binds: all selected grades 6th and up
+          const requiresDouble = subjectFlagged && doubleFlagBindsForGrades(data.grade_ids, grades)
           return (
             <div className="flex items-center gap-1">
               <NumberCell
@@ -3134,18 +3134,10 @@ function NewClassRow({
               />
               {requiresDouble && (
                 <span
-                  title="Double periods — lessons pair into back-to-back blocks (e.g. 7 lessons = 3 doubles + 1 single)"
+                  title="Double periods required — lessons pair into back-to-back blocks (e.g. 7 lessons = 3 doubles + 1 single)"
                   className="px-1 rounded bg-violet-100 text-violet-700 text-[10px] font-semibold cursor-help flex-shrink-0"
                 >
                   2×
-                </span>
-              )}
-              {needsDoubleFlag && (
-                <span
-                  title={'More than 5 blocks needs the subject’s "Double periods" flag (Settings → Subjects) or ≤5 lessons'}
-                  className="cursor-help flex-shrink-0"
-                >
-                  <AlertTriangle className="h-3.5 w-3.5 text-amber-500" />
                 </span>
               )}
             </div>
