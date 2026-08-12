@@ -23,9 +23,9 @@ import {
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog"
 import { Loader2, Coffee, AlertTriangle, Users, CheckCircle2, ChevronDown, ChevronRight } from "lucide-react"
-import { generateSchedulesRemote, type ScheduleDiagnostics, type SchedulingRule } from "@/lib/scheduler-remote"
-import { DAYS, type Teacher, type ClassEntry, type TimetableTemplate } from "@/lib/types"
-import { getTemplateBlocks, getTeachableBlocksForGrade } from "@/lib/timetable-utils"
+import { generateSchedulesRemote, type RemoteClassEntry, type ScheduleDiagnostics, type SchedulingRule } from "@/lib/scheduler-remote"
+import { DAYS, type Teacher, type TimetableTemplate } from "@/lib/types"
+import { getTemplateBlocks, getTeachableBlocksForGrade, getPairableBlocksForGrade } from "@/lib/timetable-utils"
 import { useGeneration } from "@/lib/generation-context"
 import { calculateGradeBlocks, buildCotaughtGroups, type BlockCountClass } from "@/lib/schedule-utils"
 import toast from "@/lib/toast"
@@ -48,7 +48,8 @@ interface DBClass {
   grades?: Array<{ id: string; name: string; display_name: string; sort_order: number }>
   is_elective?: boolean
   is_cotaught?: boolean
-  subject: { id: string; name: string }
+  subject: { id: string; name: string; requires_double_periods?: boolean }
+  requires_double_periods?: boolean
   days_per_week: number
   restrictions: Array<{
     restriction_type: string
@@ -267,7 +268,7 @@ export function GenerateModal({
     onOpenChange(false)
   }
 
-  function convertToSchedulerFormat(): { teachers: Teacher[]; classes: ClassEntry[] } {
+  function convertToSchedulerFormat(): { teachers: Teacher[]; classes: RemoteClassEntry[] } {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const teacherList: Teacher[] = teachers.map((t: any) => ({
       id: t.id,
@@ -286,7 +287,7 @@ export function GenerateModal({
       }
     }
 
-    const classList: ClassEntry[] = classes.map((c) => {
+    const classList: RemoteClassEntry[] = classes.map((c) => {
       // Build grades array - prefer new grades field, fall back to single grade
       let gradesList: string[] = []
       let gradeDisplay = ""
@@ -306,7 +307,7 @@ export function GenerateModal({
         gradeDisplay = c.grade.display_name
       }
 
-      const entry: ClassEntry = {
+      const entry: RemoteClassEntry = {
         id: c.id,
         teacher: c.teacher?.name || "(deleted)",
         grade: gradeDisplay,
@@ -316,6 +317,7 @@ export function GenerateModal({
         daysPerWeek: c.days_per_week,
         isElective: c.is_elective || false,
         isCotaught: c.is_cotaught || false,
+        isDouble: c.requires_double_periods === true || c.subject?.requires_double_periods === true,
       }
 
       // Process restrictions
@@ -420,6 +422,11 @@ export function GenerateModal({
       const solveGradeTeachableBlocks = Object.fromEntries(
         grades.map((g) => [g.display_name, getTeachableBlocksForGrade(solveTemplate, g.id)])
       )
+      // Consecutive-block pairs legal for double periods, keyed by display name
+      // like gradeTeachableBlocks above.
+      const solveGradeBlockPairs = Object.fromEntries(
+        grades.map((g) => [g.display_name, getPairableBlocksForGrade(solveTemplate, g.id)])
+      )
 
       let result = await generateSchedulesRemote(teacherList, classList, {
         numOptions: 1,
@@ -429,6 +436,7 @@ export function GenerateModal({
         grades: gradeNames,
         blocks: solveBlocks,
         gradeTeachableBlocks: solveGradeTeachableBlocks,
+        gradeBlockPairs: solveGradeBlockPairs,
         onProgress: (current, total, message) => {
           setProgress({ current, total, message })
         },
@@ -455,6 +463,7 @@ export function GenerateModal({
             grades: gradeNames,
             blocks: solveBlocks,
             gradeTeachableBlocks: solveGradeTeachableBlocks,
+            gradeBlockPairs: solveGradeBlockPairs,
             onProgress: (current, total, message) => {
               setProgress({ current, total, message: `[Deep] ${message}` })
             },
@@ -521,6 +530,8 @@ export function GenerateModal({
               is_cotaught: c.is_cotaught || false,
               subject_id: c.subject?.id || null,
               subject_name: c.subject?.name || null,
+              subject_requires_double_periods:
+                c.requires_double_periods === true || c.subject?.requires_double_periods === true,
               days_per_week: c.days_per_week,
               restrictions: c.restrictions || [],
             }

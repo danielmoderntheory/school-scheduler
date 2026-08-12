@@ -63,6 +63,7 @@ interface Grade {
 interface Subject {
   id: string
   name: string
+  requires_double_periods?: boolean
 }
 
 interface Restriction {
@@ -81,6 +82,8 @@ interface ClassEntry {
   is_cotaught?: boolean
   subject_id: string
   days_per_week: number
+  /** Mirrors subject.requires_double_periods (returned top-level by the classes API) */
+  requires_double_periods?: boolean
   teacher: Teacher | null
   teacher_deleted?: boolean
   grade: Grade
@@ -977,6 +980,10 @@ function ClassesPageContent() {
       }
 
       const daysPerWeek = parseInt(daysStr) || 1
+      if (daysPerWeek < 1 || daysPerWeek > 10) {
+        validationErrors.push(`Line ${lineNum}: Blocks/Week must be between 1 and 10 (got ${daysPerWeek})`)
+        continue
+      }
 
       parsedRows.push({
         line: lineNum,
@@ -2227,6 +2234,24 @@ Maria\t6th-11th Elective\tSpanish 101\t1\tMon Block 5`}
                     warnings.push(`New subjects will be created: ${Array.from(newSubjects).join(', ')}`)
                   }
 
+                  // Classes over 5 blocks/week need their subject flagged for double
+                  // periods. Imported subjects are created unflagged, so warn (don't
+                  // block) — the flag lives in Settings → Subjects.
+                  const doublePeriodRows = pendingImport.filter(row => {
+                    if (row.daysPerWeek <= 5) return false
+                    const subject = subjects.find(s => s.name.toLowerCase() === row.subjectName.toLowerCase())
+                    return !subject || subject.requires_double_periods !== true
+                  })
+                  if (doublePeriodRows.length > 0) {
+                    const rowList = doublePeriodRows
+                      .slice(0, 3)
+                      .map(r => `${r.teacherName} - ${r.gradeStr} - ${r.subjectName} (${r.daysPerWeek} blocks)`)
+                      .join('; ')
+                    warnings.push(
+                      `Over 5 blocks/week — the subject will need the "Double periods" flag (Settings → Subjects) before generating: ${rowList}${doublePeriodRows.length > 3 ? ` (+${doublePeriodRows.length - 3} more)` : ''}`
+                    )
+                  }
+
                   // Check for duplicates within import
                   const seen = new Map<string, number>()
                   const duplicates: string[] = []
@@ -2942,12 +2967,39 @@ function ClassRow({
         />
       </td>
       <td className="px-1 py-1">
-        <NumberCell
-          value={cls.days_per_week}
-          onChange={(val) => onUpdate(cls.id, "days_per_week", val)}
-          min={1}
-          max={10}
-        />
+        {(() => {
+          const requiresDouble =
+            cls.requires_double_periods === true ||
+            cls.subject?.requires_double_periods === true ||
+            subjects.find((s) => s.id === cls.subject_id)?.requires_double_periods === true
+          const needsDoubleFlag = !requiresDouble && cls.days_per_week > 5
+          return (
+            <div className="flex items-center gap-1">
+              <NumberCell
+                value={cls.days_per_week}
+                onChange={(val) => onUpdate(cls.id, "days_per_week", val)}
+                min={1}
+                max={10}
+              />
+              {requiresDouble && (
+                <span
+                  title="Double periods — lessons pair into back-to-back blocks (e.g. 7 lessons = 3 doubles + 1 single)"
+                  className="px-1 rounded bg-violet-100 text-violet-700 text-[10px] font-semibold cursor-help flex-shrink-0"
+                >
+                  2×
+                </span>
+              )}
+              {needsDoubleFlag && (
+                <span
+                  title={'More than 5 blocks needs the subject’s "Double periods" flag (Settings → Subjects) or ≤5 lessons'}
+                  className="cursor-help flex-shrink-0"
+                >
+                  <AlertTriangle className="h-3.5 w-3.5 text-amber-500" />
+                </span>
+              )}
+            </div>
+          )
+        })()}
       </td>
       <td className="px-1 py-1">
         <RestrictionsCell
@@ -3068,14 +3120,37 @@ function NewClassRow({
         )}
       </td>
       <td className="px-1 py-1">
-        {isActive && (
-          <NumberCell
-            value={data.days_per_week}
-            onChange={(val) => setData((d) => ({ ...d, days_per_week: val }))}
-            min={1}
-            max={10}
-          />
-        )}
+        {isActive && (() => {
+          const requiresDouble =
+            subjects.find((s) => s.id === data.subject_id)?.requires_double_periods === true
+          const needsDoubleFlag = !requiresDouble && data.days_per_week > 5
+          return (
+            <div className="flex items-center gap-1">
+              <NumberCell
+                value={data.days_per_week}
+                onChange={(val) => setData((d) => ({ ...d, days_per_week: val }))}
+                min={1}
+                max={10}
+              />
+              {requiresDouble && (
+                <span
+                  title="Double periods — lessons pair into back-to-back blocks (e.g. 7 lessons = 3 doubles + 1 single)"
+                  className="px-1 rounded bg-violet-100 text-violet-700 text-[10px] font-semibold cursor-help flex-shrink-0"
+                >
+                  2×
+                </span>
+              )}
+              {needsDoubleFlag && (
+                <span
+                  title={'More than 5 blocks needs the subject’s "Double periods" flag (Settings → Subjects) or ≤5 lessons'}
+                  className="cursor-help flex-shrink-0"
+                >
+                  <AlertTriangle className="h-3.5 w-3.5 text-amber-500" />
+                </span>
+              )}
+            </div>
+          )
+        })()}
       </td>
       <td className="px-1 py-1">
         {isActive && canCreate && (

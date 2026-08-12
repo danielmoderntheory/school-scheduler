@@ -40,6 +40,7 @@ import toast from "@/lib/toast"
 interface Subject {
   id: string
   name: string
+  requires_double_periods?: boolean
 }
 
 interface ArchiveStatus {
@@ -229,6 +230,10 @@ export default function SubjectsSettingsPage() {
             Manage subjects that can be assigned to classes. You can also create subjects
             directly from the Classes page.
           </p>
+          <p className="text-sm text-muted-foreground mt-1">
+            Double periods: lessons pair into back-to-back blocks (e.g. 7 lessons = 3
+            doubles + 1 single).
+          </p>
         </div>
 
         <div className="border rounded-lg">
@@ -236,6 +241,21 @@ export default function SubjectsSettingsPage() {
             <TableHeader>
               <TableRow>
                 <TableHead>Subject Name</TableHead>
+                <TableHead className="w-[150px]">
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <span className="cursor-help underline decoration-dotted underline-offset-2">
+                        Double Periods
+                      </span>
+                    </TooltipTrigger>
+                    <TooltipContent className="max-w-[260px]">
+                      <p>
+                        Lessons pair into back-to-back blocks (e.g. 7 lessons = 3
+                        doubles + 1 single)
+                      </p>
+                    </TooltipContent>
+                  </Tooltip>
+                </TableHead>
                 <TableHead className="w-[60px]"></TableHead>
               </TableRow>
             </TableHeader>
@@ -252,6 +272,24 @@ export default function SubjectsSettingsPage() {
                         onSave={(value) => updateSubject(subject.id, "name", value)}
                         saving={savingId === subject.id}
                       />
+                    </TableCell>
+                    <TableCell>
+                      <label className="flex items-center gap-2 cursor-pointer w-fit">
+                        <input
+                          type="checkbox"
+                          checked={subject.requires_double_periods === true}
+                          disabled={savingId === subject.id}
+                          onChange={(e) =>
+                            updateSubject(subject.id, "requires_double_periods", e.target.checked)
+                          }
+                          className="h-4 w-4 rounded border-slate-300 text-violet-600 focus:ring-violet-500"
+                        />
+                        {subject.requires_double_periods === true && (
+                          <span className="px-1 rounded bg-violet-100 text-violet-700 text-[10px] font-semibold">
+                            2×
+                          </span>
+                        )}
+                      </label>
                     </TableCell>
                     <TableCell>
                       {canArchive ? (
@@ -304,7 +342,7 @@ export default function SubjectsSettingsPage() {
               })}
               {/* Add new subject row */}
               <TableRow>
-                <TableCell colSpan={2}>
+                <TableCell colSpan={3}>
                   <form
                     onSubmit={(e) => {
                       e.preventDefault()

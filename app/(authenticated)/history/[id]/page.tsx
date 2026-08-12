@@ -40,7 +40,7 @@ import { Textarea } from "@/components/ui/textarea"
 import { Label } from "@/components/ui/label"
 import Link from "next/link"
 import type { ScheduleOption, TeacherSchedule, GradeSchedule, Teacher, FloatingBlock, PendingPlacement, ValidationError, CellLocation, ClassEntry, OpenBlockLabels, PendingTransfer, TimetableTemplate } from "@/lib/types"
-import { resolveRowsForGrade, getTemplateBlocks, getTeachableBlocksForGrade } from "@/lib/timetable-utils"
+import { resolveRowsForGrade, getTemplateBlocks, getTeachableBlocksForGrade, getPairableBlocksForGrade } from "@/lib/timetable-utils"
 import { parseClassesFromSnapshot, parseTeachersFromSnapshot, parseRulesFromSnapshot, hasValidSnapshots, detectClassChanges, detectTeacherChanges, applyTeacherRenames, applyTeacherChangesToSnapshot, computeExpectedTeachingSessions, findMismatchedTeachers, type GenerationStats, type ChangeDetectionResult, type CurrentClass, type ClassSnapshot, type TeacherSnapshot, type TeacherChangeResult } from "@/lib/snapshot-utils"
 import { parseGradeDisplayToNumbers, parseGradeDisplayToNames, gradesOverlap, gradesEqual, gradeNumToDisplay, isClassElective, isClassCotaught, shouldIgnoreGradeConflict, formatGradeDisplayCompact } from "@/lib/grade-utils"
 import { BLOCK_TYPE_OPEN, BLOCK_TYPE_STUDY_HALL, isOpenBlock, isStudyHall, isScheduledClass, isOccupiedBlock, entryIsOpen, entryIsOccupied, entryIsScheduledClass, isFullTime, setOpenBlockLabel, recalculateOptionStats, getFirstGradeEntry, isMultipleEntryCell } from "@/lib/schedule-utils"
@@ -556,6 +556,33 @@ export default function HistoryDetailPage() {
     return map
   }, [timetableTemplate, gradesData])
 
+  // Legal double-period block pairs per grade, keyed by grade DISPLAY NAME
+  // (same convention as teachableBlocksByGrade). Empty per grade / overall when
+  // there is no template — double-period checks are skipped in that case.
+  const gradeBlockPairsByGrade = useMemo(() => {
+    const map: Record<string, [number, number][]> = {}
+    for (const g of gradesData) {
+      map[g.display_name] = getPairableBlocksForGrade(timetableTemplate, g.id)
+    }
+    return map
+  }, [timetableTemplate, gradesData])
+
+  // True when blocks b1/b2 form a legal double-period pair for EVERY grade in
+  // the (possibly multi-grade) display string. Fails closed: a grade with no
+  // pair data, or an unparseable display, is never a legal pair.
+  function isLegalDoublePair(gradeDisplay: string, b1: number, b2: number): boolean {
+    const gradeNames = Object.keys(gradeBlockPairsByGrade)
+    if (gradeNames.length === 0) return false
+    const targets = parseGradeDisplayToNames(gradeDisplay, gradeNames)
+    if (targets.length === 0) return false
+    const key = `${Math.min(b1, b2)}|${Math.max(b1, b2)}`
+    return targets.every(g => {
+      const pairs = gradeBlockPairsByGrade[g]
+      if (!pairs || pairs.length === 0) return false
+      return pairs.some(([a, b]) => `${Math.min(a, b)}|${Math.max(a, b)}` === key)
+    })
+  }
+
   // Teachable-block check for a grade display string (may span multiple grades,
   // e.g. "6th-8th Grade"). Returns null if OK, otherwise the display name of the
   // first grade for which `block` is not teachable (its band's lunch block).
@@ -671,7 +698,7 @@ export default function HistoryDetailPage() {
 
     // Use core validation functions and map results to include placement details
     const gradeErrors = checkGradeConflictsCore(workingSchedules.teacherSchedules, classesSnapshot)
-    const subjectErrors = checkSubjectConflictsCore(workingSchedules.teacherSchedules)
+    const subjectErrors = checkSubjectConflictsCore(workingSchedules.teacherSchedules, effectiveFreeformClasses ?? undefined)
 
     // Map errors back to placements - only include conflicts involving pending placements
     for (const placement of pendingPlacements) {
@@ -738,7 +765,7 @@ export default function HistoryDetailPage() {
     }
 
     return conflicts
-  }, [workingSchedules, pendingPlacements, floatingBlocks, conflictResolution, generation?.stats?.classes_snapshot, templateBlocks])
+  }, [workingSchedules, pendingPlacements, floatingBlocks, conflictResolution, generation?.stats?.classes_snapshot, templateBlocks, effectiveFreeformClasses, gradeBlockPairsByGrade])
 
   // Extract just the IDs for highlighting
   const conflictingBlockIds = useMemo(() =>
@@ -765,7 +792,7 @@ export default function HistoryDetailPage() {
         type: e.type as 'grade_conflict' | 'subject_conflict' | 'other',
         message: e.message
       }))
-  }, [generation?.options, generation?.stats, viewingOption, templateBlocks, teachableBlocksByGrade])
+  }, [generation?.options, generation?.stats, viewingOption, templateBlocks, teachableBlocksByGrade, gradeBlockPairsByGrade])
 
   // Compute health status for each revision tab
   // Returns 'green' (perfect), 'yellow' (incomplete), or 'red' (conflicts)
@@ -844,7 +871,7 @@ export default function HistoryDetailPage() {
 
       return isComplete ? 'green' : 'yellow'
     })
-  }, [generation?.options, generation?.stats, templateBlocks, teachableBlocksByGrade])
+  }, [generation?.options, generation?.stats, templateBlocks, teachableBlocksByGrade, gradeBlockPairsByGrade])
 
   // Set validation errors when conflicts are detected
   // Deduplicate by message to avoid showing same conflict multiple times (e.g., for co-taught linked blocks)
@@ -1400,7 +1427,7 @@ export default function HistoryDetailPage() {
         // Get grade display names from database
         grades = gradesRaw.map((g: { display_name: string }) => g.display_name)
 
-        classes = classesRaw.map((c: CurrentClass) => {
+        classes = classesRaw.map((c: CurrentClass & { requires_double_periods?: boolean }) => {
           const restrictions = c.restrictions || []
           const fixedSlots: [string, number][] = []
           let availableDays = ['Mon', 'Tues', 'Wed', 'Thurs', 'Fri']
@@ -1427,6 +1454,9 @@ export default function HistoryDetailPage() {
             daysPerWeek: c.days_per_week,
             isElective: c.is_elective || false,
             isCotaught: c.is_cotaught || false,
+            // Double-period flag: /api/classes surfaces the subject-level
+            // requires_double_periods on each class row
+            isDouble: c.requires_double_periods === true,
             availableDays,
             availableBlocks,
             fixedSlots: fixedSlots.length > 0 ? fixedSlots : undefined,
@@ -1435,7 +1465,7 @@ export default function HistoryDetailPage() {
 
         // Build updated stats for validation with current class configuration
         const gradesMap = new Map(gradesRaw.map((g: { id: string; name: string; display_name: string }) => [g.id, g]))
-        const classesSnapshot = classesRaw.map((c: CurrentClass & { grade_ids?: string[] }) => {
+        const classesSnapshot = classesRaw.map((c: CurrentClass & { grade_ids?: string[]; requires_double_periods?: boolean }) => {
           const gradeIds = c.grade_ids?.length ? c.grade_ids : (c.grade?.id ? [c.grade.id] : [])
           const gradesArray = gradeIds.map((gid: string) => {
             const g = gradesMap.get(gid) as { id: string; name: string; display_name: string } | undefined
@@ -1451,6 +1481,7 @@ export default function HistoryDetailPage() {
             is_cotaught: c.is_cotaught || false,
             subject_id: c.subject?.id || null,
             subject_name: c.subject?.name || null,
+            subject_requires_double_periods: c.requires_double_periods === true,
             days_per_week: c.days_per_week,
             restrictions: (c.restrictions || []).map((r) => ({
               restriction_type: r.restriction_type,
@@ -1602,6 +1633,12 @@ export default function HistoryDetailPage() {
       const solveGradeTeachableBlocks = Object.fromEntries(
         gradesData.map(g => [g.display_name, getTeachableBlocksForGrade(regenTemplate, g.id)])
       )
+      // Legal double-period pairs per grade (display-name keyed, same convention
+      // as gradeTeachableBlocks) — solvers use these to place flagged classes as
+      // back-to-back pairs. Sent as grade_block_pairs on the remote request.
+      const solveGradeBlockPairs = Object.fromEntries(
+        gradesData.map(g => [g.display_name, getPairableBlocksForGrade(regenTemplate, g.id)])
+      )
 
       // Auto-escalation strategy: try progressively harder approaches until one works
       // 1. OR-Tools normal (50 seeds, quick per seed)
@@ -1642,6 +1679,7 @@ export default function HistoryDetailPage() {
         grades,
         blocks: solveBlocks,
         gradeTeachableBlocks: solveGradeTeachableBlocks,
+        gradeBlockPairs: solveGradeBlockPairs,
         onProgress: (current, total, message) => {
           setGenerationProgress({ current, total, message: `[OR-Tools] ${message}` })
         }
@@ -1668,6 +1706,7 @@ export default function HistoryDetailPage() {
           grades,
           blocks: solveBlocks,
           gradeTeachableBlocks: solveGradeTeachableBlocks,
+          gradeBlockPairs: solveGradeBlockPairs,
           onProgress: (current, total, message) => {
             setGenerationProgress({ current, total, message: `[OR-Tools Deep] ${message}` })
           }
@@ -1676,25 +1715,32 @@ export default function HistoryDetailPage() {
         usedStrategy = "deep"
       }
 
-      // Step 3: JS solver - different algorithm, shuffling can find solutions OR-Tools misses
+      // Step 3: JS solver - different algorithm, shuffling can find solutions OR-Tools misses.
+      // Isolated in its own try/catch: the JS solver fails closed on some inputs
+      // the remote solver supports (e.g. co-taught double periods), and its throw
+      // must not abort the remaining OR-Tools strategies below.
       if (!isValidResult(result, 'OR-Tools Deep')) {
         setGenerationProgress({ current: 0, total: 100, message: "Trying JS solver (shuffling)..." })
-        const jsResult = await generateSchedules(teachers, classes, {
-          numOptions: 1,
-          numAttempts: 100,
-          lockedTeachers: lockedSchedules,
-          teachersNeedingStudyHalls,
-          seed: currentSeed * 12345,
-          rules,
-          skipStudyHalls,
-          grades,
-          onProgress: (current, total, message) => {
-            setGenerationProgress({ current, total, message: `[JS] ${message}` })
-          }
-        }, solveBlocks, solveGradeTeachableBlocks)
-        result = jsResult
-        usedJsFallback = true
-        usedStrategy = "js"
+        try {
+          const jsResult = await generateSchedules(teachers, classes, {
+            numOptions: 1,
+            numAttempts: 100,
+            lockedTeachers: lockedSchedules,
+            teachersNeedingStudyHalls,
+            seed: currentSeed * 12345,
+            rules,
+            skipStudyHalls,
+            grades,
+            onProgress: (current, total, message) => {
+              setGenerationProgress({ current, total, message: `[JS] ${message}` })
+            }
+          }, solveBlocks, solveGradeTeachableBlocks, solveGradeBlockPairs)
+          result = jsResult
+          usedJsFallback = true
+          usedStrategy = "js"
+        } catch (jsError) {
+          console.warn("JS solver strategy failed, continuing with remaining strategies:", jsError)
+        }
       }
 
       // Step 4: If still failed, try OR-Tools suboptimal solutions
@@ -1713,6 +1759,7 @@ export default function HistoryDetailPage() {
           grades,
           blocks: solveBlocks,
           gradeTeachableBlocks: solveGradeTeachableBlocks,
+          gradeBlockPairs: solveGradeBlockPairs,
           onProgress: (current, total, message) => {
             setGenerationProgress({ current, total, message: `[OR-Tools Suboptimal] ${message}` })
           }
@@ -1737,6 +1784,7 @@ export default function HistoryDetailPage() {
           grades,
           blocks: solveBlocks,
           gradeTeachableBlocks: solveGradeTeachableBlocks,
+          gradeBlockPairs: solveGradeBlockPairs,
           onProgress: (current, total, message) => {
             setGenerationProgress({ current, total, message: `[OR-Tools Randomized] ${message}` })
           }
@@ -2047,7 +2095,7 @@ export default function HistoryDetailPage() {
         // Build new snapshots
         const gradesMap = new Map(gradesRaw.map((g: { id: string; name: string; display_name: string }) => [g.id, g]))
 
-        const classesSnapshot = classesRaw.map((c: CurrentClass & { grade_ids?: string[] }) => {
+        const classesSnapshot = classesRaw.map((c: CurrentClass & { grade_ids?: string[]; requires_double_periods?: boolean }) => {
           const gradeIds = c.grade_ids?.length ? c.grade_ids : (c.grade?.id ? [c.grade.id] : [])
           const gradesArray = gradeIds.map((gid: string) => {
             const g = gradesMap.get(gid) as { id: string; name: string; display_name: string } | undefined
@@ -2064,6 +2112,7 @@ export default function HistoryDetailPage() {
             is_cotaught: c.is_cotaught || false,
             subject_id: c.subject?.id || null,
             subject_name: c.subject?.name || null,
+            subject_requires_double_periods: c.requires_double_periods === true,
             days_per_week: c.days_per_week,
             restrictions: (c.restrictions || []).map((r) => ({
               restriction_type: r.restriction_type,
@@ -2996,7 +3045,7 @@ export default function HistoryDetailPage() {
     options?: { skipStudyHallCheck?: boolean }
   ): Promise<boolean> {
     const DAYS = ["Mon", "Tues", "Wed", "Thurs", "Fri"]
-    const softWarningTypes = ['back_to_back', 'study_hall_coverage', 'no_lunch']
+    const softWarningTypes = ['back_to_back', 'study_hall_coverage', 'no_lunch', 'double_period']
 
     // Define all checks
     const checkDefinitions = [
@@ -3011,6 +3060,7 @@ export default function HistoryDetailPage() {
       { name: 'Availability constraints', key: 'availability_violation' },
       { name: 'Back-to-back blocks', key: 'back_to_back' },
       { name: 'Teacher lunch breaks', key: 'no_lunch' },
+      { name: 'Double periods', key: 'double_period' },
     ]
 
     // Initialize modal with all checks pending (mark study hall as skipped if applicable)
@@ -3683,6 +3733,9 @@ export default function HistoryDetailPage() {
     })
     setSwapCount(prev => prev + 1)
 
+    // Soft warning if this move broke a double-period pair (never blocks)
+    warnIfDoublePairsBroken(swapWorkingSchedules.teacherSchedules, newTeacherSchedules, [teacher], classesForDoubleChecks())
+
     toast(`Moved ${formatGradeDisplayCompact(grade, true)} ${subject}: ${source.day} B${source.block} → ${target.day} B${target.block}`, { icon: successIcon })
 
     // Highlight the destination cell
@@ -3790,6 +3843,9 @@ export default function HistoryDetailPage() {
       gradeSchedules: newGradeSchedules,
     })
     setSwapCount(prev => prev + 1)
+
+    // Soft warning if this swap broke a double-period pair (never blocks)
+    warnIfDoublePairsBroken(swapWorkingSchedules.teacherSchedules, newTeacherSchedules, [sourceTeacher, target.teacher], classesForDoubleChecks())
 
     toast(successMessage, { icon: successIcon })
     highlightCells(destinationCells)
@@ -4324,6 +4380,14 @@ export default function HistoryDetailPage() {
         ...newPlacements
       ])
 
+      // Soft warning if this placement broke a double-period pair (never blocks)
+      warnIfDoublePairsBroken(
+        workingSchedules.teacherSchedules,
+        newTeacherSchedules,
+        [location.teacher, ...linkedPartners.map(p => p.sourceTeacher)],
+        classesForDoubleChecks()
+      )
+
       setSelectedFloatingBlock(null)
       setValidationErrors([])
       setConflictResolution(null)
@@ -4404,6 +4468,50 @@ export default function HistoryDetailPage() {
       setSelectedFloatingBlock(newFloatingBlock.id)
     } else {
       setSelectedFloatingBlock(null)
+    }
+
+    // Double-period guard (soft warnings, never blocks the drop):
+    // 1. Same-day breaks (non-adjacent pair / 3rd occurrence) via before/after
+    const dblClasses = classesForDoubleChecks()
+    warnIfDoublePairsBroken(
+      workingSchedules.teacherSchedules,
+      newTeacherSchedules,
+      [location.teacher, block.sourceTeacher],
+      dblClasses
+    )
+    // 2. Cross-day splits: picking the block up already removed its pair
+    //    partner from the working schedule, so before/after comparison can't
+    //    see a pair split across days. Once every lesson of a flagged class is
+    //    placed, more lone singles than daysPerWeek allows (L mod 2) means a
+    //    double was split.
+    if (dblClasses && timetableTemplate) {
+      const cls = dblClasses.find(c =>
+        (c as DoubleAwareClass).isDouble === true &&
+        c.teacher === location.teacher &&
+        c.subject === block.subject &&
+        gradesOverlap(block.grade, c.gradeDisplay || c.grade)
+      )
+      if (cls) {
+        const clsGrade = cls.gradeDisplay || cls.grade
+        const matchesClass = (b: FloatingBlock) =>
+          b.subject === cls.subject && gradesOverlap(b.grade, clsGrade)
+        const stillFloating =
+          (newFloatingBlock !== null && matchesClass(newFloatingBlock)) ||
+          floatingBlocks.some(b =>
+            b.id !== block.id &&
+            matchesClass(b) &&
+            !pendingPlacements.some(p => p.blockId === b.id)
+          )
+        if (!stillFloating) {
+          const DAYS = ["Mon", "Tues", "Wed", "Thurs", "Fri"]
+          const singleDays = DAYS.filter(day =>
+            doublePeriodOccurrences(newTeacherSchedules, cls, day).length === 1
+          )
+          if (singleDays.length > cls.daysPerWeek % 2) {
+            toast(`Double periods: ${cls.subject} (${formatGradeDisplayCompact(clsGrade, true)}) has lessons placed as lone singles — doubles should stay back-to-back`, { icon: warningIcon })
+          }
+        }
+      }
     }
 
     // Clear validation errors and conflict resolution
@@ -5421,13 +5529,38 @@ export default function HistoryDetailPage() {
     return errors
   }
 
+  // ClassEntry with the double-period flag emitted by parseClassesFromSnapshot.
+  // The shared ClassEntry type in lib/types.ts hasn't caught up yet — same
+  // pattern as the 'no_lunch' ValidationError type below.
+  type DoubleAwareClass = ClassEntry & { isDouble?: boolean }
+
+  /** True when `classes` contains a double-period-flagged class matching (teacher, subject, overlapping grade). */
+  function isDoubleFlaggedClass(
+    teacher: string,
+    gradeDisplay: string,
+    subject: string,
+    classes: ClassEntry[]
+  ): boolean {
+    return classes.some(cls =>
+      (cls as DoubleAwareClass).isDouble === true &&
+      cls.teacher === teacher &&
+      cls.subject === subject &&
+      gradesOverlap(gradeDisplay, cls.gradeDisplay || cls.grade)
+    )
+  }
+
   /**
    * CORE: Check for subject conflicts - same subject twice on same day for a grade.
    * Rule: A grade shouldn't have the same subject at different times on the same day.
    * (Multiple teachers at same block = electives/co-taught, which is valid)
+   *
+   * When class definitions are provided, a legal double period — a flagged
+   * class meeting in exactly two back-to-back pairable blocks — is NOT a
+   * duplicate-subject conflict. Non-pair repeats are still flagged.
    */
   function checkSubjectConflictsCore(
-    teacherSchedules: Record<string, TeacherSchedule>
+    teacherSchedules: Record<string, TeacherSchedule>,
+    classes?: ClassEntry[]
   ): ValidationError[] {
     const errors: ValidationError[] = []
     const DAYS = ["Mon", "Tues", "Wed", "Thurs", "Fri"]
@@ -5465,6 +5598,15 @@ export default function HistoryDetailPage() {
         for (const [subject, occurrences] of subjectMap) {
           const uniqueBlocks = new Set(occurrences.map(o => o.block))
           if (uniqueBlocks.size > 1) {
+            // Legal double period: exactly two adjacent pairable blocks of a
+            // flagged class (every involved teacher's class must be flagged —
+            // covers co-taught doubles, where both teachers share the pair)
+            if (classes && uniqueBlocks.size === 2) {
+              const [b1, b2] = [...uniqueBlocks]
+              const teachersInvolved = [...new Set(occurrences.map(o => o.teacher))]
+              const allFlagged = teachersInvolved.every(t => isDoubleFlaggedClass(t, grade, subject, classes))
+              if (allFlagged && isLegalDoublePair(grade, b1, b2)) continue
+            }
             errors.push({
               type: 'subject_conflict',
               message: `[Subject Conflict] ${formatGradeDisplayCompact(grade, true)} has ${subject} at ${uniqueBlocks.size} different times on ${day}: ${occurrences.map(o => `${o.teacher} B${o.block}`).join(', ')}`,
@@ -5476,6 +5618,132 @@ export default function HistoryDetailPage() {
     }
 
     return errors
+  }
+
+  /** Blocks on `day` where `cls` meets in a teacher-schedule map (same matching semantics as entryMatchesClass). */
+  function doublePeriodOccurrences(
+    teacherSchedules: Record<string, TeacherSchedule>,
+    cls: ClassEntry,
+    day: string
+  ): number[] {
+    const schedule = teacherSchedules[cls.teacher]
+    const blocksHit: number[] = []
+    if (!schedule) return blocksHit
+    for (const block of templateBlocks) {
+      const entry = schedule[day]?.[block]
+      if (!entry || !isScheduledClass(entry[1])) continue
+      if (entry[1] !== cls.subject) continue
+      if (!gradesOverlap(entry[0], cls.gradeDisplay || cls.grade)) continue
+      blocksHit.push(block)
+    }
+    return blocksHit
+  }
+
+  /**
+   * CORE: Check double-period pairing (soft warning, like no_lunch).
+   * A flagged class (subject requires double periods) may meet at most once per
+   * day: either a lone single lesson, or exactly two lessons in a legal
+   * back-to-back pair for every grade of the class. Anything else — a third
+   * same-day occurrence, or a same-day pair that is not adjacent/pairable —
+   * gets a [Double Periods] warning. Skipped on legacy quarters (no template).
+   */
+  function checkDoublePeriodPairings(
+    teacherSchedules: Record<string, TeacherSchedule>,
+    classes: ClassEntry[],
+    teacherFilter?: Set<string>
+  ): ValidationError[] {
+    const errors: ValidationError[] = []
+    if (!timetableTemplate) return errors
+    const DAYS = ["Mon", "Tues", "Wed", "Thurs", "Fri"]
+    const seen = new Set<string>()
+
+    for (const cls of classes) {
+      if ((cls as DoubleAwareClass).isDouble !== true) continue
+      if (!cls.teacher || !cls.subject) continue
+      if (teacherFilter && !teacherFilter.has(cls.teacher)) continue
+
+      const clsGrade = cls.gradeDisplay || cls.grade
+      const dedupeKey = `${cls.teacher}|${clsGrade}|${cls.subject}`
+      if (seen.has(dedupeKey)) continue
+      seen.add(dedupeKey)
+
+      for (const day of DAYS) {
+        const blocksHit = doublePeriodOccurrences(teacherSchedules, cls, day)
+        if (blocksHit.length <= 1) continue
+        const isLegal = blocksHit.length === 2 && isLegalDoublePair(clsGrade, blocksHit[0], blocksHit[1])
+        if (!isLegal) {
+          errors.push({
+            // 'double_period' is a page-local soft warning type; the shared
+            // ValidationError union in lib/types.ts is frozen (same pattern
+            // as 'no_lunch' above).
+            type: 'double_period' as ValidationError['type'],
+            message: `[Double Periods] ${cls.subject} (${formatGradeDisplayCompact(clsGrade, true)}) on ${day}: lessons must be one back-to-back pair`,
+            cells: blocksHit.map(b => ({ teacher: cls.teacher, day, block: b, grade: clsGrade, subject: cls.subject }))
+          })
+        }
+      }
+    }
+
+    return errors
+  }
+
+  /**
+   * EDITING: Warn (toast) when a swap/move leaves a double-period-flagged
+   * class's lessons unpaired — e.g. moving one half of a pair without the
+   * other. Soft by design: the edit still applies (humans may override); the
+   * same condition resurfaces as a [Double Periods] warning at save-time
+   * validation. Compares before/after so pre-existing issues don't re-toast.
+   */
+  function warnIfDoublePairsBroken(
+    before: Record<string, TeacherSchedule>,
+    after: Record<string, TeacherSchedule>,
+    affectedTeachers: Array<string | null | undefined>,
+    classes: ClassEntry[] | null
+  ) {
+    if (!timetableTemplate || !classes) return
+    const filter = new Set(affectedTeachers.filter((t): t is string => !!t))
+    if (filter.size === 0) return
+    const DAYS = ["Mon", "Tues", "Wed", "Thurs", "Fri"]
+    const warned = new Set<string>()
+
+    for (const cls of classes) {
+      if ((cls as DoubleAwareClass).isDouble !== true) continue
+      if (!cls.teacher || !cls.subject || !filter.has(cls.teacher)) continue
+      const clsGrade = cls.gradeDisplay || cls.grade
+
+      for (const day of DAYS) {
+        const key = `${cls.teacher}|${clsGrade}|${cls.subject}|${day}`
+        if (warned.has(key)) continue
+
+        const beforeBlocks = doublePeriodOccurrences(before, cls, day)
+        const afterBlocks = doublePeriodOccurrences(after, cls, day)
+        const wasLegal = beforeBlocks.length <= 1 ||
+          (beforeBlocks.length === 2 && isLegalDoublePair(clsGrade, beforeBlocks[0], beforeBlocks[1]))
+        const isLegal = afterBlocks.length <= 1 ||
+          (afterBlocks.length === 2 && isLegalDoublePair(clsGrade, afterBlocks[0], afterBlocks[1]))
+
+        if (wasLegal && !isLegal) {
+          // New same-day violation (non-adjacent pair or 3rd occurrence)
+          warned.add(key)
+          toast(`Double periods: ${cls.subject} (${formatGradeDisplayCompact(clsGrade, true)}) on ${day} is no longer one back-to-back pair`, { icon: warningIcon })
+        } else if (beforeBlocks.length === 2 && afterBlocks.length === 1) {
+          // Pair split: one half moved away (to another day/teacher)
+          warned.add(key)
+          toast(`Double periods: ${cls.subject} (${formatGradeDisplayCompact(clsGrade, true)}) pair on ${day} was split — its lessons should stay back-to-back`, { icon: warningIcon })
+        }
+      }
+    }
+  }
+
+  /**
+   * Class definitions for edit-time double-period checks: the freeform working
+   * set when available (reflects pending transfers), otherwise the generation
+   * snapshot. Null when no class data exists (checks are skipped).
+   */
+  function classesForDoubleChecks(): ClassEntry[] | null {
+    if (freeformMode && effectiveFreeformClasses) return effectiveFreeformClasses
+    const snapshot = generation?.stats?.classes_snapshot
+    return snapshot ? parseClassesForTemplate(snapshot) : null
   }
 
   /**
@@ -5804,7 +6072,8 @@ export default function HistoryDetailPage() {
     errors.push(...gradeConflictErrors)
 
     // 5. Subject conflicts - use shared core function
-    const subjectConflictErrors = checkSubjectConflictsCore(workingSchedules.teacherSchedules)
+    // (class defs let legal double-period pairs through)
+    const subjectConflictErrors = checkSubjectConflictsCore(workingSchedules.teacherSchedules, effectiveFreeformClasses ?? undefined)
     errors.push(...subjectConflictErrors)
 
     // 6. Fixed slot & availability - use shared core functions if class definitions available
@@ -5902,7 +6171,11 @@ export default function HistoryDetailPage() {
     errors.push(...gradeConflictErrors)
 
     // 2. Subject conflicts - use shared core function
-    const subjectConflictErrors = checkSubjectConflictsCore(option.teacherSchedules)
+    // (class defs let legal double-period pairs through)
+    const subjectConflictErrors = checkSubjectConflictsCore(
+      option.teacherSchedules,
+      stats?.classes_snapshot ? parseClassesForTemplate(stats.classes_snapshot) : undefined
+    )
     errors.push(...subjectConflictErrors)
 
     // 3. Grade consistency - use shared core function
@@ -6109,6 +6382,17 @@ export default function HistoryDetailPage() {
         const availabilityErrors = checkAvailabilityViolationsCore(option.teacherSchedules, classes)
         errors.push(...availabilityErrors)
       }
+
+      // 9b. Double-Period Pairing (soft warning) - flagged classes must meet as
+      // one back-to-back pair (or a lone single lesson) per day. Uses the
+      // freeform working classes when transfers are pending, same as the
+      // session-count check above.
+      if (stats.classes_snapshot) {
+        const classes = (freeformMode && effectiveFreeformClasses && pendingTransfers.length > 0)
+          ? effectiveFreeformClasses
+          : parseClassesForTemplate(stats.classes_snapshot)
+        errors.push(...checkDoublePeriodPairings(option.teacherSchedules, classes))
+      }
     }
 
     // 10. Teacher Lunch Coverage (soft warning) - template-driven quarters only.
@@ -6167,7 +6451,7 @@ export default function HistoryDetailPage() {
   }
 
   /** Soft warning types — shown separately from hard validation errors */
-  const SOFT_WARNING_TYPES = new Set(['back_to_back', 'no_lunch'])
+  const SOFT_WARNING_TYPES = new Set(['back_to_back', 'no_lunch', 'double_period'])
 
   function splitValidationErrors(errors: ValidationError[]) {
     const hard = errors.filter(e => !SOFT_WARNING_TYPES.has(e.type))

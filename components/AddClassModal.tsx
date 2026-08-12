@@ -60,6 +60,7 @@ interface Grade {
 interface Subject {
   id: string
   name: string
+  requires_double_periods?: boolean
 }
 
 interface Restriction {
@@ -483,8 +484,15 @@ export function AddClassModal({
     return isPendingId(id)
   }
 
+  // Does a subject require double periods? (pending subjects are always unflagged)
+  function subjectRequiresDouble(id?: string): boolean {
+    if (!id) return false
+    return allSubjects.find((s) => s.id === id)?.requires_double_periods === true
+  }
+
   // === Render Step Content ===
   function renderSetupStep() {
+    const selectedSubjectDouble = !isElective && subjectRequiresDouble(subjectId)
     return (
       <div className="space-y-4">
         {/* Mode Selection */}
@@ -645,7 +653,17 @@ export function AddClassModal({
         {/* Blocks per Week */}
         <div className="space-y-1.5">
           <div>
-            <Label className="text-sm font-medium">Blocks per Week</Label>
+            <Label className="text-sm font-medium">
+              Blocks per Week
+              {selectedSubjectDouble && (
+                <span
+                  title="Double periods — lessons pair into back-to-back blocks"
+                  className="ml-2 px-1 rounded bg-violet-100 text-violet-700 text-[10px] font-semibold cursor-help"
+                >
+                  2×
+                </span>
+              )}
+            </Label>
             <p className="text-xs text-muted-foreground">How many times per week this class meets</p>
           </div>
           <div className="flex gap-1">
@@ -665,6 +683,18 @@ export function AddClassModal({
               </button>
             ))}
           </div>
+          {selectedSubjectDouble && (
+            <p className="text-xs text-violet-600">
+              Lessons pair into back-to-back blocks (e.g. 7 lessons = 3 doubles + 1 single)
+            </p>
+          )}
+          {!isElective && !selectedSubjectDouble && daysPerWeek > 5 && (
+            <p className="text-xs text-amber-600 flex items-center gap-1">
+              <AlertTriangle className="h-3 w-3 flex-shrink-0" />
+              More than 5 blocks needs the subject&apos;s &ldquo;Double periods&rdquo; flag
+              (Settings → Subjects) or ≤5 lessons.
+            </p>
+          )}
         </div>
       </div>
     )
@@ -1236,7 +1266,17 @@ export function AddClassModal({
                         )}
                       </div>
                     </td>
-                    <td className="px-3 py-2 text-slate-600">{daysPerWeek}</td>
+                    <td className="px-3 py-2 text-slate-600">
+                      {daysPerWeek}
+                      {subjectRequiresDouble(isElective ? row.subjectId : subjectId) && (
+                        <span
+                          title="Double periods — lessons pair into back-to-back blocks"
+                          className="ml-1 px-1 rounded bg-violet-100 text-violet-700 text-[10px] font-semibold cursor-help"
+                        >
+                          2×
+                        </span>
+                      )}
+                    </td>
                     <td className="px-3 py-2">
                       {row.restrictions.length > 0 ? (
                         <div className="flex flex-wrap gap-1">
