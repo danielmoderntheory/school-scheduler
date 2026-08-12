@@ -971,6 +971,50 @@ if res_load['status'] == 'success':
 
 # ================================================================ summary
 print("\n" + "=" * 60)
+
+
+# =========================================================================
+# TEST 20: study hall eligibility + even distribution
+# =========================================================================
+def test_20():
+    print("\nTEST 20 — study hall eligibility (False = excluded) and even spread")
+    from solver import get_study_hall_eligible, Teacher as T
+
+    teachers = [
+        T(name='Excluded', status='full-time', can_supervise_study_hall=False),
+        T(name='EligibleTrue', status='full-time', can_supervise_study_hall=True),
+        T(name='EligibleNone', status='full-time', can_supervise_study_hall=None),
+        T(name='PartTimer', status='part-time', can_supervise_study_hall=True),
+    ]
+    rules = [{'rule_key': 'study_hall_teacher_eligibility', 'enabled': True,
+              'config': {'allow_full_time': True, 'allow_part_time': False}}]
+    elig = get_study_hall_eligible(teachers, [], rules)
+    check('False-flagged teacher excluded', 'Excluded' not in elig, str(elig))
+    check('True/None-flagged full-timers eligible',
+          'EligibleTrue' in elig and 'EligibleNone' in elig, str(elig))
+    check('part-timer excluded by status', 'PartTimer' not in elig, str(elig))
+
+    # Even spread: 2 eligible teachers with plenty of open blocks, 6 groups ->
+    # 3 each, never 5+1
+    from solver import add_study_halls, set_blocks, DAYS
+    set_blocks([1,2,3,4,5,6,7,8,9])
+    grades6 = [f'{n}th Grade' for n in (6,7,8,9,10,11)]
+    ts = {t: {d: {b: None for b in range(1,10)} for d in DAYS} for t in ('A','B')}
+    # Give A fewer teaching blocks than B so the old sort would give A everything
+    ts['B']['Mon'][1] = ['6th Grade','Math']; ts['B']['Mon'][2] = ['7th Grade','Math']
+    gs = {g: {d: {b: None for b in range(1,10)} for d in DAYS} for g in grades6}
+    sh_rules = [{'rule_key':'study_hall_grades','enabled':True,'config':{'grades':grades6}}]
+    res = add_study_halls(ts, gs, ['A','B'], preserve_existing=False, rules=sh_rules, grades=grades6)
+    counts = {}
+    for a in res:
+        if a.teacher: counts[a.teacher] = counts.get(a.teacher, 0) + 1
+    placed = sum(counts.values())
+    check('all 6 study halls placed', placed == 6, str(counts))
+    check('spread evenly (3/3, not 6/0)', counts.get('A') == 3 and counts.get('B') == 3, str(counts))
+
+test_20()
+
+
 fails = [n for n, ok in results if not ok]
 print(f"RESULT: {len(results) - len(fails)}/{len(results)} passed"
       + (f"; FAILED: {fails}" if fails else ""))

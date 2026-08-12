@@ -284,10 +284,10 @@ def get_study_hall_eligible(teachers: list[Teacher], classes: list[ClassEntry], 
     Eligibility:
     - Status must match allowed statuses from study_hall_teacher_eligibility rule
       (default: full-time only)
-    - Not individually excluded (canSuperviseStudyHall=True means excluded)
-
-    Note: The field is inverted - canSuperviseStudyHall=True means EXCLUDED from study hall
-    (because the UI checkbox is "Exclude from Study Hall")
+    - Not individually excluded: can_supervise_study_hall=False means EXCLUDED.
+      The Teachers page stores the "Exclude from Study Hall" checkbox as
+      can_supervise = NOT checked, so False = excluded and None/True = eligible
+      (matches the JS solver's `canSuperviseStudyHall !== false`).
     """
     allowed_statuses = get_study_hall_eligible_statuses(rules)
 
@@ -296,8 +296,8 @@ def get_study_hall_eligible(teachers: list[Teacher], classes: list[ClassEntry], 
         # Check if teacher's status is allowed by the rule config
         if t.status not in allowed_statuses:
             continue
-        # canSuperviseStudyHall=True means EXCLUDED (checkbox is "Exclude from Study Hall")
-        if t.can_supervise_study_hall is True:
+        # False = explicitly excluded; None/True = eligible
+        if t.can_supervise_study_hall is False:
             continue
         eligible.append(t.name)
     return eligible
@@ -1887,10 +1887,17 @@ def add_study_halls(teacher_schedules: dict, grade_schedules: dict,
 
     def try_place_study_hall(group_name: str, group_grades: list[str]) -> bool:
         """Try to place a study hall for a group of grades. Returns True if successful."""
+        # Spread study halls evenly: fewest already-assigned study halls first
+        # (counting preserved ones), then most open blocks as the tie-breaker.
+        # Sorting by open blocks alone made the lightest-loaded teacher absorb
+        # nearly every study hall.
+        sh_counts: dict[str, int] = {}
+        for a in assignments:
+            if a.teacher:
+                sh_counts[a.teacher] = sh_counts.get(a.teacher, 0) + 1
         teachers_by_availability = sorted(
             valid_teachers,
-            key=count_open_blocks,
-            reverse=True
+            key=lambda t: (sh_counts.get(t, 0), -count_open_blocks(t))
         )
 
         for teacher in teachers_by_availability:

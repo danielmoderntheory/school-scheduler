@@ -1739,12 +1739,24 @@ function addStudyHalls(
     }
   }
 
-  // Phase 2: Place remaining individual groups
+  // Phase 2: Place remaining individual groups.
+  // Spread study halls evenly: before each group, prefer teachers with the
+  // fewest study halls assigned so far (stable sort keeps the load-based
+  // order as the tie-breaker). A fixed order let the lightest teacher
+  // absorb nearly every study hall.
   const groupOrder = shuffleAssignments ? shuffle([...groupsToPlace], randomFn) : groupsToPlace;
   for (const group of groupOrder) {
     if (group.grades.some(g => placedGrades.has(g))) continue; // Already placed
 
-    if (!tryPlaceGroup(group, sortedTeachers)) {
+    const shCounts = new Map<string, number>();
+    for (const a of assignments) {
+      if (a.teacher) shCounts.set(a.teacher, (shCounts.get(a.teacher) || 0) + 1);
+    }
+    const spreadOrder = [...sortedTeachers].sort(
+      (a, b) => (shCounts.get(a) || 0) - (shCounts.get(b) || 0)
+    );
+
+    if (!tryPlaceGroup(group, spreadOrder)) {
       failedGroups.push(group);
     }
   }
