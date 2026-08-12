@@ -7,7 +7,7 @@ const inter = Inter({ subsets: ['latin'] })
 
 export const metadata: Metadata = {
   title: 'Journey Schedule',
-  description: 'Generate optimized K-11th grade school schedules',
+  description: 'Generate optimized school schedules',
   icons: {
     icon: '/icon.svg',
   },
