@@ -29,10 +29,11 @@ Covers:
       only); a same-day repeat that is NOT a legal pair fails; legacy
       requests carry no pairing metadata
   (n) optional doubles DEFAULT mode: when grade_block_pairs is provided,
-      ANY class may hold a day's lessons as one legal double (allowed, never
-      required) - unflagged L=7 solves with every day one single or one
-      legal pair; unflagged L=4 solves (legality-only assertions); a pinned
-      legal pair on an unflagged class solves
+      ANY class may hold a day's lessons as one legal double - but ONLY when
+      the week cannot fit otherwise - unflagged L=7 solves as exactly two
+      legal pairs + three singles on 5 days; unflagged L=4 never pairs
+      (4 distinct single days); a pinned legal pair on an unflagged class
+      solves
   (o) optional-doubles preflight: unflagged L=7 with NO legal pairs errors;
       >2 same-day fixed lessons error; 2 same-day fixed lessons that are not
       a legal pair error
@@ -42,6 +43,14 @@ Covers:
       existing escape hatch, unchanged)
   (r) legacy requests (no pairs map): unflagged L=7 still errors with the
       old message; L=5 solves singles-only
+  (s) pairing budget (unflagged classes pair only when necessary): same-day
+      pairs are capped at max(0, L - usable_days) - L=4 with 5 usable days
+      NEVER pairs (several seeds, solver level); L=6 -> exactly one pair +
+      4 singles; L=6 restricted to 3 available days -> 3 pairs; a fixed
+      same-day pair is honored with no additional free pair; realistic load
+      (masks + lunch + fixed elective) still solves with budgets enforced;
+      flagged classes and the rule-disabled escape hatch are unchanged
+      (tests 11/13/14 and 17 rerun above)
 
 Run: ./venv/bin/python test_block_formats.py
 """
@@ -582,8 +591,11 @@ if res_u7['status'] == 'success':
     check("optional L=7: every day is one single or one legal MS pair",
           not day_legality_issues(spa_u7, MS_PAIRS),
           str(day_legality_issues(spa_u7, MS_PAIRS)))
+    spa_u7_pairs = [tuple(v) for v in spa_u7.values() if len(v) == 2]
+    check("optional L=7: exactly two pairs + three singles (budget = L - days)",
+          len(spa_u7) == 5 and len(spa_u7_pairs) == 2, str(spa_u7))
 
-# unflagged L=4: pairing stays OPTIONAL - assert only legality of the result
+# unflagged L=4: the week fits without pairing, so the budget forbids pairs
 res_u4 = generate_schedules(
     teachers=TEACHERS_D,
     classes=[make_class('Sofia', ['7th Grade'], 'Spanish', 4)], rules=RULES,
@@ -597,9 +609,9 @@ if res_u4['status'] == 'success':
                                'Sofia', 'Spanish')
     check("optional L=4: all 4 lessons placed",
           sum(len(v) for v in spa_u4.values()) == 4, str(spa_u4))
-    check("optional L=4: same-day occurrences are exactly a legal pair or a lone single",
-          not day_legality_issues(spa_u4, MS_PAIRS),
-          str(day_legality_issues(spa_u4, MS_PAIRS)))
+    check("optional L=4: never pairs when the week fits (4 distinct single days)",
+          len(spa_u4) == 4 and all(len(v) == 1 for v in spa_u4.values()),
+          str(spa_u4))
 
 # unflagged L=7 with NO legal pairs -> preflight error (fail closed)
 res_u7np = generate_schedules(
@@ -833,6 +845,129 @@ if res_leg5['status'] == 'success':
     check("legacy L=5 is singles-only (one lesson per day, 5 days)",
           len(spa_leg) == 5 and all(len(v) == 1 for v in spa_leg.values()),
           str(spa_leg))
+
+# ================================================================ TEST 19
+print("\nTEST 19 — pairing budget: unflagged classes pair only when necessary")
+
+# (a) solver level, several seeds: L=4 with 5 usable days must NEVER pair
+set_blocks(NINE_BLOCKS)
+budget_cls = ClassEntry(
+    teacher='Sofia', grades=['7th Grade'], subject='Spanish',
+    grade_display='7th Grade', days_per_week=4,
+    allowed_pairs=[tuple(p) for p in PAIRS['7th Grade']],
+)
+sess_bud = build_sessions([budget_cls], grades=GRADES,
+                          grade_teachable_slots=slot_masks(MASKS))
+solved_count, paired_solutions = 0, []
+for seed in range(6):
+    sols_bud = solve_with_cpsat(sess_bud, seed=seed, time_limit=10.0,
+                                max_solutions=3, rules=RULES,
+                                active_grades=GRADES)
+    for sol in sols_bud:
+        solved_count += 1
+        days_hit = [solver.slot_to_day(v) for v in sol.values()]
+        if len(set(days_hit)) != len(days_hit):
+            paired_solutions.append((seed, sorted(days_hit)))
+check("budget L=4: solutions found across seeds", solved_count > 0,
+      f"solutions={solved_count}")
+check("budget L=4, 5 usable days: NEVER pairs in any seed/solution",
+      not paired_solutions, str(paired_solutions[:3]))
+
+# (b) unflagged L=6 on 5 days -> exactly one pair + 4 singles
+res_b6 = generate_schedules(
+    teachers=TEACHERS_D,
+    classes=[make_class('Sofia', ['7th Grade'], 'Spanish', 6)], rules=RULES,
+    num_options=1, num_attempts=2, max_time_seconds=30.0, grades=GRADES,
+    blocks=NINE_BLOCKS, grade_teachable_blocks=MASKS, grade_block_pairs=PAIRS,
+)
+check("budget L=6 solves", res_b6['status'] == 'success',
+      res_b6.get('message', ''))
+if res_b6['status'] == 'success':
+    spa_b6 = find_subject_days(res_b6['options'][0]['teacherSchedules'],
+                               'Sofia', 'Spanish')
+    b6_pairs = [tuple(v) for v in spa_b6.values() if len(v) == 2]
+    check("budget L=6: exactly one pair + 4 singles on 5 days",
+          len(spa_b6) == 5 and len(b6_pairs) == 1
+          and sum(len(v) for v in spa_b6.values()) == 6, str(spa_b6))
+    check("budget L=6: the pair is a legal MS pair",
+          all(p in MS_PAIRS for p in b6_pairs), str(b6_pairs))
+
+# (d) unflagged L=6 restricted to 3 available days -> 3 pairs (one per day).
+# no_btb_open disabled: post-solve redistribution doesn't know class-level
+# availableDays, so keep it off to assert on the raw solver placement.
+RULES_BTB_OFF = [r for r in RULES if r['rule_key'] != 'no_btb_open'] + [
+    {'rule_key': 'no_btb_open', 'enabled': False, 'config': None},
+]
+tri = make_class('Sofia', ['7th Grade'], 'Spanish', 6)
+tri['availableDays'] = ['Mon', 'Tues', 'Wed']
+res_tri = generate_schedules(
+    teachers=TEACHERS_D, classes=[tri], rules=RULES_BTB_OFF,
+    num_options=1, num_attempts=2, max_time_seconds=30.0, grades=GRADES,
+    blocks=NINE_BLOCKS, grade_teachable_blocks=MASKS, grade_block_pairs=PAIRS,
+)
+check("budget L=6 over 3 available days solves", res_tri['status'] == 'success',
+      res_tri.get('message', ''))
+if res_tri['status'] == 'success':
+    spa_tri = find_subject_days(res_tri['options'][0]['teacherSchedules'],
+                                'Sofia', 'Spanish')
+    tri_pairs = [tuple(v) for v in spa_tri.values() if len(v) == 2]
+    check("budget L=6/3 days: three legal pairs, one per available day",
+          sorted(spa_tri.keys()) == sorted(['Mon', 'Tues', 'Wed'])
+          and len(tri_pairs) == 3 and all(p in MS_PAIRS for p in tri_pairs),
+          str(spa_tri))
+
+# (e) a user-pinned same-day pair on an unflagged class is always honored;
+# the budget only governs free pairing on top (no additional pair appears)
+pin_bud = make_class('Sofia', ['7th Grade'], 'Spanish', 4,
+                     fixed=[('Mon', 1), ('Mon', 2), ('Wed', 3), ('Fri', 8)])
+res_pin = generate_schedules(
+    teachers=TEACHERS_D, classes=[pin_bud], rules=RULES,
+    num_options=1, num_attempts=1, max_time_seconds=15.0, grades=GRADES,
+    blocks=NINE_BLOCKS, grade_teachable_blocks=MASKS, grade_block_pairs=PAIRS,
+)
+check("budget: pinned pair + 2 singles solves", res_pin['status'] == 'success',
+      res_pin.get('message', ''))
+if res_pin['status'] == 'success':
+    spa_pin = find_subject_days(res_pin['options'][0]['teacherSchedules'],
+                                'Sofia', 'Spanish')
+    check("budget: pinned pair honored, no additional pair",
+          spa_pin == {'Mon': [1, 2], 'Wed': [3], 'Fri': [8]}, str(spa_pin))
+
+# realistic load: full grade loads + lunch masks + a fixed elective; budgets
+# hold (L=6 classes pair exactly once, L=4 classes never pair) and it solves
+load_classes = []
+for subj in ['Math', 'ELA', 'Science', 'Social Studies']:
+    load_classes.append(make_class('Shary', ['7th Grade'], subj, 4))
+    load_classes.append(make_class('Ricardo', ['10th Grade'], subj, 4))
+load_classes.append(make_class('Sofia', ['7th Grade'], 'Spanish', 6))
+load_classes.append(make_class('Sofia', ['10th Grade'], 'French', 6))
+load_classes.append(make_class('Isa', ['7th Grade', '10th Grade'], 'PE', 2))
+load_classes.append(make_class('Karla', ['7th Grade'], 'Art', 1,
+                               elective=True, fixed=[('Mon', 8)]))
+res_load = generate_schedules(
+    teachers=TEACHERS_D, classes=load_classes, rules=RULES,
+    num_options=1, num_attempts=2, max_time_seconds=60.0, grades=GRADES,
+    blocks=NINE_BLOCKS, grade_teachable_blocks=MASKS, grade_block_pairs=PAIRS,
+)
+check("budget: realistic load (masks + lunch + fixed elective) solves",
+      res_load['status'] == 'success', res_load.get('message', ''))
+if res_load['status'] == 'success':
+    ts_load = res_load['options'][0]['teacherSchedules']
+    for teacher, subj, legal in [('Sofia', 'Spanish', MS_PAIRS),
+                                 ('Sofia', 'French', HS_PAIRS)]:
+        placed_l = find_subject_days(ts_load, teacher, subj)
+        l_pairs = [tuple(v) for v in placed_l.values() if len(v) == 2]
+        check(f"budget load: {subj} L=6 -> exactly one legal pair + 4 singles",
+              len(placed_l) == 5 and len(l_pairs) == 1
+              and all(p in legal for p in l_pairs), str(placed_l))
+    l4_paired = []
+    for teacher in ('Shary', 'Ricardo'):
+        for subj in ['Math', 'ELA', 'Science', 'Social Studies']:
+            placed_l4 = find_subject_days(ts_load, teacher, subj)
+            if any(len(v) > 1 for v in placed_l4.values()):
+                l4_paired.append((teacher, subj, placed_l4))
+    check("budget load: no unflagged L=4 class pairs", not l4_paired,
+          str(l4_paired[:2]))
 
 # ================================================================ summary
 print("\n" + "=" * 60)

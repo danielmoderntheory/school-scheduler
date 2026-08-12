@@ -400,6 +400,15 @@ interface Session {
   pairClassKey?: number;
   /** Legal [earlier, later] block pairs usable for an optional same-day pair */
   optionalPairs?: [number, number][];
+  /**
+   * UNFLAGGED classes with legal pairs: HARD budget on same-day pairs — the
+   * class pairs only when its week cannot fit as singles. Computed as
+   * max(0, lessons - usableDays) where usableDays = distinct days the class
+   * can actually use (from its sessions' valid slots, <= 5). For fixed-slot
+   * classes the formula equals the number of fixed same-day pairs, so pins
+   * are always honored and count toward the budget.
+   */
+  maxSameDayPairs?: number;
 }
 
 /**
@@ -444,9 +453,11 @@ function buildSessions(classes: ClassEntry[], teachers?: Teacher[]): Session[] {
     // classKey marks sessions of double-period classes so every meeting of the
     // class (double or single) lands on a distinct day.
     const classKey = isDouble ? clsIdx : undefined;
-    // Unflagged classes with legal pairs may OPTIONALLY pair: a second lesson
-    // may share a day iff the two blocks form a legal pair (never required,
-    // never a third same-day lesson). Flagged classes never get these fields.
+    // Unflagged classes with legal pairs may pair ONLY when the week cannot
+    // fit as singles: a second lesson may share a day iff the two blocks form
+    // a legal pair AND the class's pair budget (maxSameDayPairs, computed per
+    // branch below) allows it; never a third same-day lesson. Flagged classes
+    // never get these fields.
     const optionalPairing = !isDouble && legalPairs.length > 0;
     const pairClassKey = optionalPairing ? clsIdx : undefined;
     const optionalPairs = optionalPairing
@@ -582,6 +593,14 @@ function buildSessions(classes: ClassEntry[], teachers?: Teacher[]): Session[] {
           }
         }
       } else {
+        // Pair budget for a fully-fixed unflagged class: lessons minus distinct
+        // fixed days = exactly the number of fixed same-day pairs, so the pins
+        // are honored and no additional pairing is possible anyway.
+        let maxSameDayPairs: number | undefined;
+        if (optionalPairing) {
+          const fixedDays = new Set(cls.fixedSlots.map(([day]) => day));
+          maxSameDayPairs = Math.max(0, cls.fixedSlots.length - fixedDays.size);
+        }
         cls.fixedSlots.forEach(([day, block]) => {
           const dayIdx = DAYS.indexOf(day);
           const blockIdx = activeBlocks.indexOf(block);
@@ -598,6 +617,7 @@ function buildSessions(classes: ClassEntry[], teachers?: Teacher[]): Session[] {
             classKey,
             pairClassKey,
             optionalPairs,
+            maxSameDayPairs,
           });
         });
       }
@@ -670,6 +690,14 @@ function buildSessions(classes: ClassEntry[], teachers?: Teacher[]): Session[] {
           });
         }
       } else {
+        // Pair budget: pairs are allowed ONLY when the week cannot fit as
+        // singles — max(0, L - usableDays), usableDays = distinct days the
+        // class can actually use after all availability/teachability filters.
+        let maxSameDayPairs: number | undefined;
+        if (optionalPairing) {
+          const usableDays = new Set(validSlots.map(s => slotToDay(s))).size;
+          maxSameDayPairs = Math.max(0, L - usableDays);
+        }
         for (let i = 0; i < L; i++) {
           sessions.push({
             id: id++,
@@ -683,6 +711,7 @@ function buildSessions(classes: ClassEntry[], teachers?: Teacher[]): Session[] {
             classKey,
             pairClassKey,
             optionalPairs,
+            maxSameDayPairs,
           });
         }
       }
@@ -799,6 +828,10 @@ function solveBacktracking(
   // that day. Supports optional same-day pairing: a second lesson may join a
   // day only as a legal consecutive pair with the existing lone lesson.
   const pairClassDaySlots = new Map<number, Map<number, number[]>>();
+  // pairClassKey -> number of days currently holding TWO lessons of the class
+  // (its same-day pair count). Checked against session.maxSameDayPairs so a
+  // class pairs only when its week cannot fit as singles.
+  const pairClassPairCount = new Map<number, number>();
 
   // Track which co-taught sessions have been assigned (to skip them in main loop)
   const assignedCotaughtSessions = new Set<number>();
@@ -875,8 +908,9 @@ function solveBacktracking(
     // Same subject can't appear twice on same day for same grade, with ONE
     // exception: a second lesson of the SAME unflagged class may join the day
     // iff its block forms a legal consecutive pair with the class's existing
-    // lone lesson (optional double period — allowed, never required). A third
-    // same-day lesson, a non-pair block, or another class's lesson still fail.
+    // lone lesson AND the class still has pair budget (pairs only when the
+    // week cannot fit as singles — see maxSameDayPairs). A third same-day
+    // lesson, a non-pair block, or another class's lesson still fail.
     if (isRuleEnabled(rules, 'no_duplicate_subjects')) {
       const day = slotToDay(slot);
       let subjectOnDay = false;
@@ -890,6 +924,11 @@ function solveBacktracking(
         // Exactly one existing lesson, and it must be THIS class's (if the
         // day was marked by another class/locked teacher, slotsToday is empty)
         if (!slotsToday || slotsToday.length !== 1) return false;
+        // HARD pair budget: a new pair may only form while the class's pair
+        // count is below max(0, lessons - usableDays) — i.e. only when the
+        // week cannot fit as singles (fixed same-day pairs are inside budget)
+        const budget = session.maxSameDayPairs ?? Infinity;
+        if ((pairClassPairCount.get(session.pairClassKey) ?? 0) >= budget) return false;
         const idxExisting = slotToBlock(slotsToday[0]);
         const idxNew = slotToBlock(slot);
         const [firstIdx, secondIdx] = idxExisting <= idxNew
@@ -1087,7 +1126,15 @@ function solveBacktracking(
       }
       const byDay = pairClassDaySlots.get(session.pairClassKey)!;
       if (!byDay.has(day)) byDay.set(day, []);
-      byDay.get(day)!.push(slot);
+      const slotsToday = byDay.get(day)!;
+      slotsToday.push(slot);
+      if (slotsToday.length === 2) {
+        // A same-day pair just formed
+        pairClassPairCount.set(
+          session.pairClassKey,
+          (pairClassPairCount.get(session.pairClassKey) ?? 0) + 1
+        );
+      }
     }
   }
 
@@ -1117,7 +1164,16 @@ function solveBacktracking(
       const slotsToday = pairClassDaySlots.get(session.pairClassKey)?.get(day);
       if (slotsToday) {
         const i = slotsToday.indexOf(slot);
-        if (i !== -1) slotsToday.splice(i, 1);
+        if (i !== -1) {
+          slotsToday.splice(i, 1);
+          if (slotsToday.length === 1) {
+            // A same-day pair just dissolved (2 -> 1)
+            pairClassPairCount.set(
+              session.pairClassKey,
+              (pairClassPairCount.get(session.pairClassKey) ?? 1) - 1
+            );
+          }
+        }
         classStillOnDay = slotsToday.length > 0;
       }
     }
@@ -1206,6 +1262,21 @@ function solveBacktracking(
 
     if (randomize) {
       slots = shuffle(slots);
+    }
+
+    // Singles-first bias for optionally-paired classes: try days where the
+    // class has no lesson yet BEFORE days where placing would form a pair,
+    // so the solver doesn't waste attempts exploring pairings the budget
+    // won't let it keep. Stable sort preserves randomization within tiers.
+    if (session.pairClassKey !== undefined) {
+      const byDay = pairClassDaySlots.get(session.pairClassKey);
+      if (byDay && byDay.size > 0) {
+        slots.sort((a, b) => {
+          const aPairs = (byDay.get(slotToDay(a))?.length ?? 0) > 0 ? 1 : 0;
+          const bPairs = (byDay.get(slotToDay(b))?.length ?? 0) > 0 ? 1 : 0;
+          return aPairs - bPairs;
+        });
+      }
     }
 
     for (const slot of slots) {
@@ -2034,11 +2105,15 @@ function getStudyHallEligibleStatuses(rules: SchedulingRule[] | undefined): Set<
  *   grades are restricted to the intersection of their grades' teachable blocks.
  * @param gradeBlockPairs - Optional map of grade NAME -> allowed [earlier, later]
  *   block pairs for double periods. A class may only use pairs present for
- *   EVERY grade it covers. When in effect, EVERY class may OPTIONALLY hold two
- *   same-day lessons as a legal pair (back-to-back allowed, never required;
- *   never a third same-day lesson), raising its weekly lesson cap from 5 to 10.
- *   Classes flagged isDouble must pair (atomic pair meetings, odd lesson as a
- *   single, all on distinct days) and fail preflight with no legal pairs.
+ *   EVERY grade it covers. When in effect, an unflagged class may hold two
+ *   same-day lessons as a legal pair (never a third same-day lesson), raising
+ *   its weekly lesson cap from 5 to 10 — but ONLY when its week cannot fit as
+ *   singles: same-day pairs are hard-capped at max(0, lessons - usableDays),
+ *   where usableDays = distinct days the class can actually use. Fixed slots
+ *   already forming a same-day pair are always honored and count toward that
+ *   budget. Classes flagged isDouble must pair (atomic pair meetings, odd
+ *   lesson as a single, all on distinct days) and fail preflight with no
+ *   legal pairs.
  */
 export async function generateSchedules(
   teachers: Teacher[],

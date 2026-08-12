@@ -128,7 +128,9 @@ class ClassEntry:
     is_double: bool = False  # Subject REQUIRES double periods (every meeting is two consecutive blocks)
     # [(earlierBlock, laterBlock), ...] legal double pairs (intersection of every
     # covered grade's pairs). Computed for EVERY class when grade_block_pairs is
-    # provided: flagged classes MUST use them; unflagged classes MAY (solver's choice).
+    # provided: flagged classes MUST use them; unflagged classes MAY use them, but
+    # only when the week cannot fit otherwise (same-day pairs are capped at
+    # max(0, lessons - usable_days) - see the pairing-budget constraint).
     allowed_pairs: list = field(default_factory=list)
     available_days: list = field(default_factory=lambda: DAYS.copy())
     available_blocks: list = field(default_factory=lambda: BLOCKS.copy())
@@ -1086,6 +1088,10 @@ def solve_with_cpsat(sessions: list[Session], seed: int = 0, time_limit: float =
         # covered grade; relaxed_pairs_done dedupes the reified machinery).
         dup_day_block_vars: dict[int, tuple] = {}
         relaxed_pairs_done: set[tuple] = set()
+        # Per-class same_day literals for the pairing budget below (unflagged
+        # classes only; one literal per unordered session pair, deduped via
+        # relaxed_pairs_done so multi-grade classes don't double-count).
+        class_same_day_lits: dict[int, list] = {}
 
         def get_day_block_vars(sess):
             if sess.id not in dup_day_block_vars:
@@ -1141,6 +1147,8 @@ def solve_with_cpsat(sessions: list[Session], seed: int = 0, time_limit: float =
                                 same_day = model.NewBoolVar(f'sameday_{s1.id}_{s2.id}')
                                 model.Add(d1 == d2).OnlyEnforceIf(same_day)
                                 model.Add(d1 != d2).OnlyEnforceIf(same_day.Not())
+                                class_same_day_lits.setdefault(
+                                    s1.class_key, []).append(same_day)
                                 # same_day => the two blocks are a legal pair
                                 # (either orientation; sessions are interchangeable)
                                 pair_lits = []
@@ -1167,6 +1175,38 @@ def solve_with_cpsat(sessions: list[Session], seed: int = 0, time_limit: float =
                             model.AddDivisionEquality(day1, slot_vars[s1.id], num_blocks)
                             model.AddDivisionEquality(day2, slot_vars[s2.id], num_blocks)
                             model.Add(day1 != day2)
+
+        # Hard Constraint 3a: Optional-double pairing budget.
+        # Unflagged classes may pair ONLY when the week cannot fit otherwise:
+        # the number of same-day pairs must not exceed the arithmetic minimum
+        # max(0, L - usable_days), where L is the class's lesson count and
+        # usable_days is the number of distinct days covered by the union of
+        # its sessions' valid slots. Fixed slots that already form a same-day
+        # pair are explicit user pins - always honored - so the bound is
+        # max(fixed_same_day_pairs, max_pairs). Flagged (is_double) classes
+        # are governed by constraints 3b below instead and never appear here.
+        if class_same_day_lits:
+            sessions_by_class: dict[int, list] = {}
+            for s in active_sessions:
+                if s.class_key in class_same_day_lits:
+                    sessions_by_class.setdefault(s.class_key, []).append(s)
+            for ck, lits in class_same_day_lits.items():
+                cls_sessions = sessions_by_class.get(ck, [])
+                lessons = len(cls_sessions)
+                usable_days = len({slot_to_day(slot)
+                                   for s in cls_sessions
+                                   for slot in s.valid_slots})
+                usable_days = min(usable_days, len(DAYS))
+                max_pairs = max(0, lessons - usable_days)
+                fixed_day_counts: dict[int, int] = {}
+                for s in cls_sessions:
+                    if s.is_fixed and s.valid_slots:
+                        d = slot_to_day(s.valid_slots[0])
+                        fixed_day_counts[d] = fixed_day_counts.get(d, 0) + 1
+                fixed_pairs = sum(n * (n - 1) // 2 for n in fixed_day_counts.values())
+                budget = max(fixed_pairs, max_pairs)
+                if len(lits) > budget:
+                    model.Add(sum(lits) <= budget)
 
     # Hard Constraint 3b: Double periods
     # Each double meeting is two sessions sharing a pair_id. The pair must land
@@ -2077,7 +2117,9 @@ def generate_schedules(
             that grade's lunch - built upstream from the timetable template). A class
             may only use pairs present for EVERY grade it covers (intersection).
             When provided, EVERY class may schedule a day's lessons as one single or
-            one legal double (the solver's choice, never required); classes flagged
+            one legal double - but unflagged classes pair ONLY when the week cannot
+            fit otherwise (same-day pairs capped at max(0, lessons - usable days);
+            user-pinned fixed pairs are always honored); classes flagged
             is_double MUST pair every meeting (odd lesson = one single), meetings on
             distinct days. Absent field = no pairing available: unflagged classes are
             strictly one lesson per day (legacy behavior); flagged classes needing at
@@ -2397,9 +2439,11 @@ def generate_schedules(
     # Check 0b: Double periods - lesson counts, legal pairs, and fixed-slot pairing
     #
     # Two modes when grade_block_pairs is provided:
-    # - Default (unflagged classes): back-to-back is ALLOWED but never required.
-    #   A day holds one single or one legal double (solver's choice), so the
-    #   weekly cap is 2 lessons x days when the class has >=1 legal pair, else
+    # - Default (unflagged classes): back-to-back is ALLOWED but only used when
+    #   the week cannot fit otherwise (the model caps same-day pairs at
+    #   max(0, lessons - usable days); pinned fixed pairs are always honored).
+    #   A day holds one single or one legal double, so the weekly cap is
+    #   2 lessons x days when the class has >=1 legal pair, else
     #   1 x days. Legacy requests (no pairs map) keep the old 1-per-day cap.
     # - Required (is_double classes): every meeting is a legal double (plus one
     #   odd single), meetings on distinct days - unchanged.
