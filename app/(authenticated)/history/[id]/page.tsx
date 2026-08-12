@@ -7774,6 +7774,7 @@ export default function HistoryDetailPage() {
                       openBlockLabels={publicOption.openBlockLabels}
                       showOpenLabels={true}
                       blocks={templateBlocks}
+                      lunchContext={lunchContext}
                     />
                   ))
               : Object.entries(publicOption.gradeSchedules)
@@ -9574,6 +9575,7 @@ export default function HistoryDetailPage() {
                                 showOpenLabels={!regenMode && !swapMode && !freeformMode && !studyHallMode}
                                 onOpenLabelChange={userRole === "admin" && showOpenLabels && !regenMode && !swapMode && !freeformMode && !studyHallMode ? handleOpenLabelChange : undefined}
                                 blocks={templateBlocks}
+                                lunchContext={lunchContext}
                               />
                               {/* Unplaced floating blocks from this teacher */}
                               {freeformMode && teacherFloatingBlocks.length > 0 && (

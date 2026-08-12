@@ -8,7 +8,7 @@ import { Input } from "@/components/ui/input"
 import { RefreshCw, AlertTriangle, Check, Ban, X, ArrowLeftRight, Pencil } from "lucide-react"
 import type { TeacherSchedule, GradeSchedule, FloatingBlock, PendingPlacement, ValidationError, CellLocation, OpenBlockLabels } from "@/lib/types"
 import { BLOCKS } from "@/lib/types"
-import { BLOCK_TYPE_OPEN, isOpenBlock, isStudyHall, isScheduledClass, isFullTime, getOpenBlockAt, getOpenBlockLabel } from "@/lib/schedule-utils"
+import { BLOCK_TYPE_OPEN, isOpenBlock, isStudyHall, isScheduledClass, isFullTime, getOpenBlockAt, getOpenBlockLabel, getTeacherLunchCandidates, designateTeacherLunch, type LunchContext } from "@/lib/schedule-utils"
 import { formatGradeDisplayCompact, isClassElective, isClassCotaught, type ClassSnapshotEntry } from "@/lib/grade-utils"
 
 const DAYS = ["Mon", "Tues", "Wed", "Thurs", "Fri"]
@@ -30,6 +30,13 @@ interface ScheduleGridProps {
   // at these blocks render as a muted "Lunch" cell instead of empty/OPEN.
   // Absent (legacy 5-block schedules) = exactly the current behavior.
   lunchBlocksByGrade?: Record<string, number[]>
+  // Teacher view only: lunch context for the quarter (per-grade teachable
+  // blocks + template block list). When present, each teacher-day's designated
+  // Lunch block (the same designation the stats layer uses) renders with the
+  // grade-view Lunch styling instead of OPEN — but stays fully interactive,
+  // behaving exactly like an OPEN cell in swap/freeform/study-hall modes.
+  // Absent, or legacy quarters with no candidates = exactly current rendering.
+  lunchContext?: LunchContext
   // Change indicator: 'pending' = changes will be applied, 'applied' = changes have been applied in preview
   changeStatus?: 'pending' | 'applied'
   // Selection mode props (regen mode)
@@ -74,6 +81,7 @@ export function ScheduleGrid({
   status,
   blocks = LEGACY_BLOCKS,
   lunchBlocksByGrade,
+  lunchContext,
   changeStatus,
   showCheckbox,
   isSelected,
@@ -164,6 +172,43 @@ export function ScheduleGrid({
     return "class"
   }
 
+  // Teacher-view designated lunch, derived from the CURRENT schedule prop on
+  // every render (deliberately NOT memoized) so any edit — swap, freeform
+  // placement, regen preview — immediately recomputes the designation, keeping
+  // the display in lockstep with recalculateOptionStats. Empty candidates
+  // (prop absent, legacy quarter, or teacher with no parseable taught grades)
+  // leaves the map empty and rendering identical to today.
+  const teacherLunchByDay: Record<string, number | null> = {}
+  if (type === "teacher" && lunchContext) {
+    const lunchCandidates = getTeacherLunchCandidates(schedule as TeacherSchedule, lunchContext)
+    if (lunchCandidates.length > 0) {
+      for (const day of DAYS) {
+        teacherLunchByDay[day] = designateTeacherLunch((schedule as TeacherSchedule)[day], lunchCandidates, blocks)
+      }
+    }
+  }
+
+  // Teacher-view lunch cells: the day's designated Lunch block, only while it
+  // holds no scheduled content (OPEN/empty). Unlike grade-view lunch cells,
+  // these are NOT inert — they only swap the idle label/background.
+  function isTeacherLunchCell(day: string, block: number): boolean {
+    if (type !== "teacher") return false
+    if (teacherLunchByDay[day] !== block) return false
+    const { entry } = getCellContent(day, block)
+    const cellType = getCellType(entry)
+    if (cellType !== "empty" && cellType !== "open") return false
+    // An explicit custom open-block label ("Prep Time", ...) wins over the
+    // inferred Lunch label — human-entered beats computed, and the cell keeps
+    // its label-editing affordance.
+    if (cellType === "open" && openBlockLabels) {
+      const info = getOpenBlockAt(schedule as TeacherSchedule, day, block)
+      if (info && getOpenBlockLabel(openBlockLabels, name, info.openIndex, info.type)) {
+        return false
+      }
+    }
+    return true
+  }
+
   // Grade-view lunch cells: the block is not teachable for this grade (its
   // band's lunch window). Only replaces cells with no scheduled content — if a
   // real class somehow sits at a lunch block (data anomaly / manual edit), it
@@ -245,6 +290,10 @@ export function ScheduleGrid({
     }
 
     const baseClass = (() => {
+      // Teacher-view designated lunch: amber idle background like grade view,
+      // but only as the BASE — all mode affordances below (rings, hovers,
+      // cursors) still layer on top and win visually via twMerge.
+      if (isTeacherLunchCell(day, block)) return "bg-amber-50/70"
       if (!entry) return "bg-muted/30"
       const [, subject] = entry
       if (isOpenBlock(subject)) return "bg-gray-100 text-gray-500"
@@ -592,6 +641,17 @@ export function ScheduleGrid({
                       }
                       if (isLunchCell(day, block)) {
                         // Grade-view lunch cell (block not teachable for this grade)
+                        return (
+                          <span className="text-[10px] italic text-amber-700/70">
+                            Lunch
+                          </span>
+                        )
+                      }
+                      if (isTeacherLunchCell(day, block)) {
+                        // Teacher-view designated lunch label. Replaces only
+                        // the OPEN/empty idle content — the cell's td keeps
+                        // its onClick and mode styling, so swap/freeform/
+                        // study-hall interactions treat it exactly as OPEN.
                         return (
                           <span className="text-[10px] italic text-amber-700/70">
                             Lunch
