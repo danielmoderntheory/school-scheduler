@@ -95,7 +95,10 @@ CREATE TABLE classes (
     teacher_id UUID REFERENCES teachers(id) ON DELETE CASCADE,
     grade_id UUID REFERENCES grades(id) ON DELETE CASCADE,
     subject_id UUID REFERENCES subjects(id) ON DELETE CASCADE,
-    days_per_week INT NOT NULL CHECK (days_per_week BETWEEN 1 AND 5),
+    -- Lessons (blocks) per week; above 5 requires double periods to fit
+    days_per_week INT NOT NULL CHECK (days_per_week BETWEEN 1 AND 10),
+    -- Class meets in back-to-back double blocks (lessons pair; odd lesson = one single)
+    double_periods BOOLEAN NOT NULL DEFAULT false,
     is_elective BOOLEAN DEFAULT false,
     is_cotaught BOOLEAN DEFAULT false,
     grade_ids UUID[],

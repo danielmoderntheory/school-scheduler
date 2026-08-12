@@ -29,6 +29,7 @@ export async function PUT(
         days_per_week = COALESCE(${body.days_per_week ?? null}, days_per_week),
         is_elective = COALESCE(${body.is_elective ?? null}, is_elective),
         is_cotaught = COALESCE(${body.is_cotaught ?? null}, is_cotaught),
+        double_periods = COALESCE(${body.double_periods ?? null}, double_periods),
         grade_id = COALESCE(${gradeId ?? null}, grade_id),
         grade_ids = COALESCE(${gradeIds ?? null}, grade_ids)
       WHERE id = ${id}

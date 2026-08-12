@@ -10,6 +10,7 @@ interface ClassRow {
   days_per_week: number
   is_elective: boolean
   is_cotaught: boolean
+  double_periods: boolean
   grade_ids: string[] | null
   created_at: string
   updated_at: string
@@ -19,7 +20,6 @@ interface ClassRow {
   grade_name: string | null
   grade_display_name: string | null
   subject_name: string | null
-  subject_requires_double_periods?: boolean | null
 }
 
 export async function GET(request: NextRequest) {
@@ -38,8 +38,7 @@ export async function GET(request: NextRequest) {
             CASE WHEN t.deleted_at IS NOT NULL THEN true ELSE false END as teacher_deleted,
             g.name as grade_name,
             g.display_name as grade_display_name,
-            s.name as subject_name,
-            s.requires_double_periods as subject_requires_double_periods
+            s.name as subject_name
           FROM classes c
           LEFT JOIN teachers t ON c.teacher_id = t.id
           LEFT JOIN grades g ON c.grade_id = g.id
@@ -55,8 +54,7 @@ export async function GET(request: NextRequest) {
             CASE WHEN t.deleted_at IS NOT NULL THEN true ELSE false END as teacher_deleted,
             g.name as grade_name,
             g.display_name as grade_display_name,
-            s.name as subject_name,
-            s.requires_double_periods as subject_requires_double_periods
+            s.name as subject_name
           FROM classes c
           LEFT JOIN teachers t ON c.teacher_id = t.id
           LEFT JOIN grades g ON c.grade_id = g.id
@@ -113,14 +111,14 @@ export async function GET(request: NextRequest) {
       days_per_week: c.days_per_week,
       is_elective: c.is_elective,
       is_cotaught: c.is_cotaught,
+      double_periods: c.double_periods === true,
       grade_ids: c.grade_ids,
       created_at: c.created_at,
       updated_at: c.updated_at,
       teacher: c.teacher_id ? { id: c.teacher_id, name: c.teacher_name, status: c.teacher_status } : null,
       teacher_deleted: c.teacher_deleted === true,
       grade: c.grade_id ? { id: c.grade_id, name: c.grade_name, display_name: c.grade_display_name } : null,
-      subject: c.subject_id ? { id: c.subject_id, name: c.subject_name, requires_double_periods: c.subject_requires_double_periods === true } : null,
-      requires_double_periods: c.subject_requires_double_periods === true,
+      subject: c.subject_id ? { id: c.subject_id, name: c.subject_name } : null,
       restrictions: restrictionsMap.get(c.id) || [],
       grades: c.grade_ids
         ? c.grade_ids
@@ -156,7 +154,7 @@ export async function POST(request: NextRequest) {
     const [data] = await sql`
       INSERT INTO classes (
         quarter_id, teacher_id, grade_id, subject_id,
-        days_per_week, grade_ids, is_elective, is_cotaught
+        days_per_week, grade_ids, is_elective, is_cotaught, double_periods
       )
       VALUES (
         ${body.quarter_id},
@@ -166,7 +164,8 @@ export async function POST(request: NextRequest) {
         ${body.days_per_week || 1},
         ${gradeIds},
         ${body.is_elective || false},
-        ${body.is_cotaught || false}
+        ${body.is_cotaught || false},
+        ${body.double_periods === true}
       )
       RETURNING *
     `

@@ -24,7 +24,7 @@ import {
 } from "@/components/ui/alert-dialog"
 import { Loader2, Coffee, AlertTriangle, Users, CheckCircle2, ChevronDown, ChevronRight } from "lucide-react"
 import { generateSchedulesRemote, type RemoteClassEntry, type ScheduleDiagnostics, type SchedulingRule } from "@/lib/scheduler-remote"
-import { DAYS, DOUBLE_REQUIRED_FROM_SORT_ORDER, type Teacher, type TimetableTemplate } from "@/lib/types"
+import { DAYS, type Teacher, type TimetableTemplate } from "@/lib/types"
 import { getTemplateBlocks, getTeachableBlocksForGrade, getPairableBlocksForGrade } from "@/lib/timetable-utils"
 import { useGeneration } from "@/lib/generation-context"
 import { calculateGradeBlocks, buildCotaughtGroups, type BlockCountClass } from "@/lib/schedule-utils"
@@ -48,8 +48,9 @@ interface DBClass {
   grades?: Array<{ id: string; name: string; display_name: string; sort_order: number }>
   is_elective?: boolean
   is_cotaught?: boolean
-  subject: { id: string; name: string; requires_double_periods?: boolean }
-  requires_double_periods?: boolean
+  /** Per-class double periods setting (classes.double_periods) */
+  double_periods?: boolean
+  subject: { id: string; name: string }
   days_per_week: number
   restrictions: Array<{
     restriction_type: string
@@ -307,20 +308,6 @@ export function GenerateModal({
         gradeDisplay = c.grade.display_name
       }
 
-      // Back-to-back doubles are REQUIRED only when the subject is flagged AND
-      // every covered grade is at/above the threshold (6th+). Below that, the
-      // flag is advisory — the solver may still pair lessons for any class.
-      const coveredGrades = c.grades && c.grades.length > 0 ? c.grades : (c.grade ? [c.grade] : [])
-      const doubleFlagBinds =
-        coveredGrades.length > 0 &&
-        coveredGrades.every((g) => {
-          const sortOrder =
-            "sort_order" in g && typeof g.sort_order === "number"
-              ? g.sort_order
-              : grades.find((gr) => gr.id === g.id)?.sort_order
-          return sortOrder !== undefined && sortOrder >= DOUBLE_REQUIRED_FROM_SORT_ORDER
-        })
-
       const entry: RemoteClassEntry = {
         id: c.id,
         teacher: c.teacher?.name || "(deleted)",
@@ -331,9 +318,8 @@ export function GenerateModal({
         daysPerWeek: c.days_per_week,
         isElective: c.is_elective || false,
         isCotaught: c.is_cotaught || false,
-        isDouble:
-          (c.requires_double_periods === true || c.subject?.requires_double_periods === true) &&
-          doubleFlagBinds,
+        // Per-class setting: doubles are required exactly when the class is flagged
+        isDouble: c.double_periods === true,
       }
 
       // Process restrictions
@@ -546,8 +532,7 @@ export function GenerateModal({
               is_cotaught: c.is_cotaught || false,
               subject_id: c.subject?.id || null,
               subject_name: c.subject?.name || null,
-              subject_requires_double_periods:
-                c.requires_double_periods === true || c.subject?.requires_double_periods === true,
+              double_periods: c.double_periods === true,
               days_per_week: c.days_per_week,
               restrictions: c.restrictions || [],
             }

@@ -9,6 +9,7 @@ interface Grade {
   name: string
   display_name: string
   sort_order: number
+  is_combined?: boolean
 }
 
 interface GradeSelectorProps {
@@ -39,9 +40,11 @@ export function GradeSelector({
   const [dropUp, setDropUp] = useState(false)
   const containerRef = useRef<HTMLDivElement>(null)
 
-  // Filter to only individual grades (K-11)
+  // Filter to only individual grades (combined rows like "6th-7th" are
+  // legacy data — grade groups are expressed via grade_ids now). The old
+  // sort_order <= 11 cap silently hid 12th grade once it was added.
   const individualGrades = grades
-    .filter(g => g.sort_order >= 0 && g.sort_order <= 11)
+    .filter(g => g.sort_order >= 0 && g.is_combined !== true)
     .sort((a, b) => a.sort_order - b.sort_order)
 
   useEffect(() => {

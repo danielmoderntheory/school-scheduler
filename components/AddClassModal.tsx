@@ -31,7 +31,7 @@ import {
 } from "lucide-react"
 import { cn } from "@/lib/utils"
 import toast from "@/lib/toast"
-import { BLOCKS, DOUBLE_REQUIRED_FROM_SORT_ORDER, type TimetableTemplate } from "@/lib/types"
+import { BLOCKS, type TimetableTemplate } from "@/lib/types"
 import { getTeachableBlocksForGrade } from "@/lib/timetable-utils"
 
 const DAYS = ["Mon", "Tues", "Wed", "Thurs", "Fri"]
@@ -59,7 +59,6 @@ interface Grade {
 interface Subject {
   id: string
   name: string
-  requires_double_periods?: boolean
 }
 
 interface Restriction {
@@ -77,6 +76,7 @@ interface ClassEntry {
   days_per_week: number
   is_elective?: boolean
   is_cotaught?: boolean
+  double_periods?: boolean
   restrictions?: Restriction[]
 }
 
@@ -147,6 +147,7 @@ export function AddClassModal({
   // Step 1: Setup
   const [gradeIds, setGradeIds] = useState<string[]>([])
   const [daysPerWeek, setDaysPerWeek] = useState(4)
+  const [doublePeriods, setDoublePeriods] = useState(false)
   const [subjectId, setSubjectId] = useState("")
   const [subjectName, setSubjectName] = useState("")
   const [multiGrade, setMultiGrade] = useState(false)
@@ -192,6 +193,7 @@ export function AddClassModal({
       setIsElective(false)
       setGradeIds([])
       setDaysPerWeek(4)
+      setDoublePeriods(false)
       setSubjectId("")
       setSubjectName("")
       setMultiGrade(false)
@@ -377,6 +379,7 @@ export function AddClassModal({
           days_per_week: daysPerWeek,
           is_elective: isElective,
           is_cotaught: isRegularCotaught || isOptionCotaught,
+          double_periods: doublePeriods,
           restrictions,
         }
 
@@ -398,6 +401,7 @@ export function AddClassModal({
               days_per_week: daysPerWeek,
               is_elective: isElective,
               is_cotaught: true,
+              double_periods: doublePeriods,
               restrictions,
             }
 
@@ -483,26 +487,8 @@ export function AddClassModal({
     return isPendingId(id)
   }
 
-  // Does a subject require double periods? (pending subjects are always unflagged)
-  function subjectRequiresDouble(id?: string): boolean {
-    if (!id) return false
-    return allSubjects.find((s) => s.id === id)?.requires_double_periods === true
-  }
-
-  // The "Double periods" flag only binds (back-to-back REQUIRED) when every
-  // selected grade is 6th and up. Below that — and for unflagged subjects —
-  // the scheduler may still pair lessons into doubles, but isn't required to.
-  function doubleFlagBinds(): boolean {
-    if (gradeIds.length === 0) return false
-    return gradeIds.every((id) => {
-      const grade = grades.find((g) => g.id === id)
-      return grade !== undefined && grade.sort_order >= DOUBLE_REQUIRED_FROM_SORT_ORDER
-    })
-  }
-
   // === Render Step Content ===
   function renderSetupStep() {
-    const selectedSubjectDouble = !isElective && subjectRequiresDouble(subjectId) && doubleFlagBinds()
     return (
       <div className="space-y-4">
         {/* Mode Selection */}
@@ -663,17 +649,7 @@ export function AddClassModal({
         {/* Blocks per Week */}
         <div className="space-y-1.5">
           <div>
-            <Label className="text-sm font-medium">
-              Blocks per Week
-              {selectedSubjectDouble && (
-                <span
-                  title="Double periods required — lessons pair into back-to-back blocks"
-                  className="ml-2 px-1 rounded bg-violet-100 text-violet-700 text-[10px] font-semibold cursor-help"
-                >
-                  2×
-                </span>
-              )}
-            </Label>
+            <Label className="text-sm font-medium">Blocks per Week</Label>
             <p className="text-xs text-muted-foreground">How many times per week this class meets</p>
           </div>
           <div className="flex gap-1">
@@ -693,11 +669,27 @@ export function AddClassModal({
               </button>
             ))}
           </div>
-          {selectedSubjectDouble && (
-            <p className="text-xs text-violet-600">
-              Lessons pair into back-to-back blocks (e.g. 7 lessons = 3 doubles + 1 single)
-            </p>
-          )}
+        </div>
+
+        {/* Double Periods */}
+        <div className="space-y-1">
+          <label className="flex items-center gap-2 cursor-pointer w-fit">
+            <input
+              type="checkbox"
+              checked={doublePeriods}
+              onChange={(e) => setDoublePeriods(e.target.checked)}
+              className="h-4 w-4 rounded border-slate-300 text-violet-600 focus:ring-violet-500"
+            />
+            <span className="text-sm font-medium">Double periods</span>
+            {doublePeriods && (
+              <span className="px-1 rounded bg-violet-100 text-violet-700 text-[10px] font-semibold">
+                2×
+              </span>
+            )}
+          </label>
+          <p className="text-xs text-muted-foreground">
+            Lessons pair into back-to-back blocks (e.g. 7 lessons = 3 doubles + 1 single)
+          </p>
         </div>
       </div>
     )
@@ -1271,9 +1263,9 @@ export function AddClassModal({
                     </td>
                     <td className="px-3 py-2 text-slate-600">
                       {daysPerWeek}
-                      {subjectRequiresDouble(isElective ? row.subjectId : subjectId) && doubleFlagBinds() && (
+                      {doublePeriods && (
                         <span
-                          title="Double periods required — lessons pair into back-to-back blocks"
+                          title="Double periods — lessons pair into back-to-back blocks"
                           className="ml-1 px-1 rounded bg-violet-100 text-violet-700 text-[10px] font-semibold cursor-help"
                         >
                           2×

@@ -69,16 +69,26 @@ export default function TimetableSettingsPage() {
 
   async function loadData() {
     try {
-      const [templatesRes, gradesRes] = await Promise.all([
+      const [templatesRes, gradesRes, quartersRes] = await Promise.all([
         fetch("/api/timetable-templates"),
         fetch("/api/grades"),
+        fetch("/api/quarters"),
       ])
       const templatesData = await templatesRes.json()
       const gradesData = await gradesRes.json()
+      const quartersData = await quartersRes.json().catch(() => [])
       setGrades(gradesData)
       if (Array.isArray(templatesData) && templatesData.length > 0) {
         setTemplates(templatesData)
-        setSelectedTemplateId((prev) => prev ?? templatesData[0].id)
+        // Default to the ACTIVE quarter's template (fall back to the oldest)
+        const active = Array.isArray(quartersData)
+          ? quartersData.find((q: { is_active?: boolean }) => q.is_active)
+          : null
+        const activeTemplateId = active?.timetable_template_id
+        const defaultId = templatesData.some((t: TimetableTemplate) => t.id === activeTemplateId)
+          ? activeTemplateId
+          : templatesData[0].id
+        setSelectedTemplateId((prev) => prev ?? defaultId)
       }
     } catch {
       toast.error("Failed to load data")

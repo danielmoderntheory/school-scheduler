@@ -40,7 +40,6 @@ import { Textarea } from "@/components/ui/textarea"
 import { Label } from "@/components/ui/label"
 import Link from "next/link"
 import type { ScheduleOption, TeacherSchedule, GradeSchedule, Teacher, FloatingBlock, PendingPlacement, ValidationError, CellLocation, ClassEntry, OpenBlockLabels, PendingTransfer, TimetableTemplate } from "@/lib/types"
-import { DOUBLE_REQUIRED_FROM_SORT_ORDER } from "@/lib/types"
 import { resolveRowsForGrade, getTemplateBlocks, getTeachableBlocksForGrade, getPairableBlocksForGrade } from "@/lib/timetable-utils"
 import { parseClassesFromSnapshot, parseTeachersFromSnapshot, parseRulesFromSnapshot, hasValidSnapshots, detectClassChanges, detectTeacherChanges, applyTeacherRenames, applyTeacherChangesToSnapshot, computeExpectedTeachingSessions, findMismatchedTeachers, type GenerationStats, type ChangeDetectionResult, type CurrentClass, type ClassSnapshot, type TeacherSnapshot, type TeacherChangeResult } from "@/lib/snapshot-utils"
 import { parseGradeDisplayToNumbers, parseGradeDisplayToNames, gradesOverlap, gradesEqual, gradeNumToDisplay, isClassElective, isClassCotaught, shouldIgnoreGradeConflict, formatGradeDisplayCompact } from "@/lib/grade-utils"
@@ -604,32 +603,16 @@ export default function HistoryDetailPage() {
   // 1-5, so widen classes with no explicit available_blocks restriction to all
   // template blocks. No-op when there is no template (legacy behavior).
   //
-  // Also applies the double-period grade threshold: the snapshot's isDouble
-  // carries the raw subject flag, but doubles are REQUIRED only when every
-  // covered grade is at/above DOUBLE_REQUIRED_FROM_SORT_ORDER (mirrors
-  // GenerateModal). Below the threshold the flag is advisory — pairing stays
-  // allowed for any class, it just isn't enforced/warned on.
+  // isDouble comes straight from parseClassesFromSnapshot (per-class
+  // double_periods flag) — no further adjustment needed here.
   function parseClassesForTemplate(snapshot: ClassSnapshot[]): ClassEntry[] {
     const classes = parseClassesFromSnapshot(snapshot)
-    const sortOrderByGradeId = new Map(gradesData.map(g => [g.id, g.sort_order]))
     classes.forEach((cls, i) => {
       if (timetableTemplate) {
         const hasBlockRestriction = (snapshot[i]?.restrictions || []).some(
           r => r.restriction_type === 'available_blocks'
         )
         if (!hasBlockRestriction) cls.availableBlocks = [...templateBlocks]
-      }
-      if (cls.isDouble === true) {
-        const gradeIds = snapshot[i]?.grade_ids?.length
-          ? snapshot[i].grade_ids
-          : (snapshot[i]?.grades || []).map(g => g.id)
-        const doubleFlagBinds =
-          gradeIds.length > 0 &&
-          gradeIds.every(gid => {
-            const sortOrder = sortOrderByGradeId.get(gid)
-            return sortOrder !== undefined && sortOrder >= DOUBLE_REQUIRED_FROM_SORT_ORDER
-          })
-        if (!doubleFlagBinds) cls.isDouble = false
       }
     })
     return classes
@@ -1447,11 +1430,7 @@ export default function HistoryDetailPage() {
         // Get grade display names from database
         grades = gradesRaw.map((g: { display_name: string }) => g.display_name)
 
-        const sortOrderByGradeId = new Map<string, number>(
-          gradesRaw.map((g: { id: string; sort_order: number }) => [g.id, g.sort_order])
-        )
-
-        classes = classesRaw.map((c: CurrentClass & { requires_double_periods?: boolean }) => {
+        classes = classesRaw.map((c: CurrentClass & { double_periods?: boolean }) => {
           const restrictions = c.restrictions || []
           const fixedSlots: [string, number][] = []
           let availableDays = ['Mon', 'Tues', 'Wed', 'Thurs', 'Fri']
@@ -1470,16 +1449,6 @@ export default function HistoryDetailPage() {
 
           const gradeNames = c.grades?.map(g => g.display_name) || (c.grade ? [c.grade.display_name] : [])
 
-          // Doubles are REQUIRED only when the subject is flagged AND every
-          // covered grade is at/above the threshold (mirrors GenerateModal).
-          const coveredGrades = c.grades && c.grades.length > 0 ? c.grades : (c.grade ? [c.grade] : [])
-          const doubleFlagBinds =
-            coveredGrades.length > 0 &&
-            coveredGrades.every(g => {
-              const sortOrder = sortOrderByGradeId.get(g.id)
-              return sortOrder !== undefined && sortOrder >= DOUBLE_REQUIRED_FROM_SORT_ORDER
-            })
-
           return {
             teacher: c.teacher?.name || '',
             grade: gradeNames[0] || '',
@@ -1488,10 +1457,8 @@ export default function HistoryDetailPage() {
             daysPerWeek: c.days_per_week,
             isElective: c.is_elective || false,
             isCotaught: c.is_cotaught || false,
-            // Double-period flag: /api/classes surfaces the subject-level
-            // requires_double_periods on each class row; required only when
-            // every covered grade meets the grade threshold
-            isDouble: c.requires_double_periods === true && doubleFlagBinds,
+            // Per-class double-period flag from /api/classes
+            isDouble: c.double_periods === true,
             availableDays,
             availableBlocks,
             fixedSlots: fixedSlots.length > 0 ? fixedSlots : undefined,
@@ -1500,7 +1467,7 @@ export default function HistoryDetailPage() {
 
         // Build updated stats for validation with current class configuration
         const gradesMap = new Map(gradesRaw.map((g: { id: string; name: string; display_name: string }) => [g.id, g]))
-        const classesSnapshot = classesRaw.map((c: CurrentClass & { grade_ids?: string[]; requires_double_periods?: boolean }) => {
+        const classesSnapshot = classesRaw.map((c: CurrentClass & { grade_ids?: string[]; double_periods?: boolean }) => {
           const gradeIds = c.grade_ids?.length ? c.grade_ids : (c.grade?.id ? [c.grade.id] : [])
           const gradesArray = gradeIds.map((gid: string) => {
             const g = gradesMap.get(gid) as { id: string; name: string; display_name: string } | undefined
@@ -1516,7 +1483,7 @@ export default function HistoryDetailPage() {
             is_cotaught: c.is_cotaught || false,
             subject_id: c.subject?.id || null,
             subject_name: c.subject?.name || null,
-            subject_requires_double_periods: c.requires_double_periods === true,
+            double_periods: c.double_periods === true,
             days_per_week: c.days_per_week,
             restrictions: (c.restrictions || []).map((r) => ({
               restriction_type: r.restriction_type,
@@ -2130,7 +2097,7 @@ export default function HistoryDetailPage() {
         // Build new snapshots
         const gradesMap = new Map(gradesRaw.map((g: { id: string; name: string; display_name: string }) => [g.id, g]))
 
-        const classesSnapshot = classesRaw.map((c: CurrentClass & { grade_ids?: string[]; requires_double_periods?: boolean }) => {
+        const classesSnapshot = classesRaw.map((c: CurrentClass & { grade_ids?: string[]; double_periods?: boolean }) => {
           const gradeIds = c.grade_ids?.length ? c.grade_ids : (c.grade?.id ? [c.grade.id] : [])
           const gradesArray = gradeIds.map((gid: string) => {
             const g = gradesMap.get(gid) as { id: string; name: string; display_name: string } | undefined
@@ -2147,7 +2114,7 @@ export default function HistoryDetailPage() {
             is_cotaught: c.is_cotaught || false,
             subject_id: c.subject?.id || null,
             subject_name: c.subject?.name || null,
-            subject_requires_double_periods: c.requires_double_periods === true,
+            double_periods: c.double_periods === true,
             days_per_week: c.days_per_week,
             restrictions: (c.restrictions || []).map((r) => ({
               restriction_type: r.restriction_type,
@@ -5654,14 +5621,13 @@ export default function HistoryDetailPage() {
 
   /**
    * CORE: Check double-period pairing (soft warning, like no_lunch).
-   * Applies only to REQUIRED-double classes (isDouble: subject flagged AND
-   * every covered grade at/above DOUBLE_REQUIRED_FROM_SORT_ORDER — producers
-   * apply the threshold). Such a class may meet at most once per day: either
+   * Applies only to REQUIRED-double classes (isDouble: the per-class
+   * double_periods flag). Such a class may meet at most once per day: either
    * a lone single lesson, or exactly two lessons in a legal back-to-back pair
    * for every grade of the class. Anything else — a third same-day occurrence,
    * or a same-day pair that is not adjacent/pairable — gets a [Double Periods]
-   * warning. Unflagged/below-threshold classes are never warned on (pairing is
-   * allowed but optional for them). Skipped on legacy quarters (no template).
+   * warning. Unflagged classes are never warned on (pairing is allowed but
+   * optional for them). Skipped on legacy quarters (no template).
    */
   function checkDoublePeriodPairings(
     teacherSchedules: Record<string, TeacherSchedule>,
@@ -5706,7 +5672,7 @@ export default function HistoryDetailPage() {
   /**
    * EDITING: Warn (toast) when a swap/move leaves a REQUIRED-double class's
    * lessons unpaired — e.g. moving one half of a pair without the other.
-   * Applies only to classes whose isDouble survived the grade threshold;
+   * Applies only to classes flagged isDouble (per-class double_periods);
    * optional pairing on other classes never toasts. Soft by design: the edit
    * still applies (humans may override); the same condition resurfaces as a
    * [Double Periods] warning at save-time validation. Compares before/after

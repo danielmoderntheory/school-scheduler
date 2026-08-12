@@ -31,7 +31,7 @@ import { GenerateModal } from "@/components/GenerateModal"
 import { useQuarterSelection } from "@/lib/hooks/useQuarterSelection"
 import { TEACHER_STATUS_FULL_TIME, isPartTime, isFullTime, calculateGradeBlocks, buildCotaughtGroups, type TeacherStatus } from "@/lib/schedule-utils"
 import { getTemplateBlocks, getTeachableBlocksForGrade } from "@/lib/timetable-utils"
-import { DOUBLE_REQUIRED_FROM_SORT_ORDER, type TimetableTemplate } from "@/lib/types"
+import { type TimetableTemplate } from "@/lib/types"
 import type { SchedulingRule } from "@/lib/scheduler-remote"
 import toast from "@/lib/toast"
 
@@ -63,7 +63,6 @@ interface Grade {
 interface Subject {
   id: string
   name: string
-  requires_double_periods?: boolean
 }
 
 interface Restriction {
@@ -82,8 +81,8 @@ interface ClassEntry {
   is_cotaught?: boolean
   subject_id: string
   days_per_week: number
-  /** Mirrors subject.requires_double_periods (returned top-level by the classes API) */
-  requires_double_periods?: boolean
+  /** Per-class double periods setting (classes.double_periods, returned by the classes API) */
+  double_periods?: boolean
   teacher: Teacher | null
   teacher_deleted?: boolean
   grade: Grade
@@ -102,16 +101,6 @@ const DAYS = ["Mon", "Tues", "Wed", "Thurs", "Fri"]
 // Legacy fallback — the real block list comes from the quarter's timetable template
 const DEFAULT_BLOCKS = [1, 2, 3, 4, 5]
 
-// The subject "Double periods" flag only binds (back-to-back REQUIRED) when every
-// covered grade is 6th and up. Below that — and for unflagged subjects — the
-// scheduler may still pair lessons into doubles, but isn't required to.
-function doubleFlagBindsForGrades(gradeIds: string[], grades: Grade[]): boolean {
-  if (gradeIds.length === 0) return false
-  return gradeIds.every((id) => {
-    const grade = grades.find((g) => g.id === id)
-    return grade !== undefined && grade.sort_order >= DOUBLE_REQUIRED_FROM_SORT_ORDER
-  })
-}
 // NOTE: Study hall grades are now configured in the rules, fetched below
 
 function formatTimeAgo(timestamp: string): string {
@@ -198,6 +187,7 @@ function ClassesPageContent() {
     isElective: boolean
     detectedElective: boolean
     isCotaught: boolean
+    isDouble: boolean
   }>>([])
   const [importCotaughtGroups, setImportCotaughtGroups] = useState<Map<string, number[]>>(new Map())
   const [showCotaughtDetails, setShowCotaughtDetails] = useState(false)
@@ -423,6 +413,7 @@ function ClassesPageContent() {
       : field === "grade_id" ? cls.grade_id
       : field === "subject_id" ? cls.subject_id
       : field === "days_per_week" ? cls.days_per_week
+      : field === "double_periods" ? (cls.double_periods === true)
       : null
 
     // Optimistic update
@@ -788,7 +779,7 @@ function ClassesPageContent() {
     'Fri': 'Fri', 'Friday': 'Fri',
   }
 
-  function parseRestrictions(restrictionStr: string): Restriction[] {
+  function parseRestrictions(restrictionStr: string, onInvalidBlock?: (block: number) => void): Restriction[] {
     if (!restrictionStr?.trim()) return []
 
     // Accept block numbers within the quarter's template (e.g. 1-9 under the 9-block format)
@@ -822,7 +813,11 @@ function ClassesPageContent() {
         const endBlock = parseInt(rangeMatch[3])
         if (!availableDays.includes(day)) availableDays.push(day)
         for (let b = startBlock; b <= endBlock; b++) {
-          if (validBlocks.includes(b) && !availableBlocks.includes(b)) availableBlocks.push(b)
+          if (!validBlocks.includes(b)) {
+            onInvalidBlock?.(b)
+            continue
+          }
+          if (!availableBlocks.includes(b)) availableBlocks.push(b)
         }
         continue
       }
@@ -834,6 +829,8 @@ function ClassesPageContent() {
         const block = parseInt(fixedMatch[2])
         if (validBlocks.includes(block)) {
           restrictions.push({ restriction_type: 'fixed_slot', value: { day, block } })
+        } else {
+          onInvalidBlock?.(block)
         }
       }
     }
@@ -884,6 +881,14 @@ function ClassesPageContent() {
   function handleImport() {
     if (!importText.trim() || !activeQuarter) return
 
+    // Fail closed: restriction block numbers are validated against the
+    // quarter's block format. Importing before the template loads would
+    // silently validate against the legacy 5-block list and drop e.g. Block 9.
+    if (!timetableTemplate) {
+      toast.error("The quarter's block format hasn't finished loading — wait a moment and try importing again.")
+      return
+    }
+
     const lines = importText.trim().split('\n')
     let startIndex = 0
 
@@ -905,6 +910,7 @@ function ClassesPageContent() {
       isElective: boolean
       detectedElective: boolean
       isCotaught: boolean
+      isDouble: boolean
     }> = []
     const validationErrors: string[] = []
 
@@ -912,12 +918,27 @@ function ClassesPageContent() {
       const line = lines[i].trim()
       if (!line) continue
 
-      const [teacherName, gradeStr, subjectName, daysStr, restrictionStr] = line.split('\t')
+      // Column 6 (Double) is optional — legacy 5-column sheets parse identically
+      const [teacherName, gradeStr, subjectName, daysStr, restrictionStr, doubleStr] = line.split('\t')
       const lineNum = i + 1
 
       if (!teacherName || !gradeStr || !subjectName) {
         validationErrors.push(`Line ${lineNum}: Missing teacher, grade, or subject`)
         continue
+      }
+
+      // Validate restriction block numbers against the quarter's format now,
+      // as a hard error — never silently drop a pinned slot.
+      if (restrictionStr?.trim()) {
+        const invalidBlocks: number[] = []
+        parseRestrictions(restrictionStr, (b) => invalidBlocks.push(b))
+        if (invalidBlocks.length > 0) {
+          validationErrors.push(
+            `Line ${lineNum}: Block${invalidBlocks.length > 1 ? 's' : ''} ${[...new Set(invalidBlocks)].join(', ')} ` +
+            `not in this quarter's block format (valid: ${getTemplateBlocks(timetableTemplate).join(', ')})`
+          )
+          continue
+        }
       }
 
       // Parse grade string - supports:
@@ -996,6 +1017,9 @@ function ClassesPageContent() {
         continue
       }
 
+      // Double column: "2x"/"2×"/"yes"/"true" (case-insensitive) = on; blank/anything else = off
+      const isDouble = /^(2x|2×|yes|true)$/i.test((doubleStr || '').trim())
+
       parsedRows.push({
         line: lineNum,
         teacherName,
@@ -1007,6 +1031,7 @@ function ClassesPageContent() {
         isElective,
         detectedElective: isElective,
         isCotaught: false, // Will be set below
+        isDouble,
       })
     }
 
@@ -1122,6 +1147,7 @@ function ClassesPageContent() {
         days_per_week: row.daysPerWeek,
         is_elective: row.isElective,
         is_cotaught: row.isCotaught,
+        double_periods: row.isDouble,
       }
 
       try {
@@ -1236,6 +1262,7 @@ function ClassesPageContent() {
           subject_id: cls.subject_id,
           days_per_week: cls.days_per_week,
           is_elective: cls.is_elective,
+          double_periods: cls.double_periods === true,
         }
 
         const res = await fetch("/api/classes", {
@@ -1332,6 +1359,7 @@ function ClassesPageContent() {
       days_per_week: number
       is_elective?: boolean
       is_cotaught?: boolean
+      double_periods?: boolean
       restrictions?: Array<{ restriction_type: string; value: unknown }>
     }>
 
@@ -1461,6 +1489,7 @@ function ClassesPageContent() {
             days_per_week: cls.days_per_week,
             is_elective: cls.is_elective || false,
             is_cotaught: cls.is_cotaught || false,
+            double_periods: cls.double_periods === true,
             restrictions: cls.restrictions || []
           })
         })
@@ -1568,8 +1597,8 @@ function ClassesPageContent() {
   function generateExportData(): string[] {
     const lines: string[] = []
 
-    // Header
-    lines.push(['Teacher', 'Grade', 'Subject', 'Blocks/Week', 'Restrictions'].join('\t'))
+    // Header — Double is the optional 6th column (round-trips through paste import)
+    lines.push(['Teacher', 'Grade', 'Subject', 'Blocks/Week', 'Restrictions', 'Double'].join('\t'))
 
     // Sort classes by teacher name, then grade (incomplete classes first)
     const sortedClasses = [...classes].sort((a, b) => {
@@ -1588,8 +1617,9 @@ function ClassesPageContent() {
       const subject = cls.subject?.name || '(no subject)'
       const daysPerWeek = cls.days_per_week.toString()
       const restrictions = formatRestrictionsForExport(cls.restrictions || [])
+      const double = cls.double_periods === true ? '2x' : ''
 
-      lines.push([teacher, grade, subject, daysPerWeek, restrictions].join('\t'))
+      lines.push([teacher, grade, subject, daysPerWeek, restrictions, double].join('\t'))
     }
 
     return lines
@@ -2172,7 +2202,7 @@ function ClassesPageContent() {
             </DialogTitle>
             <DialogDescription>
               {importStep === 'input'
-                ? 'Paste tab-delimited data from Google Sheets. Format: Teacher, Grade, Subject, Blocks/Week, Restrictions (optional)'
+                ? 'Paste tab-delimited data from Google Sheets. Format: Teacher, Grade, Subject, Blocks/Week, Restrictions (optional), Double (optional — "2x" or "yes")'
                 : `Review ${pendingImport.length} classes before importing. Adjust elective and co-taught flags as needed.`
               }
             </DialogDescription>
@@ -2183,11 +2213,11 @@ function ClassesPageContent() {
               <div className="space-y-4">
                 <textarea
                   className="w-full h-64 p-3 text-sm font-mono border rounded-lg resize-none focus:outline-none focus:ring-2 focus:ring-sky-500"
-                  placeholder={`Teacher\tGrade\tSubject\tBlocks/Week\tRestrictions
-New Teacher\tKindergarten\tEnglish\t4\t
-Carolina\t1st Grade\tMath\t4\t
-Phil\t6th-8th\tScience\t3\t
-Maria\t6th-11th Elective\tSpanish 101\t1\tMon Block 5`}
+                  placeholder={`Teacher\tGrade\tSubject\tBlocks/Week\tRestrictions\tDouble
+New Teacher\tKindergarten\tEnglish\t4\t\t
+Carolina\t1st Grade\tMath\t4\t\t
+Phil\t6th-8th\tScience\t7\t\t2x
+Maria\t6th-11th Elective\tSpanish 101\t1\tMon Block 5\t`}
                   value={importText}
                   onChange={(e) => setImportText(e.target.value)}
                 />
@@ -2333,6 +2363,31 @@ Maria\t6th-11th Elective\tSpanish 101\t1\tMon Block 5`}
                           <span className="text-slate-400">·</span>
                           <span className="font-medium">{row.subjectName}</span>
                         </label>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {/* Double periods section */}
+                {pendingImport.some(r => r.isDouble) && (
+                  <div className="border rounded-lg p-3">
+                    <p className="text-sm font-medium mb-1">Double periods ({pendingImport.filter(r => r.isDouble).length})</p>
+                    <p className="text-xs text-slate-500 mb-2">Lessons for these classes pair into back-to-back blocks.</p>
+                    <div className="space-y-1.5">
+                      {pendingImport.map((row, idx) => row.isDouble && (
+                        <div key={idx} className="flex items-center gap-2 text-sm">
+                          <span
+                            title="Double periods — lessons pair into back-to-back blocks"
+                            className="px-1 rounded bg-violet-100 text-violet-700 text-[10px] font-semibold flex-shrink-0"
+                          >
+                            2×
+                          </span>
+                          <span className="text-slate-600">{row.teacherName}</span>
+                          <span className="text-slate-400">·</span>
+                          <span>{row.gradeStr}</span>
+                          <span className="text-slate-400">·</span>
+                          <span className="font-medium">{row.subjectName}</span>
+                        </div>
                       ))}
                     </div>
                   </div>
@@ -2971,34 +3026,18 @@ function ClassRow({
         />
       </td>
       <td className="px-1 py-1">
-        {(() => {
-          const subjectFlagged =
-            cls.requires_double_periods === true ||
-            cls.subject?.requires_double_periods === true ||
-            subjects.find((s) => s.id === cls.subject_id)?.requires_double_periods === true
-          // Badge only when the flag actually binds: all covered grades 6th and up
-          const requiresDouble =
-            subjectFlagged &&
-            doubleFlagBindsForGrades(cls.grade_ids || (cls.grade_id ? [cls.grade_id] : []), grades)
-          return (
-            <div className="flex items-center gap-1">
-              <NumberCell
-                value={cls.days_per_week}
-                onChange={(val) => onUpdate(cls.id, "days_per_week", val)}
-                min={1}
-                max={10}
-              />
-              {requiresDouble && (
-                <span
-                  title="Double periods required — lessons pair into back-to-back blocks (e.g. 7 lessons = 3 doubles + 1 single)"
-                  className="px-1 rounded bg-violet-100 text-violet-700 text-[10px] font-semibold cursor-help flex-shrink-0"
-                >
-                  2×
-                </span>
-              )}
-            </div>
-          )
-        })()}
+        <div className="flex items-center gap-1">
+          <NumberCell
+            value={cls.days_per_week}
+            onChange={(val) => onUpdate(cls.id, "days_per_week", val)}
+            min={1}
+            max={10}
+          />
+          <DoublePeriodsToggle
+            value={cls.double_periods === true}
+            onChange={(val) => onUpdate(cls.id, "double_periods", val)}
+          />
+        </div>
       </td>
       <td className="px-1 py-1">
         <RestrictionsCell
@@ -3048,6 +3087,7 @@ function NewClassRow({
     is_cotaught: false,
     subject_id: "",
     days_per_week: 1,
+    double_periods: false,
   })
   const [isActive, setIsActive] = useState(false)
 
@@ -3055,7 +3095,7 @@ function NewClassRow({
     if (data.teacher_id && data.grade_ids.length > 0 && data.subject_id) {
       const result = await onCreate(data)
       if (result) {
-        setData({ teacher_id: "", grade_ids: [], is_elective: false, is_cotaught: false, subject_id: "", days_per_week: 1 })
+        setData({ teacher_id: "", grade_ids: [], is_elective: false, is_cotaught: false, subject_id: "", days_per_week: 1, double_periods: false })
         setIsActive(false)
       }
     }
@@ -3119,30 +3159,20 @@ function NewClassRow({
         )}
       </td>
       <td className="px-1 py-1">
-        {isActive && (() => {
-          const subjectFlagged =
-            subjects.find((s) => s.id === data.subject_id)?.requires_double_periods === true
-          // Badge only when the flag actually binds: all selected grades 6th and up
-          const requiresDouble = subjectFlagged && doubleFlagBindsForGrades(data.grade_ids, grades)
-          return (
-            <div className="flex items-center gap-1">
-              <NumberCell
-                value={data.days_per_week}
-                onChange={(val) => setData((d) => ({ ...d, days_per_week: val }))}
-                min={1}
-                max={10}
-              />
-              {requiresDouble && (
-                <span
-                  title="Double periods required — lessons pair into back-to-back blocks (e.g. 7 lessons = 3 doubles + 1 single)"
-                  className="px-1 rounded bg-violet-100 text-violet-700 text-[10px] font-semibold cursor-help flex-shrink-0"
-                >
-                  2×
-                </span>
-              )}
-            </div>
-          )
-        })()}
+        {isActive && (
+          <div className="flex items-center gap-1">
+            <NumberCell
+              value={data.days_per_week}
+              onChange={(val) => setData((d) => ({ ...d, days_per_week: val }))}
+              min={1}
+              max={10}
+            />
+            <DoublePeriodsToggle
+              value={data.double_periods}
+              onChange={(val) => setData((d) => ({ ...d, double_periods: val }))}
+            />
+          </div>
+        )}
       </td>
       <td className="px-1 py-1">
         {isActive && canCreate && (
@@ -3155,7 +3185,7 @@ function NewClassRow({
         {isActive && (
           <button
             onClick={() => {
-              setData({ teacher_id: "", grade_ids: [], is_elective: false, is_cotaught: false, subject_id: "", days_per_week: 1 })
+              setData({ teacher_id: "", grade_ids: [], is_elective: false, is_cotaught: false, subject_id: "", days_per_week: 1, double_periods: false })
               setIsActive(false)
             }}
             className="p-1 hover:bg-destructive/10 rounded text-muted-foreground hover:text-destructive"
@@ -3302,6 +3332,31 @@ function SelectCell({
         </div>
       )}
     </div>
+  )
+}
+
+interface DoublePeriodsToggleProps {
+  value: boolean
+  onChange: (val: boolean) => void
+}
+
+// Small "2×" chip: violet when on, grey/hollow when off. Click to flip.
+function DoublePeriodsToggle({ value, onChange }: DoublePeriodsToggleProps) {
+  return (
+    <button
+      type="button"
+      onClick={() => onChange(!value)}
+      title="Double periods — lessons pair into back-to-back blocks"
+      aria-pressed={value}
+      className={cn(
+        "px-1 rounded border text-[10px] font-semibold flex-shrink-0 transition-colors",
+        value
+          ? "bg-violet-100 text-violet-700 border-violet-200 hover:bg-violet-200"
+          : "bg-transparent text-slate-300 border-slate-200 hover:text-violet-500 hover:border-violet-300"
+      )}
+    >
+      2×
+    </button>
   )
 }
 
