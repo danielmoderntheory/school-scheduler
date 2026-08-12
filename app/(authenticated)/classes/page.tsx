@@ -2875,7 +2875,7 @@ Maria\t6th-11th Elective\tSpanish 101\t1\tMon Block 5\t`}
               <th className="text-left font-medium text-slate-500 px-3 py-2.5 w-[180px]">Teacher</th>
               <th className="text-left font-medium text-slate-500 px-3 py-2.5 w-[160px]">Grade</th>
               <th className="text-left font-medium text-slate-500 px-3 py-2.5 w-[200px]">Subject</th>
-              <th className="text-left font-medium text-slate-500 px-3 py-2.5 w-[60px]">Blocks</th>
+              <th className="text-left font-medium text-slate-500 pl-2 pr-3 py-2.5 w-[60px]">Blocks</th>
               <th className="text-left font-medium text-slate-500 px-3 py-2.5">Fixed Time Slots</th>
               <th className="w-8"></th>
             </tr>
@@ -3026,7 +3026,7 @@ function ClassRow({
         />
       </td>
       <td className="px-1 py-1">
-        <div className="flex items-center gap-1">
+        <div className="flex items-center gap-2.5">
           <NumberCell
             value={cls.days_per_week}
             onChange={(val) => onUpdate(cls.id, "days_per_week", val)}
@@ -3160,7 +3160,7 @@ function NewClassRow({
       </td>
       <td className="px-1 py-1">
         {isActive && (
-          <div className="flex items-center gap-1">
+          <div className="flex items-center gap-2.5">
             <NumberCell
               value={data.days_per_week}
               onChange={(val) => setData((d) => ({ ...d, days_per_week: val }))}
