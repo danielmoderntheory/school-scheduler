@@ -1015,6 +1015,173 @@ def test_20():
 test_20()
 
 
+# =========================================================================
+# TEST 21: pair-aware redistribution — double periods move TOGETHER
+# =========================================================================
+def test_21():
+    print("\nTEST 21 — pair-aware redistribution: pairs move atomically, fixed stays frozen")
+    import copy
+    from solver import redistribute_open_blocks, count_back_to_back, set_blocks
+
+    set_blocks(None)  # legacy 5-block grid for the direct-call scenarios
+    B = solver.BLOCKS
+    G = '7th Grade'
+    MON, TUE = DAYS[0], DAYS[1]
+
+    FROZEN = {('Pat', G, s) for s in ('Science', 'History', 'Geography')}
+    ALL_PAIRS = {(1, 2), (2, 3), (3, 4), (4, 5)}
+
+    def fresh_schedules(spanish_pair=(1, 2), tues_b3=None):
+        """Pat teaches a Spanish PAIR on Mon plus singles arranged so that NO
+        single-session move can fill Tuesday's BTB-OPEN hole:
+        - Math/ELA singles duplicate subjects already on Tuesday
+        - Science/History/Geography are frozen (fixed-slot classes)
+        Only relocating the Spanish pair atomically can reduce BTB."""
+        mon = {spanish_pair[0]: [G, 'Spanish'], spanish_pair[1]: [G, 'Spanish']}
+        for b, subj in zip([b for b in B if b not in mon], ['Math', 'ELA', 'Science']):
+            mon[b] = [G, subj]
+        tues = {b: ['', 'OPEN'] for b in B}
+        tues[4] = [G, 'Math']
+        tues[5] = [G, 'ELA']
+        if tues_b3:
+            tues[3] = [G, tues_b3]
+        def full_day():
+            return {1: [G, 'Math'], 2: [G, 'ELA'], 3: [G, 'Science'],
+                    4: [G, 'History'], 5: [G, 'Geography']}
+        ts = {'Pat': {MON: mon, TUE: tues, DAYS[2]: full_day(),
+                      DAYS[3]: full_day(), DAYS[4]: full_day()}}
+        gs = {G: {d: {b: None for b in B} for d in DAYS}}
+        for d in DAYS:
+            for b in B:
+                e = ts['Pat'][d][b]
+                if e and e[1] != 'OPEN':
+                    gs[G][d][b] = ['Pat', e[1]]
+        return ts, gs
+
+    def subject_days(ts, teacher, subject):
+        out = {}
+        for d in DAYS:
+            for b in sorted(ts[teacher][d].keys()):
+                e = ts[teacher][d][b]
+                if e and e[1] == subject:
+                    out.setdefault(d, []).append(b)
+        return out
+
+    def pairs_intact(ts, teacher, subject, allowed):
+        """Invariant: every meeting is a lone single or ONE legal consecutive
+        pair — a pair is never split into blocks on different days/positions."""
+        for d, blocks in subject_days(ts, teacher, subject).items():
+            if len(blocks) == 1:
+                continue
+            if len(blocks) == 2 and tuple(sorted(blocks)) in allowed:
+                continue
+            return False
+        return True
+
+    def frozen_untouched(ts, ts_orig):
+        return all(subject_days(ts, 'Pat', s) == subject_days(ts_orig, 'Pat', s)
+                   for s in ('Science', 'History', 'Geography'))
+
+    # (a) a BTB hole only a pair move can fill -> pair relocates TOGETHER
+    ts, gs = fresh_schedules()
+    ts_orig = copy.deepcopy(ts)
+    btb_before = count_back_to_back(ts, 'Pat')
+    redistribute_open_blocks(ts, gs, ['Pat'],
+                             frozen_class_entries=FROZEN,
+                             class_allowed_pairs={('Pat', G, 'Spanish'): ALL_PAIRS})
+    btb_after = count_back_to_back(ts, 'Pat')
+    spa = subject_days(ts, 'Pat', 'Spanish')
+    check("pair move: BTB strictly decreased", btb_after < btb_before,
+          f"{btb_before} -> {btb_after}")
+    check("pair moved TOGETHER onto the hole (Tues B1+B2)",
+          spa == {TUE: [1, 2]}, str(spa))
+    check("pair invariant holds after redistribution",
+          pairs_intact(ts, 'Pat', 'Spanish', ALL_PAIRS), str(spa))
+    check("fixed-slot (frozen) classes never moved", frozen_untouched(ts, ts_orig))
+    check("grade schedule tracks the moved pair",
+          gs[G][TUE][1] == ['Pat', 'Spanish'] and gs[G][TUE][2] == ['Pat', 'Spanish']
+          and gs[G][MON][1] is None and gs[G][MON][2] is None,
+          str({d: gs[G][d] for d in (MON, TUE)}))
+
+    # (b) net-zero pair move is rejected (state fully reverted, no thrashing)
+    ts, gs = fresh_schedules(tues_b3='Geography')
+    ts_orig = copy.deepcopy(ts)
+    redistribute_open_blocks(ts, gs, ['Pat'],
+                             frozen_class_entries=FROZEN,
+                             class_allowed_pairs={('Pat', G, 'Spanish'): ALL_PAIRS})
+    check("net-zero pair move rejected: schedule unchanged", ts == ts_orig)
+
+    # (c) target pair must be in the class's pair table
+    ts, gs = fresh_schedules()
+    ts_orig = copy.deepcopy(ts)
+    redistribute_open_blocks(ts, gs, ['Pat'],
+                             frozen_class_entries=FROZEN,
+                             class_allowed_pairs={('Pat', G, 'Spanish'): {(4, 5)}})
+    check("pair never lands outside its allowed-pair table", ts == ts_orig)
+
+    # (d) grade teachable mask holds for BOTH blocks: block 1 masked out ->
+    # the pair must land at Tues (2,3), leaving the masked block untouched
+    ts, gs = fresh_schedules(spanish_pair=(2, 3))
+    redistribute_open_blocks(ts, gs, ['Pat'],
+                             grade_teachable_blocks={G: [2, 3, 4, 5]},
+                             frozen_class_entries=FROZEN,
+                             class_allowed_pairs={('Pat', G, 'Spanish'): {(2, 3), (3, 4), (4, 5)}})
+    spa_m = subject_days(ts, 'Pat', 'Spanish')
+    check("masked pair move: lands on the legal in-mask pair (Tues B2+B3)",
+          spa_m == {TUE: [2, 3]}, str(spa_m))
+    check("masked pair move: masked block stays untouched",
+          ts['Pat'][TUE][1] == ['', 'OPEN'], str(ts['Pat'][TUE][1]))
+
+    # (e) teacher_lunch guard holds for BOTH blocks
+    # last candidate window {2}: any landing covering block 2 is refused
+    ts, gs = fresh_schedules()
+    ts_orig = copy.deepcopy(ts)
+    redistribute_open_blocks(ts, gs, ['Pat'],
+                             teacher_lunch_windows={'Pat': {2}},
+                             frozen_class_entries=FROZEN,
+                             class_allowed_pairs={('Pat', G, 'Spanish'): ALL_PAIRS})
+    check("pair move refused when it would take the last lunch window",
+          subject_days(ts, 'Pat', 'Spanish') == {MON: [1, 2]},
+          str(subject_days(ts, 'Pat', 'Spanish')))
+    # windows {1,2}: landing at (2,3) keeps window 1 free -> allowed
+    ts, gs = fresh_schedules()
+    redistribute_open_blocks(ts, gs, ['Pat'],
+                             teacher_lunch_windows={'Pat': {1, 2}},
+                             frozen_class_entries=FROZEN,
+                             class_allowed_pairs={('Pat', G, 'Spanish'): ALL_PAIRS})
+    spa_l = subject_days(ts, 'Pat', 'Spanish')
+    check("pair lands where a lunch window survives (Tues B2+B3)",
+          spa_l == {TUE: [2, 3]}, str(spa_l))
+    check("lunch window kept free after the pair move",
+          ts['Pat'][TUE][1] == ['', 'OPEN'], str(ts['Pat'][TUE][1]))
+
+    # (f) end-to-end: a flagged double survives redistribution intact
+    # (no_btb_open enabled; the under-loaded teacher forces many BTB holes)
+    set_blocks(NINE_BLOCKS)
+    e2e_classes = []
+    for subj in ['Math', 'ELA', 'Science', 'Social Studies']:
+        e2e_classes.append(make_class('Shary', ['7th Grade'], subj, 4))
+    dbl = make_class('Sofia', ['7th Grade'], 'Spanish', 4)
+    dbl['is_double'] = True
+    e2e_classes.append(dbl)
+    res_e2e = generate_schedules(
+        teachers=TEACHERS_D, classes=e2e_classes, rules=RULES,
+        num_options=1, num_attempts=2, max_time_seconds=40.0, grades=GRADES,
+        blocks=NINE_BLOCKS, grade_teachable_blocks=MASKS, grade_block_pairs=PAIRS,
+    )
+    check("e2e: flagged double with redistribution enabled solves",
+          res_e2e['status'] == 'success', res_e2e.get('message', ''))
+    if res_e2e['status'] == 'success':
+        ts_e = res_e2e['options'][0]['teacherSchedules']
+        spa_e = find_subject_days(ts_e, 'Sofia', 'Spanish')
+        pairs_e = [tuple(v) for v in spa_e.values() if len(v) == 2]
+        check("e2e: pairs never split — 2 legal doubles on 2 days post-redistribution",
+              len(spa_e) == 2 and len(pairs_e) == 2
+              and all(p in MS_PAIRS for p in pairs_e), str(spa_e))
+
+test_21()
+
+
 fails = [n for n, ok in results if not ok]
 print(f"RESULT: {len(results) - len(fails)}/{len(results)} passed"
       + (f"; FAILED: {fails}" if fails else ""))

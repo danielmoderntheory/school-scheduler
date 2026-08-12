@@ -1613,7 +1613,8 @@ def redistribute_open_blocks(teacher_schedules: dict, grade_schedules: dict,
                              full_time_teachers: list[str],
                              grade_teachable_blocks: dict = None,
                              teacher_lunch_windows: dict = None,
-                             frozen_class_entries: set = None) -> None:
+                             frozen_class_entries: set = None,
+                             class_allowed_pairs: dict = None) -> None:
     """
     Post-processing to break up consecutive OPEN blocks by swapping classes around.
     This mimics the JavaScript solver's redistributeOpenBlocks function.
@@ -1627,30 +1628,41 @@ def redistribute_open_blocks(teacher_schedules: dict, grade_schedules: dict,
     candidate lunch window on a day (would leave them without a lunch break).
 
     frozen_class_entries: optional set of (teacher, grade_display, subject)
-    triples whose sessions must never be moved. Used for double-period classes:
-    the two halves of a double must stay together, and the simplest safe policy
-    is to never move any session of a flagged class.
+    triples whose sessions must never be moved. Used for classes with fixed
+    slots: the user pinned them, so post-processing must not undo the pin.
+
+    class_allowed_pairs: optional dict mapping (teacher, grade_display, subject)
+    to the class's legal (earlierBlock, laterBlock) pairs. A day holding two
+    consecutive blocks of one class is a PAIR meeting (a required double or an
+    optional same-day twin): it never moves one block at a time, but it MAY be
+    relocated atomically to another legal pair position when that reduces the
+    teacher's back-to-back OPEN count. Classes absent from the dict (or with an
+    empty pair list) keep their pair meetings where the solver put them.
     """
 
-    def would_lose_lunch(teacher: str, issue_day: str, issue_block: int,
-                         target_day: str, target_block: int) -> bool:
-        """Would moving a class into (issue_day, issue_block) - vacating
-        (target_day, target_block) - leave the teacher with no free candidate
-        lunch window on issue_day? Study Hall counts as occupied."""
+    def would_lose_lunch(teacher: str, issue_day: str, occupy_blocks,
+                         vacated: set) -> bool:
+        """Would occupying `occupy_blocks` on issue_day - while vacating the
+        (day, block) slots in `vacated` - leave the teacher with no free
+        candidate lunch window on issue_day? Study Hall counts as occupied."""
         cand = (teacher_lunch_windows or {}).get(teacher)
-        if not cand or issue_block not in cand:
+        if not cand:
+            return False
+        occupy = set(occupy_blocks)
+        if not (occupy & set(cand)):
             return False
         day_sched = teacher_schedules.get(teacher, {}).get(issue_day, {})
         for b in cand:
-            if b == issue_block or b not in BLOCKS:
+            if b in occupy or b not in BLOCKS:
                 continue
-            # The vacated slot becomes OPEN, so it counts as free
-            if target_day == issue_day and b == target_block:
+            # A vacated slot becomes OPEN, so it counts as free
+            if (issue_day, b) in vacated:
                 return False
             entry = day_sched.get(b)
             if entry is None or (len(entry) > 1 and entry[1] == 'OPEN'):
                 return False
         return True
+
     def grades_teachable_at(grades: list, block: int) -> bool:
         if not grade_teachable_blocks:
             return True
@@ -1694,6 +1706,198 @@ def redistribute_open_blocks(teacher_schedules: dict, grade_schedules: dict,
 
         return False
 
+    def class_blocks_on_day(teacher: str, day: str, grade_display: str,
+                            subject: str) -> list:
+        """Blocks where the teacher teaches this class on this day."""
+        day_sched = teacher_schedules.get(teacher, {}).get(day, {})
+        blocks = []
+        for b in BLOCKS:
+            e = day_sched.get(b)
+            if e and e[0] == grade_display and e[1] == subject:
+                blocks.append(b)
+        return blocks
+
+    def class_meets_on_day(teacher: str, day: str, grade_display: str,
+                           subject: str, exclude=frozenset()) -> bool:
+        """Does the teacher's schedule hold this class on this day outside
+        the excluded (day, block) slots? Keyed off the teacher's own schedule
+        so electives / unparsable grade displays are covered too."""
+        day_sched = teacher_schedules.get(teacher, {}).get(day, {})
+        for b in BLOCKS:
+            if (day, b) in exclude:
+                continue
+            e = day_sched.get(b)
+            if e and e[0] == grade_display and e[1] == subject:
+                return True
+        return False
+
+    def find_pair_meetings(teacher: str) -> list:
+        """PAIR meetings in the built schedule: for each class, a day holding
+        exactly two CONSECUTIVE blocks of it (covers required doubles and
+        optional same-day twins). Returns (day, (b1, b2), grade_display,
+        subject) tuples. Days holding a class twice non-consecutively (only
+        possible with no_duplicate_subjects disabled) or 3+ times are left
+        alone entirely."""
+        meetings = []
+        schedule = teacher_schedules.get(teacher, {})
+        for day in DAYS:
+            by_class: dict = {}
+            for b in BLOCKS:
+                e = schedule.get(day, {}).get(b)
+                if e and e[0] and e[1] not in ('OPEN', 'Study Hall'):
+                    by_class.setdefault((e[0], e[1]), []).append(b)
+            for (gd, subj), blocks in by_class.items():
+                if (len(blocks) == 2
+                        and BLOCKS.index(blocks[1]) == BLOCKS.index(blocks[0]) + 1):
+                    meetings.append((day, (blocks[0], blocks[1]), gd, subj))
+        return meetings
+
+    def try_pair_move(teacher: str, issue_day: str, issue_block: int) -> bool:
+        """Try to fill the BTB-OPEN hole at (issue_day, issue_block) by
+        relocating a whole PAIR meeting onto two consecutive OPEN blocks
+        covering the hole. The pair moves atomically: both target blocks must
+        be OPEN for the teacher, free and teachable for every covered grade,
+        form a legal pair for the class, keep the teacher's lunch window, and
+        the target day must hold no other meeting of the class or of the same
+        grade+subject (the duplicate-subject pair exception applies only to
+        the moved pair itself). Vacating a pair opens two adjacent blocks at
+        the source, so the move is applied tentatively and kept only if the
+        teacher's total back-to-back OPEN count strictly decreases (preserves
+        the existing "moves must reduce BTB" intent)."""
+        if not class_allowed_pairs:
+            return False
+        idx = BLOCKS.index(issue_block)
+        target_pairs = []
+        for j in (idx - 1, idx):
+            if 0 <= j and j + 1 < len(BLOCKS):
+                target_pairs.append((BLOCKS[j], BLOCKS[j + 1]))
+        if not target_pairs:
+            return False
+
+        for src_day, src_pair, grade_display, subject in find_pair_meetings(teacher):
+            class_id = (teacher, grade_display, subject)
+
+            # Fixed-slot classes are user pins - completely frozen
+            if frozen_class_entries and class_id in frozen_class_entries:
+                continue
+
+            allowed = class_allowed_pairs.get(class_id)
+            if not allowed:
+                continue
+            allowed = {tuple(p) for p in allowed}
+
+            vacated = {(src_day, src_pair[0]), (src_day, src_pair[1])}
+
+            # Covered grades: read from grade_schedules at the source blocks
+            # (more robust than parsing the display name), parse as fallback
+            grades = []
+            for g in grade_schedules:
+                for sb in src_pair:
+                    se = grade_schedules[g].get(src_day, {}).get(sb)
+                    if se and se[0] == teacher and se[1] == subject:
+                        grades.append(g)
+                        break
+            if not grades:
+                grades = parse_grades(grade_display)
+                if not grades:
+                    continue
+
+            for tgt_pair in target_pairs:
+                if tgt_pair not in allowed:
+                    continue
+                if src_day == issue_day and tgt_pair == src_pair:
+                    continue  # same position - nothing to move
+
+                # Both target blocks must be OPEN for the teacher (blocks this
+                # move vacates on the same day count as OPEN)
+                blocked = False
+                for tb in tgt_pair:
+                    if (issue_day, tb) in vacated:
+                        continue
+                    e = teacher_schedules.get(teacher, {}).get(issue_day, {}).get(tb)
+                    if e and not (len(e) > 1 and e[1] == 'OPEN'):
+                        blocked = True
+                        break
+                if blocked:
+                    continue
+
+                # Both blocks inside every covered grade's teachable mask
+                if not all(grades_teachable_at(grades, tb) for tb in tgt_pair):
+                    continue
+
+                # Both blocks free for every covered grade
+                conflict = False
+                for g in grades:
+                    for tb in tgt_pair:
+                        if (issue_day, tb) in vacated:
+                            continue
+                        se = grade_schedules.get(g, {}).get(issue_day, {}).get(tb)
+                        if se and se[1] not in ('OPEN', None):
+                            conflict = True
+                            break
+                    if conflict:
+                        break
+                if conflict:
+                    continue
+
+                # Target day must hold no OTHER meeting of this class or of
+                # the same grade+subject (keeps <=1 meeting per day)
+                exclude = vacated | {(issue_day, tb) for tb in tgt_pair}
+                if class_meets_on_day(teacher, issue_day, grade_display,
+                                      subject, exclude=exclude):
+                    continue
+                for g in grades:
+                    for b in BLOCKS:
+                        if b in tgt_pair or (issue_day, b) in vacated:
+                            continue
+                        se = grade_schedules.get(g, {}).get(issue_day, {}).get(b)
+                        if se and se[1] == subject:
+                            conflict = True
+                            break
+                    if conflict:
+                        break
+                if conflict:
+                    continue
+
+                # Lunch guard for BOTH blocks, crediting same-day vacated slots
+                if would_lose_lunch(teacher, issue_day, tgt_pair, vacated):
+                    continue
+
+                # Tentatively apply; keep only if BTB strictly decreases
+                involved = sorted(vacated | {(issue_day, tb) for tb in tgt_pair})
+                saved_teacher = {(d, b): teacher_schedules[teacher][d][b]
+                                 for d, b in involved}
+                saved_grades = {
+                    g: {(d, b): grade_schedules[g].get(d, {}).get(b)
+                        for d, b in involved}
+                    for g in grades if g in grade_schedules
+                }
+
+                before = count_back_to_back(teacher_schedules, teacher)
+                for d, b in vacated:
+                    teacher_schedules[teacher][d][b] = ['', 'OPEN']
+                for tb in tgt_pair:
+                    teacher_schedules[teacher][issue_day][tb] = [grade_display, subject]
+                for g in grades:
+                    if g not in grade_schedules:
+                        continue
+                    for d, b in vacated:
+                        if d in grade_schedules[g]:
+                            grade_schedules[g][d][b] = None
+                    for tb in tgt_pair:
+                        grade_schedules[g].setdefault(issue_day, {})[tb] = [teacher, subject]
+                after = count_back_to_back(teacher_schedules, teacher)
+                if after < before:
+                    return True
+
+                # No improvement - revert
+                for (d, b), val in saved_teacher.items():
+                    teacher_schedules[teacher][d][b] = val
+                for g, slots in saved_grades.items():
+                    for (d, b), val in slots.items():
+                        grade_schedules[g][d][b] = val
+        return False
+
     # Run up to 2000 iterations (like JS solver)
     for iteration in range(2000):
         made_swap = False
@@ -1722,9 +1926,21 @@ def redistribute_open_blocks(teacher_schedules: dict, grade_schedules: dict,
                         if not entry or not entry[0] or entry[1] in ('OPEN', 'Study Hall'):
                             continue
 
-                        # Never move a session of a double-period class - the two
-                        # halves of a double must stay together
+                        # Never move a session of a fixed-slot class - the user
+                        # pinned it, so post-processing must not undo the pin
                         if frozen_class_entries and (teacher, entry[0], entry[1]) in frozen_class_entries:
+                            continue
+
+                        # A block that is half of a same-day PAIR meeting never
+                        # moves alone - pairs relocate atomically via the pair
+                        # path below (also skips 2+ non-consecutive repeats)
+                        if len(class_blocks_on_day(teacher, target_day, entry[0], entry[1])) != 1:
+                            continue
+
+                        # The destination day must not already hold another
+                        # meeting of this class (max one meeting per day)
+                        if class_meets_on_day(teacher, issue_day, entry[0], entry[1],
+                                              exclude={(target_day, target_block)}):
                             continue
 
                         # Skip if moving from here would create a BTB issue
@@ -1754,8 +1970,8 @@ def redistribute_open_blocks(teacher_schedules: dict, grade_schedules: dict,
 
                         # Never move a class into the teacher's last free
                         # candidate lunch window on that day
-                        if would_lose_lunch(teacher, issue_day, issue_block,
-                                            target_day, target_block):
+                        if would_lose_lunch(teacher, issue_day, (issue_block,),
+                                            {(target_day, target_block)}):
                             continue
 
                         # Check for conflicts at the target location
@@ -1797,6 +2013,11 @@ def redistribute_open_blocks(teacher_schedules: dict, grade_schedules: dict,
 
                         made_swap = True
                         break
+
+                # No single-session move fills this hole - try relocating a
+                # whole PAIR meeting (double period / same-day twin) onto it
+                if not made_swap and try_pair_move(teacher, issue_day, issue_block):
+                    made_swap = True
 
         if not made_swap:
             break
@@ -2328,14 +2549,24 @@ def generate_schedules(
 
     full_time_names = [t.name for t in teacher_objs if t.status == 'full-time']
 
-    # Sessions of these classes must never be moved by post-processing:
-    # - required double-period classes (the two halves of a double stay together
-    #   or don't move at all)
-    # - classes with fixed slots (user-pinned; the solver honors the pin as a
-    #   hard constraint, so back-to-back redistribution must not undo it)
+    # Post-processing move policy:
+    # - classes with fixed slots are completely frozen (user-pinned; the solver
+    #   honors the pin as a hard constraint, so redistribution must not undo it)
+    # - double-period PAIR meetings are movable, but only atomically: both
+    #   blocks relocate together to another legal pair position (see
+    #   class_allowed_pairs below)
     frozen_class_entries = {
         (c.teacher, c.grade_display, c.subject)
-        for c in class_objs if c.is_double or c.fixed_slots
+        for c in class_objs if c.fixed_slots
+    } or None
+
+    # Legal (earlierBlock, laterBlock) pairs per class: the pair table used by
+    # redistribute_open_blocks for atomic PAIR moves. Required doubles use
+    # their pair tuples; unflagged classes their optional allowed pairs.
+    # Legacy requests (no grade_block_pairs) leave this empty -> no pair moves.
+    class_allowed_pairs = {
+        (c.teacher, c.grade_display, c.subject): {tuple(p) for p in c.allowed_pairs}
+        for c in class_objs if c.allowed_pairs
     } or None
 
     # Handle locked teachers for partial regeneration
@@ -2774,7 +3005,7 @@ def generate_schedules(
             # IMPORTANT: Only redistribute for non-locked teachers to preserve locked schedules
             if is_rule_enabled(rules, 'no_btb_open'):
                 unlocked_full_time = [t for t in full_time_names if t not in locked_teacher_names]
-                redistribute_open_blocks(ts, gs, unlocked_full_time, grade_teachable_blocks=grade_teachable or None, teacher_lunch_windows=teacher_lunch_windows, frozen_class_entries=frozen_class_entries)
+                redistribute_open_blocks(ts, gs, unlocked_full_time, grade_teachable_blocks=grade_teachable or None, teacher_lunch_windows=teacher_lunch_windows, frozen_class_entries=frozen_class_entries, class_allowed_pairs=class_allowed_pairs)
 
             # CRITICAL: Rebuild grade schedules from teacher schedules to ensure consistency.
             # This is a destructive rebuild that ensures grade_schedules always match teacher_schedules,

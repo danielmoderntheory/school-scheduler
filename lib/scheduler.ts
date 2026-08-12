@@ -1823,7 +1823,7 @@ function redistributeOpenBlocks(
   gradeSchedules: Record<string, GradeSchedule>,
   fullTimeTeachers: string[],
   teacherLunch?: Map<string, TeacherLunchInfo>,
-  immovableClasses?: Set<string> // "teacher|subject" keys that must never be moved (double periods)
+  immovableClasses?: Set<string> // "teacher|subject" keys that must never be moved (fixed-slot classes)
 ): void {
   const getBackToBackSlots = (teacher: string) => {
     const pairs: { day: string; block: number }[] = [];
@@ -1877,6 +1877,273 @@ function redistributeOpenBlocks(
     return freeWindows === 0;
   };
 
+  // Pair-move lunch guard: would occupying (destDay, p1) and (destDay, p2)
+  // leave the teacher without a free candidate lunch window on destDay?
+  // Blocks vacated by the pair on the same day count as freed.
+  const pairWouldBreakLunch = (
+    teacher: string,
+    destDay: string,
+    p1: number,
+    p2: number,
+    sourceDay: string,
+    sb1: number,
+    sb2: number
+  ): boolean => {
+    if (!teacherLunch) return false;
+    const lunch = teacherLunch.get(teacher);
+    if (!lunch?.enforced) return false;
+    if (!lunch.candidates.has(p1) && !lunch.candidates.has(p2)) return false;
+    let freeWindows = 0;
+    for (const b of lunch.candidates) {
+      if (b === p1 || b === p2) continue; // becomes occupied by the moved pair
+      if (destDay === sourceDay && (b === sb1 || b === sb2)) { freeWindows++; continue; } // freed by the move
+      if (isLunchWindowFree(teacherSchedules, teacher, destDay, b)) freeWindows++;
+    }
+    return freeWindows === 0;
+  };
+
+  // Move ONE lone single session (no same-day twin) into the open
+  // (issueDay, issueBlock) slot. Returns true if a move was made.
+  const trySingleMove = (teacher: string, issueDay: string, issueBlock: number): boolean => {
+    for (const targetDay of DAYS) {
+      for (const targetBlock of activeBlocks) {
+        const entry = teacherSchedules[teacher][targetDay][targetBlock];
+        if (!entry || !isScheduledClass(entry[1]) || !entry[0]) {
+          continue;
+        }
+
+        // Never move fixed-slot classes: the solver honors user pins, and
+        // post-processing must not undo them.
+        if (immovableClasses?.has(`${teacher}|${entry[1]}`)) continue;
+
+        // Never split a same-day pair (optional or required): if this
+        // class meets again on targetDay, the two sessions are a legal
+        // consecutive pair — it may only relocate atomically (tryPairMove),
+        // never one half at a time.
+        let hasSameDayTwin = false;
+        for (const b of activeBlocks) {
+          if (b === targetBlock) continue;
+          const twin = teacherSchedules[teacher][targetDay][b];
+          if (twin && twin[0] === entry[0] && twin[1] === entry[1]) {
+            hasSameDayTwin = true;
+            break;
+          }
+        }
+        if (hasSameDayTwin) continue;
+
+        if (wouldCreateBTB(teacher, targetDay, targetBlock)) continue;
+
+        const [gradeDisplay, subject] = entry;
+        const grades = parseGrades(gradeDisplay);
+        if (grades.length === 0) continue;
+
+        // Moving this class into the issue slot must respect the grades'
+        // teachable blocks (can't move a class into a grade's lunch block)
+        if (!isBlockTeachableForGrades(grades, issueBlock)) continue;
+
+        // Never swap a class INTO the teacher's last free lunch window
+        if (wouldBreakLunch(teacher, issueDay, issueBlock, targetDay, targetBlock)) continue;
+
+        // The destination day must not already hold another meeting of this
+        // class (would create an unplanned same-day twin / third session)
+        let classMeetsOnIssueDay = false;
+        for (const b of activeBlocks) {
+          if (b === issueBlock) continue;
+          if (issueDay === targetDay && b === targetBlock) continue; // the moving session itself
+          const other = teacherSchedules[teacher][issueDay][b];
+          if (other && other[0] === gradeDisplay && other[1] === subject) {
+            classMeetsOnIssueDay = true;
+            break;
+          }
+        }
+        if (classMeetsOnIssueDay) continue;
+
+        // Check conflicts
+        let hasConflict = false;
+        for (const g of grades) {
+          const cell = gradeSchedules[g]?.[issueDay]?.[issueBlock];
+          const slot = getFirstGradeEntry(cell);
+          if (slot && isOccupiedBlock(slot[1])) {
+            hasConflict = true;
+            break;
+          }
+        }
+        if (hasConflict) continue;
+
+        // Check subject/day conflict
+        for (const g of grades) {
+          for (const b of activeBlocks) {
+            if (b === issueBlock) continue;
+            const cell = gradeSchedules[g]?.[issueDay]?.[b];
+            const slot = getFirstGradeEntry(cell);
+            if (slot && slot[1] === subject) {
+              hasConflict = true;
+              break;
+            }
+          }
+          if (hasConflict) break;
+        }
+        if (hasConflict) continue;
+
+        // Perform swap
+        teacherSchedules[teacher][issueDay][issueBlock] = [gradeDisplay, subject];
+        teacherSchedules[teacher][targetDay][targetBlock] = ['', BLOCK_TYPE_OPEN];
+
+        grades.forEach(g => {
+          if (!gradeSchedules[g]) return; // grade not tracked (defensive)
+          gradeSchedules[g][targetDay][targetBlock] = null;
+          gradeSchedules[g][issueDay][issueBlock] = [teacher, subject];
+        });
+
+        return true;
+      }
+    }
+    return false;
+  };
+
+  // Atomically relocate one same-day pair (two sessions of one class on one
+  // day — by construction a legal consecutive pair) to an OPEN legal pair on
+  // a destination day. A candidate move is applied, then kept ONLY if the
+  // teacher's BTB-OPEN count strictly decreased (otherwise reverted). The
+  // strict-reduction guard keeps pair accounting monotonic: filling two
+  // blocks while vacating two can never oscillate, because every accepted
+  // move lowers the count and no move can raise it back for free.
+  const tryPairMove = (teacher: string): boolean => {
+    const btbBefore = countBackToBack(teacherSchedules, teacher);
+    if (btbBefore === 0) return false;
+
+    for (const sourceDay of DAYS) {
+      // Collect this teacher's same-day class pairs on sourceDay
+      const blocksByClass = new Map<string, number[]>();
+      for (const b of activeBlocks) {
+        const e = teacherSchedules[teacher][sourceDay][b];
+        if (e && e[0] && isScheduledClass(e[1])) {
+          const key = `${e[0]}|${e[1]}`;
+          const list = blocksByClass.get(key) ?? [];
+          list.push(b);
+          blocksByClass.set(key, list);
+        }
+      }
+
+      for (const pairBlocks of blocksByClass.values()) {
+        if (pairBlocks.length !== 2) continue;
+        const [sb1, sb2] = pairBlocks;
+        const entry = teacherSchedules[teacher][sourceDay][sb1]!;
+        const [gradeDisplay, subject] = entry;
+
+        // Fixed-slot classes stay frozen
+        if (immovableClasses?.has(`${teacher}|${subject}`)) continue;
+
+        const grades = parseGrades(gradeDisplay);
+        if (grades.length === 0) continue;
+        const legalPairs = getLegalPairsForGrades(grades);
+        if (legalPairs.length === 0) continue;
+
+        for (const destDay of DAYS) {
+          // The destination day must hold no other meeting of this class...
+          let classMeetsOnDest = false;
+          for (const b of activeBlocks) {
+            if (destDay === sourceDay && (b === sb1 || b === sb2)) continue;
+            const other = teacherSchedules[teacher][destDay][b];
+            if (other && other[0] === gradeDisplay && other[1] === subject) {
+              classMeetsOnDest = true;
+              break;
+            }
+          }
+          if (classMeetsOnDest) continue;
+
+          // ...nor any meeting of the same grade+subject (mirrors the
+          // single-move subject/day conflict check)
+          let subjectConflict = false;
+          for (const g of grades) {
+            for (const b of activeBlocks) {
+              if (destDay === sourceDay && (b === sb1 || b === sb2)) continue;
+              const slot = getFirstGradeEntry(gradeSchedules[g]?.[destDay]?.[b]);
+              if (slot && slot[1] === subject) {
+                subjectConflict = true;
+                break;
+              }
+            }
+            if (subjectConflict) break;
+          }
+          if (subjectConflict) continue;
+
+          for (const [p1, p2] of legalPairs) {
+            if (destDay === sourceDay && p1 === sb1 && p2 === sb2) continue; // no-op
+
+            // Both destination blocks must be truly OPEN for the teacher
+            // (never overwrite a class or study hall)
+            const dest1 = teacherSchedules[teacher][destDay][p1];
+            const dest2 = teacherSchedules[teacher][destDay][p2];
+            if (dest1 && !isOpenBlock(dest1[1])) continue;
+            if (dest2 && !isOpenBlock(dest2[1])) continue;
+
+            // ...within every covered grade's teachable set
+            if (!isBlockTeachableForGrades(grades, p1)) continue;
+            if (!isBlockTeachableForGrades(grades, p2)) continue;
+
+            // ...free for every covered grade (elective-aware first-entry
+            // check, mirroring the single-move path)
+            let gradeConflict = false;
+            for (const g of grades) {
+              for (const pb of [p1, p2]) {
+                const slot = getFirstGradeEntry(gradeSchedules[g]?.[destDay]?.[pb]);
+                if (slot && isOccupiedBlock(slot[1])) {
+                  gradeConflict = true;
+                  break;
+                }
+              }
+              if (gradeConflict) break;
+            }
+            if (gradeConflict) continue;
+
+            // ...and must leave the teacher a lunch window on destDay
+            if (pairWouldBreakLunch(teacher, destDay, p1, p2, sourceDay, sb1, sb2)) continue;
+
+            // Apply atomically; keep only on strict BTB-OPEN reduction
+            const savedGradeCells = grades.map(g => ({
+              g,
+              src1: gradeSchedules[g]?.[sourceDay]?.[sb1],
+              src2: gradeSchedules[g]?.[sourceDay]?.[sb2],
+              dst1: gradeSchedules[g]?.[destDay]?.[p1],
+              dst2: gradeSchedules[g]?.[destDay]?.[p2],
+            }));
+
+            teacherSchedules[teacher][sourceDay][sb1] = ['', BLOCK_TYPE_OPEN];
+            teacherSchedules[teacher][sourceDay][sb2] = ['', BLOCK_TYPE_OPEN];
+            teacherSchedules[teacher][destDay][p1] = [gradeDisplay, subject];
+            teacherSchedules[teacher][destDay][p2] = [gradeDisplay, subject];
+            grades.forEach(g => {
+              if (!gradeSchedules[g]) return; // grade not tracked (defensive)
+              gradeSchedules[g][sourceDay][sb1] = null;
+              gradeSchedules[g][sourceDay][sb2] = null;
+              gradeSchedules[g][destDay][p1] = [teacher, subject];
+              gradeSchedules[g][destDay][p2] = [teacher, subject];
+            });
+
+            if (countBackToBack(teacherSchedules, teacher) < btbBefore) {
+              return true;
+            }
+
+            // Revert: the move did not strictly reduce BTB-OPEN
+            teacherSchedules[teacher][sourceDay][sb1] = [gradeDisplay, subject];
+            teacherSchedules[teacher][sourceDay][sb2] = [gradeDisplay, subject];
+            teacherSchedules[teacher][destDay][p1] = dest1 ?? null;
+            teacherSchedules[teacher][destDay][p2] = dest2 ?? null;
+            for (const saved of savedGradeCells) {
+              if (!gradeSchedules[saved.g]) continue;
+              gradeSchedules[saved.g][sourceDay][sb1] = saved.src1 ?? null;
+              gradeSchedules[saved.g][sourceDay][sb2] = saved.src2 ?? null;
+              gradeSchedules[saved.g][destDay][p1] = saved.dst1 ?? null;
+              gradeSchedules[saved.g][destDay][p2] = saved.dst2 ?? null;
+            }
+          }
+        }
+      }
+    }
+    return false;
+  };
+
   for (let iter = 0; iter < 2000; iter++) {
     let madeSwap = false;
 
@@ -1884,97 +2151,49 @@ function redistributeOpenBlocks(
       const btbSlots = getBackToBackSlots(teacher);
       if (btbSlots.length === 0) continue;
 
+      // Prefer the cheap single-session moves (existing heuristic)...
       for (const { day: issueDay, block: issueBlock } of btbSlots) {
-        if (madeSwap) break;
-
-        for (const targetDay of DAYS) {
-          if (madeSwap) break;
-
-          for (const targetBlock of activeBlocks) {
-            const entry = teacherSchedules[teacher][targetDay][targetBlock];
-            if (!entry || !isScheduledClass(entry[1]) || !entry[0]) {
-              continue;
-            }
-
-            // Never move sessions of double-period classes: relocating half a
-            // pair (or even its odd single) would break the pairing invariant.
-            if (immovableClasses?.has(`${teacher}|${entry[1]}`)) continue;
-
-            // Never split a same-day pair (optional or required): if this
-            // class meets again on targetDay, the two sessions are a legal
-            // consecutive pair — moving one half would strand the other.
-            let hasSameDayTwin = false;
-            for (const b of activeBlocks) {
-              if (b === targetBlock) continue;
-              const twin = teacherSchedules[teacher][targetDay][b];
-              if (twin && twin[0] === entry[0] && twin[1] === entry[1]) {
-                hasSameDayTwin = true;
-                break;
-              }
-            }
-            if (hasSameDayTwin) continue;
-
-            if (wouldCreateBTB(teacher, targetDay, targetBlock)) continue;
-
-            const [gradeDisplay, subject] = entry;
-            const grades = parseGrades(gradeDisplay);
-            if (grades.length === 0) continue;
-
-            // Moving this class into the issue slot must respect the grades'
-            // teachable blocks (can't move a class into a grade's lunch block)
-            if (!isBlockTeachableForGrades(grades, issueBlock)) continue;
-
-            // Never swap a class INTO the teacher's last free lunch window
-            if (wouldBreakLunch(teacher, issueDay, issueBlock, targetDay, targetBlock)) continue;
-
-            // Check conflicts
-            let hasConflict = false;
-            for (const g of grades) {
-              const cell = gradeSchedules[g]?.[issueDay]?.[issueBlock];
-              const slot = getFirstGradeEntry(cell);
-              if (slot && isOccupiedBlock(slot[1])) {
-                hasConflict = true;
-                break;
-              }
-            }
-            if (hasConflict) continue;
-
-            // Check subject/day conflict
-            for (const g of grades) {
-              for (const b of activeBlocks) {
-                if (b === issueBlock) continue;
-                const cell = gradeSchedules[g]?.[issueDay]?.[b];
-                const slot = getFirstGradeEntry(cell);
-                if (slot && slot[1] === subject) {
-                  hasConflict = true;
-                  break;
-                }
-              }
-              if (hasConflict) break;
-            }
-            if (hasConflict) continue;
-
-            // Perform swap
-            teacherSchedules[teacher][issueDay][issueBlock] = [gradeDisplay, subject];
-            teacherSchedules[teacher][targetDay][targetBlock] = ['', BLOCK_TYPE_OPEN];
-
-            grades.forEach(g => {
-              if (!gradeSchedules[g]) return; // grade not tracked (defensive)
-              gradeSchedules[g][targetDay][targetBlock] = null;
-              gradeSchedules[g][issueDay][issueBlock] = [teacher, subject];
-            });
-
-            madeSwap = true;
-            break;
-          }
+        if (trySingleMove(teacher, issueDay, issueBlock)) {
+          madeSwap = true;
+          break;
         }
-        if (madeSwap) break;
       }
+
+      // ...then fall back to relocating a same-day pair atomically
+      if (!madeSwap && tryPairMove(teacher)) {
+        madeSwap = true;
+      }
+
       if (madeSwap) break;
     }
 
     if (!madeSwap) break;
   }
+}
+
+/**
+ * TEST-ONLY entry point: run the back-to-back redistribution pass directly on
+ * prebuilt schedules with an explicit block configuration, so scratch tests
+ * can construct exact layouts and observe single/pair-move behavior
+ * deterministically. Not used by application code.
+ */
+export function __testRedistributeOpenBlocks(
+  teacherSchedules: Record<string, TeacherSchedule>,
+  gradeSchedules: Record<string, GradeSchedule>,
+  fullTimeTeachers: string[],
+  opts: {
+    blocks?: number[];
+    teachableBlocksByGrade?: Record<string, number[]>;
+    gradeBlockPairs?: Record<string, [number, number][]>;
+    immovableClasses?: Set<string>;
+    enforceTeacherLunch?: boolean;
+  } = {}
+): void {
+  applyBlockState(resolveBlockState(opts.blocks, opts.teachableBlocksByGrade, opts.gradeBlockPairs));
+  const teacherLunch = opts.enforceTeacherLunch
+    ? buildTeacherLunchFromSchedules(teacherSchedules)
+    : undefined;
+  redistributeOpenBlocks(teacherSchedules, gradeSchedules, fullTimeTeachers, teacherLunch, opts.immovableClasses);
 }
 
 function calculateStats(
@@ -2223,13 +2442,14 @@ export async function generateSchedules(
     assertFixedSlotsLeaveLunch(sessions, teacherLunch);
   }
 
-  // Sessions of double-period classes are pinned during back-to-back
-  // redistribution — moving one block of a pair would split the double.
-  // Fixed-slot classes are pinned too: the solver honors user pins, and
-  // post-processing must not undo them (mirrors the Python solver).
+  // Fixed-slot classes are pinned during back-to-back redistribution: the
+  // solver honors user pins, and post-processing must not undo them.
+  // Double-period classes are NOT pinned — redistribution may relocate a
+  // same-day pair, but only atomically (both blocks together, to a legal
+  // consecutive pair), via the pair-move path in redistributeOpenBlocks.
   const immovableClasses = new Set<string>();
   for (const c of classes) {
-    if (c.isDouble === true || (c.fixedSlots && c.fixedSlots.length > 0)) {
+    if (c.fixedSlots && c.fixedSlots.length > 0) {
       immovableClasses.add(`${c.teacher}|${c.subject}`);
     }
   }
