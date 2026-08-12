@@ -15,6 +15,15 @@ export interface SchedulingRule {
   config?: Record<string, unknown>;
 }
 
+/**
+ * ClassEntry plus the double-period flag. Kept as a local extension so callers
+ * can thread `subjects.requires_double_periods` through without widening the
+ * shared ClassEntry type; sent to the solver as per-class `is_double`.
+ */
+export type RemoteClassEntry = ClassEntry & {
+  isDouble?: boolean;
+};
+
 export interface RemoteGeneratorOptions {
   numOptions?: number;
   numAttempts?: number;
@@ -30,6 +39,7 @@ export interface RemoteGeneratorOptions {
   grades?: string[]; // All grade names from database - used for grade schedule initialization
   blocks?: number[]; // Block numbers from the quarter's timetable template (absent = legacy [1..5])
   gradeTeachableBlocks?: Record<string, number[]>; // grade NAME -> teachable block numbers (absent = all blocks)
+  gradeBlockPairs?: Record<string, [number, number][]>; // grade NAME -> consecutive block pairs legal for double periods
 }
 
 export interface ScheduleDiagnostics {
@@ -115,7 +125,7 @@ const DIRECT_SOLVER_URL = typeof window !== 'undefined'
  */
 export async function generateSchedulesRemote(
   teachers: Teacher[],
-  classes: ClassEntry[],
+  classes: RemoteClassEntry[],
   options: RemoteGeneratorOptions = {}
 ): Promise<RemoteGeneratorResult> {
   const {
@@ -133,6 +143,7 @@ export async function generateSchedulesRemote(
     grades,
     blocks,
     gradeTeachableBlocks,
+    gradeBlockPairs,
   } = options;
 
   // Allow UI to render before starting
@@ -176,6 +187,7 @@ export async function generateSchedulesRemote(
         daysPerWeek: c.daysPerWeek,
         isElective: c.isElective || false,  // Electives skip grade conflicts
         isCotaught: c.isCotaught || false,  // Co-taught classes scheduled together
+        is_double: c.isDouble || false,     // Subject requires double periods (consecutive-block pairs)
         availableDays: c.availableDays,
         availableBlocks: c.availableBlocks,
         fixedSlots: c.fixedSlots,
@@ -199,6 +211,7 @@ export async function generateSchedulesRemote(
       // which the solver treats as the legacy 5-block format.
       blocks,
       grade_teachable_blocks: gradeTeachableBlocks,
+      grade_block_pairs: gradeBlockPairs,
     };
 
     // Start simulated progress (since we can't get real progress from the API)

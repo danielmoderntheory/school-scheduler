@@ -121,10 +121,12 @@ class ClassEntry:
     teacher: str
     grades: list  # List of grade names (e.g., ['6th Grade', '7th Grade'])
     subject: str
-    days_per_week: int
+    days_per_week: int  # Lessons (blocks) per week - may exceed 5 for double-period subjects
     grade_display: str = ''  # Display name for schedules (e.g., '6th-7th Grade')
     is_elective: bool = False  # Electives skip grade conflicts
     is_cotaught: bool = False  # Co-taught classes must be scheduled together
+    is_double: bool = False  # Subject requires double periods (two consecutive blocks per meeting)
+    allowed_pairs: list = field(default_factory=list)  # [(earlierBlock, laterBlock), ...] legal double pairs
     available_days: list = field(default_factory=lambda: DAYS.copy())
     available_blocks: list = field(default_factory=lambda: BLOCKS.copy())
     fixed_slots: list = field(default_factory=list)  # [(day, block), ...]
@@ -141,6 +143,12 @@ class Session:
     is_fixed: bool = False
     is_elective: bool = False  # Electives skip grade conflicts
     is_cotaught: bool = False  # Co-taught classes must be scheduled together
+    # Double-period metadata:
+    class_key: int = -1  # Index of the originating class (groups a class's meetings)
+    is_double_class: bool = False  # Session belongs to a double-period-flagged class
+    pair_id: Optional[int] = None  # Shared by the two halves of one double meeting
+    pair_pos: int = 0  # 0 = first half (or single/meeting representative), 1 = second half
+    pair_slots: Optional[list] = None  # (first_slot, second_slot) tuples; stored on first half
 
 
 @dataclass
@@ -413,14 +421,16 @@ def build_sessions(
                             grade_blocked_slots[grade].add(slot)
 
     # Build sessions
-    for cls in classes:
+    next_pair_id = 0
+    for class_key, cls in enumerate(classes):
         if cls.fixed_slots:
+            class_fixed_sessions = []
             for day, block in cls.fixed_slots:
                 if day in DAYS and block in BLOCKS:
                     day_idx = DAYS.index(day)
                     block_idx = BLOCKS.index(block)
                     slot = day_block_to_slot(day_idx, block_idx)
-                    sessions.append(Session(
+                    s = Session(
                         id=session_id,
                         teacher=cls.teacher,
                         grades=cls.grades,
@@ -429,9 +439,28 @@ def build_sessions(
                         valid_slots=[slot],
                         is_fixed=True,
                         is_elective=cls.is_elective,
-                        is_cotaught=cls.is_cotaught
-                    ))
+                        is_cotaught=cls.is_cotaught,
+                        class_key=class_key,
+                        is_double_class=cls.is_double,
+                    )
+                    sessions.append(s)
+                    class_fixed_sessions.append(s)
                     session_id += 1
+            # For double-period classes, link same-day fixed slots as pinned pairs
+            # so the duplicate-subject constraint exempts them (preflight validates
+            # the grouping - here we just tag whatever pairs exist).
+            if cls.is_double:
+                fixed_by_day: dict[int, list[Session]] = {}
+                for s in class_fixed_sessions:
+                    fixed_by_day.setdefault(slot_to_day(s.valid_slots[0]), []).append(s)
+                for day_group in fixed_by_day.values():
+                    if len(day_group) == 2:
+                        first, second = sorted(day_group, key=lambda s: s.valid_slots[0])
+                        first.pair_id = next_pair_id
+                        first.pair_pos = 0
+                        second.pair_id = next_pair_id
+                        second.pair_pos = 1
+                        next_pair_id += 1
         else:
             valid_slots = get_valid_slots(cls.available_days, cls.available_blocks)
 
@@ -476,19 +505,62 @@ def build_sessions(
                         # Filter out slots on blocked days (day = slot // num_blocks)
                         valid_slots = [s for s in valid_slots if slot_to_day(s) not in blocked_days]
 
-            for _ in range(cls.days_per_week):
-                sessions.append(Session(
-                    id=session_id,
+            def make_session(v_slots, pair_id=None, pair_pos=0, pair_slots=None):
+                return Session(
+                    id=0,  # reassigned below
                     teacher=cls.teacher,
                     grades=cls.grades,
                     grade_display=cls.grade_display,
                     subject=cls.subject,
-                    valid_slots=valid_slots,
+                    valid_slots=v_slots,
                     is_fixed=False,
                     is_elective=cls.is_elective,
-                    is_cotaught=cls.is_cotaught
-                ))
-                session_id += 1
+                    is_cotaught=cls.is_cotaught,
+                    class_key=class_key,
+                    is_double_class=cls.is_double,
+                    pair_id=pair_id,
+                    pair_pos=pair_pos,
+                    pair_slots=pair_slots,
+                )
+
+            if cls.is_double:
+                # Double-period class: floor(L/2) double meetings (two blocks from a
+                # legal pair, same day) + (L mod 2) single meetings, distinct days.
+                lessons = cls.days_per_week
+                num_doubles = lessons // 2
+                num_singles = lessons % 2
+
+                # All legal (first_slot, second_slot) tuples: each allowed block
+                # pair replicated across days, both halves within valid slots.
+                valid_set = set(valid_slots)
+                pair_tuples = []
+                for d in range(len(DAYS)):
+                    for b1, b2 in cls.allowed_pairs:
+                        if b1 not in BLOCKS or b2 not in BLOCKS:
+                            continue
+                        s1 = day_block_to_slot(d, BLOCKS.index(b1))
+                        s2 = day_block_to_slot(d, BLOCKS.index(b2))
+                        if s1 in valid_set and s2 in valid_set:
+                            pair_tuples.append((s1, s2))
+                first_slots = sorted({t[0] for t in pair_tuples})
+                second_slots = sorted({t[1] for t in pair_tuples})
+
+                for _ in range(num_doubles):
+                    sessions.append(make_session(list(first_slots),
+                                                 pair_id=next_pair_id, pair_pos=0,
+                                                 pair_slots=list(pair_tuples)))
+                    session_id += 1
+                    sessions.append(make_session(list(second_slots),
+                                                 pair_id=next_pair_id, pair_pos=1))
+                    session_id += 1
+                    next_pair_id += 1
+                for _ in range(num_singles):
+                    sessions.append(make_session(list(valid_slots)))
+                    session_id += 1
+            else:
+                for _ in range(cls.days_per_week):
+                    sessions.append(make_session(valid_slots))
+                    session_id += 1
 
     # Sort by constraint level:
     # 1. Fixed slots first (is_fixed=True → 0, else 1)
@@ -627,6 +699,7 @@ def suggest_teachers_to_unlock(
     trial_timeout: float = 5.0,
     blocks: list = None,
     grade_teachable_blocks: dict = None,
+    grade_block_pairs: dict = None,
 ) -> list[dict]:
     """
     When solver returns infeasible, try unlocking each affecting teacher
@@ -684,6 +757,7 @@ def suggest_teachers_to_unlock(
             timeout=trial_timeout,
             blocks=blocks,
             grade_teachable_blocks=grade_teachable_blocks,
+            grade_block_pairs=grade_block_pairs,
         )
 
         is_feasible = trial_result.get('status') == 'success' and len(trial_result.get('options', [])) > 0
@@ -725,6 +799,7 @@ def suggest_teachers_to_unlock(
                     timeout=trial_timeout,
                     blocks=blocks,
                     grade_teachable_blocks=grade_teachable_blocks,
+                    grade_block_pairs=grade_block_pairs,
                 )
 
                 is_feasible = trial_result.get('status') == 'success' and len(trial_result.get('options', [])) > 0
@@ -759,6 +834,7 @@ def suggest_teachers_to_unlock(
                 timeout=trial_timeout,
                 blocks=blocks,
                 grade_teachable_blocks=grade_teachable_blocks,
+                grade_block_pairs=grade_block_pairs,
             )
 
             is_feasible = trial_result.get('status') == 'success' and len(trial_result.get('options', [])) > 0
@@ -792,6 +868,7 @@ def _quick_feasibility_check(
     timeout: float = 5.0,
     blocks: list = None,
     grade_teachable_blocks: dict = None,
+    grade_block_pairs: dict = None,
 ) -> dict:
     """
     Run a quick solver check to test feasibility.
@@ -812,6 +889,7 @@ def _quick_feasibility_check(
         grades=grades,
         blocks=blocks,
         grade_teachable_blocks=grade_teachable_blocks,
+        grade_block_pairs=grade_block_pairs,
         # Don't recurse into suggestions for trial runs
         _skip_unlock_suggestions=True,
     )
@@ -1006,6 +1084,13 @@ def solve_with_cpsat(sessions: list[Session], seed: int = 0, time_limit: float =
                             # Skip if both are co-taught (they'll be at same slot anyway)
                             if s1.is_cotaught and s2.is_cotaught and s1.teacher != s2.teacher:
                                 continue
+                            # Skip the two halves of one double meeting - a double is
+                            # the ONLY allowed same-day repeat. Halves of DIFFERENT
+                            # meetings (or a single vs. a pair half) still get the
+                            # different-day constraint, so a third same-day occurrence
+                            # and two meetings of one class per day stay forbidden.
+                            if s1.pair_id is not None and s1.pair_id == s2.pair_id:
+                                continue
                             # day = slot // num_blocks, so different days means
                             # slot1 // num_blocks != slot2 // num_blocks
                             num_blocks = len(BLOCKS)
@@ -1014,6 +1099,45 @@ def solve_with_cpsat(sessions: list[Session], seed: int = 0, time_limit: float =
                             model.AddDivisionEquality(day1, slot_vars[s1.id], num_blocks)
                             model.AddDivisionEquality(day2, slot_vars[s2.id], num_blocks)
                             model.Add(day1 != day2)
+
+    # Hard Constraint 3b: Double periods
+    # Each double meeting is two sessions sharing a pair_id. The pair must land
+    # on one of the class's legal (first_slot, second_slot) tuples - same day and
+    # a legal consecutive block pair by construction (pairs whose blocks are
+    # separated only by another band's lunch row are legal and are NOT +1 apart
+    # in slot space, hence the table constraint instead of slot arithmetic).
+    pair_members: dict[int, list] = {}
+    for s in active_sessions:
+        if s.pair_id is not None:
+            pair_members.setdefault(s.pair_id, []).append(s)
+    for pid, members in pair_members.items():
+        if len(members) != 2:
+            continue  # half was dropped (no valid slots) - nothing to link
+        first = min(members, key=lambda m: m.pair_pos)
+        second = max(members, key=lambda m: m.pair_pos)
+        if first.is_fixed and second.is_fixed:
+            continue  # pinned pair - already validated in preflight
+        tuples = first.pair_slots or []
+        if tuples:
+            model.AddAllowedAssignments(
+                [slot_vars[first.id], slot_vars[second.id]], tuples)
+
+    # Each meeting of a double-period class on a DISTINCT day (at most one
+    # meeting per day). Meeting representatives = pair first-halves + singles.
+    # Enforced unconditionally (not gated on no_duplicate_subjects) because
+    # distinct meeting days are part of the double-period semantics.
+    meetings_by_class: dict[int, list] = {}
+    for s in active_sessions:
+        if s.is_double_class and s.pair_pos == 0:
+            meetings_by_class.setdefault(s.class_key, []).append(s)
+    for ck, reps in meetings_by_class.items():
+        if len(reps) > 1:
+            day_vars = []
+            for s in reps:
+                dv = model.NewIntVar(0, len(DAYS) - 1, f'dblday_{ck}_{s.id}')
+                model.AddDivisionEquality(dv, slot_vars[s.id], len(BLOCKS))
+                day_vars.append(dv)
+            model.AddAllDifferent(day_vars)
 
     # Hard Constraint 4: Co-taught classes (same grade+subject, different teachers)
     # If multiple teachers teach the same grade+subject, they must be scheduled together.
@@ -1380,7 +1504,8 @@ def rebuild_grade_schedules(teacher_schedules: dict, grades: list[str]) -> dict:
 def redistribute_open_blocks(teacher_schedules: dict, grade_schedules: dict,
                              full_time_teachers: list[str],
                              grade_teachable_blocks: dict = None,
-                             teacher_lunch_windows: dict = None) -> None:
+                             teacher_lunch_windows: dict = None,
+                             frozen_class_entries: set = None) -> None:
     """
     Post-processing to break up consecutive OPEN blocks by swapping classes around.
     This mimics the JavaScript solver's redistributeOpenBlocks function.
@@ -1392,6 +1517,11 @@ def redistribute_open_blocks(teacher_schedules: dict, grade_schedules: dict,
     teacher_lunch_windows: optional dict mapping teacher name -> set of candidate
     lunch block numbers. A class is never moved into a teacher's last free
     candidate lunch window on a day (would leave them without a lunch break).
+
+    frozen_class_entries: optional set of (teacher, grade_display, subject)
+    triples whose sessions must never be moved. Used for double-period classes:
+    the two halves of a double must stay together, and the simplest safe policy
+    is to never move any session of a flagged class.
     """
 
     def would_lose_lunch(teacher: str, issue_day: str, issue_block: int,
@@ -1482,6 +1612,11 @@ def redistribute_open_blocks(teacher_schedules: dict, grade_schedules: dict,
 
                         # Skip if not a teaching entry (needs to be a class, not OPEN/Study Hall)
                         if not entry or not entry[0] or entry[1] in ('OPEN', 'Study Hall'):
+                            continue
+
+                        # Never move a session of a double-period class - the two
+                        # halves of a double must stay together
+                        if frozen_class_entries and (teacher, entry[0], entry[1]) in frozen_class_entries:
                             continue
 
                         # Skip if moving from here would create a BTB issue
@@ -1848,6 +1983,7 @@ def generate_schedules(
     grades: list[str] = None,  # All grade names from database - used for grade schedule initialization
     blocks: list = None,  # Block numbers for this quarter's timetable (None = legacy [1..5])
     grade_teachable_blocks: dict = None,  # grade name -> list of teachable block numbers (None = all)
+    grade_block_pairs: dict = None,  # grade name -> list of [earlierBlock, laterBlock] legal double pairs
     _skip_unlock_suggestions: bool = False,  # Internal: skip unlock suggestions to prevent recursion
 ) -> dict:
     """
@@ -1868,6 +2004,12 @@ def generate_schedules(
         grade_teachable_blocks: Dict mapping grade name (e.g. '1st Grade') to the list of
             block numbers that grade can be scheduled into (e.g. its band's lunch block
             excluded). Grades absent from the dict may use all blocks.
+        grade_block_pairs: Dict mapping grade name to a list of [earlierBlock, laterBlock]
+            pairs the grade can hold a double period in (never straddling a break or
+            that grade's lunch - built upstream from the timetable template). A class
+            flagged for double periods may only use pairs present for EVERY grade it
+            covers (intersection). Absent field = no pairing available; flagged classes
+            needing at least one double then fail preflight.
 
     Returns:
         Dict with status, options, message, seeds_completed
@@ -1978,6 +2120,31 @@ def generate_schedules(
     # Create a set for fast lookups
     active_grades_set = set(active_grades)
 
+    # Normalize legal double-period pairs per grade: keep only pairs whose blocks
+    # both exist in this quarter's block list and are ordered (earlier, later).
+    # The lists are authoritative (built upstream so no pair straddles a break or
+    # the grade's lunch); anything malformed is dropped, failing closed.
+    grade_pairs: dict[str, list[tuple]] = {}
+    if grade_block_pairs:
+        blocks_set = set(BLOCKS)
+        for key, plist in grade_block_pairs.items():
+            norm = []
+            for p in (plist or []):
+                if not p or len(p) != 2:
+                    continue
+                b1, b2 = p[0], p[1]
+                if b1 in blocks_set and b2 in blocks_set and BLOCKS.index(b1) < BLOCKS.index(b2):
+                    pair = (b1, b2)
+                    if pair not in norm:
+                        norm.append(pair)
+            grade_pairs[key] = norm
+        # Alias keys that aren't exact database grade names (e.g. '7th' vs '7th Grade')
+        for key in list(grade_pairs.keys()):
+            if key not in active_grades_set:
+                parsed = parse_grades_from_database(key, active_grades_set)
+                if len(parsed) == 1 and parsed[0] not in grade_pairs:
+                    grade_pairs[parsed[0]] = grade_pairs[key]
+
     def normalize_grades(grades_input) -> list:
         """Normalize grade input to list of grade names from database."""
         if isinstance(grades_input, list):
@@ -2004,6 +2171,22 @@ def generate_schedules(
 
         grade_display = c.get('gradeDisplay') or make_grade_display(grades_list)
 
+        # Double-period flag: accept either key (requires_double_periods is the
+        # subject-level DB column name; is_double is the normalized payload key)
+        is_double = bool(
+            c.get('is_double') or c.get('isDouble')
+            or c.get('requires_double_periods') or c.get('requiresDoublePeriods')
+        )
+
+        # Legal pairs for this class = intersection of every covered grade's pairs.
+        # A grade missing from grade_block_pairs contributes an empty list (fail
+        # closed - we cannot know which pairs avoid that grade's lunch/breaks).
+        allowed_pairs = []
+        if is_double and grades_list:
+            pair_sets = [set(grade_pairs.get(g, [])) for g in grades_list]
+            common = set.intersection(*pair_sets) if pair_sets else set()
+            allowed_pairs = sorted(common)
+
         class_objs.append(ClassEntry(
             teacher=c['teacher'],
             grades=grades_list,
@@ -2012,12 +2195,20 @@ def generate_schedules(
             days_per_week=c.get('daysPerWeek', 1),
             is_elective=c.get('isElective', False),
             is_cotaught=c.get('isCotaught', False),
+            is_double=is_double,
+            allowed_pairs=allowed_pairs,
             available_days=c.get('availableDays') or DAYS.copy(),
             available_blocks=c.get('availableBlocks') or BLOCKS.copy(),
             fixed_slots=[(fs[0], fs[1]) for fs in (c.get('fixedSlots') or [])]
         ))
 
     full_time_names = [t.name for t in teacher_objs if t.status == 'full-time']
+
+    # Sessions of double-period classes must never be moved by post-processing
+    # (the two halves of a double stay together or don't move at all)
+    frozen_class_entries = {
+        (c.teacher, c.grade_display, c.subject) for c in class_objs if c.is_double
+    } or None
 
     # Handle locked teachers for partial regeneration
     locked_teacher_names = set(locked_teachers.keys()) if locked_teachers else set()
@@ -2123,6 +2314,74 @@ def generate_schedules(
 
     if incomplete_classes:
         diagnostics['incompleteClasses'] = incomplete_classes
+
+    # Check 0b: Double periods - lesson counts, legal pairs, and fixed-slot pairing
+    for cls in class_objs:
+        lessons = len(cls.fixed_slots) if cls.fixed_slots else cls.days_per_week
+        label = f"'{cls.teacher} - {cls.subject}' ({cls.grade_display})"
+
+        if not cls.is_double:
+            # Unflagged classes need one distinct day per lesson
+            if lessons > len(DAYS):
+                preflight_errors.append(
+                    f"Class {label} needs {lessons} lessons per week, but a subject "
+                    f"without double periods can meet at most once per day "
+                    f"({len(DAYS)} days). Enable 'requires double periods' on subject "
+                    f"'{cls.subject}' to allow two consecutive blocks per day."
+                )
+            continue
+
+        num_doubles = lessons // 2
+        num_singles = lessons % 2
+
+        # Each meeting (double or single) needs its own day
+        if num_doubles + num_singles > len(DAYS):
+            preflight_errors.append(
+                f"Class {label} needs {num_doubles + num_singles} meetings "
+                f"({num_doubles} double + {num_singles} single) for {lessons} lessons, "
+                f"but only {len(DAYS)} days are available"
+            )
+
+        # A flagged class that needs at least one double must have a legal pair
+        # shared by every grade it covers
+        if num_doubles > 0 and not cls.allowed_pairs:
+            grades_str = ', '.join(cls.grades) if cls.grades else '(no grades)'
+            preflight_errors.append(
+                f"Class {label} requires double periods, but there are no legal "
+                f"consecutive block pairs shared by all of its grades ({grades_str}). "
+                f"Check the quarter's timetable for pairable blocks common to these grades."
+            )
+        elif cls.fixed_slots:
+            # Fixed slots pin lessons: they must form same-day legal pairs plus
+            # at most one lone single (the odd lesson if L is odd)
+            fixed_by_day: dict[str, list] = {}
+            for day, block in cls.fixed_slots:
+                fixed_by_day.setdefault(day, []).append(block)
+            pair_set = set(cls.allowed_pairs)
+            problems = []
+            lone_days = 0
+            for day, blist in fixed_by_day.items():
+                if len(blist) == 1:
+                    lone_days += 1
+                elif len(blist) == 2:
+                    ordered = sorted(blist, key=lambda b: BLOCKS.index(b) if b in BLOCKS else -1)
+                    if (ordered[0], ordered[1]) not in pair_set:
+                        problems.append(
+                            f"{day} blocks {ordered[0]}+{ordered[1]} are not a legal double-period pair"
+                        )
+                else:
+                    problems.append(
+                        f"{day} has {len(blist)} fixed lessons (at most 2, forming one double)"
+                    )
+            if lone_days > 1:
+                problems.append(
+                    f"{lone_days} days have a lone fixed lesson (at most one single meeting is allowed)"
+                )
+            if problems:
+                preflight_errors.append(
+                    f"Class {label} requires double periods, but its fixed slots don't "
+                    f"form valid doubles: " + '; '.join(problems)
+                )
 
     # Check 1: Teacher overload (more sessions than weekly slots)
     max_teacher_sessions = len(DAYS) * len(BLOCKS)
@@ -2332,7 +2591,7 @@ def generate_schedules(
             # IMPORTANT: Only redistribute for non-locked teachers to preserve locked schedules
             if is_rule_enabled(rules, 'no_btb_open'):
                 unlocked_full_time = [t for t in full_time_names if t not in locked_teacher_names]
-                redistribute_open_blocks(ts, gs, unlocked_full_time, grade_teachable_blocks=grade_teachable or None, teacher_lunch_windows=teacher_lunch_windows)
+                redistribute_open_blocks(ts, gs, unlocked_full_time, grade_teachable_blocks=grade_teachable or None, teacher_lunch_windows=teacher_lunch_windows, frozen_class_entries=frozen_class_entries)
 
             # CRITICAL: Rebuild grade schedules from teacher schedules to ensure consistency.
             # This is a destructive rebuild that ensures grade_schedules always match teacher_schedules,
@@ -2384,6 +2643,7 @@ def generate_schedules(
                     trial_timeout=min(5.0, remaining / len(locked_teacher_names)) if locked_teacher_names else 5.0,
                     blocks=blocks,
                     grade_teachable_blocks=grade_teachable_blocks,
+                    grade_block_pairs=grade_block_pairs,
                 )
                 if unlock_suggestions:
                     diagnostics['unlockSuggestions'] = unlock_suggestions

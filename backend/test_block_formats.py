@@ -18,6 +18,17 @@ Covers:
   (i) legacy requests (no grade_teachable_blocks) -> no lunch constraint
   (j) study hall assignment never takes a supervisor's last free candidate
       lunch window
+  (k) double periods: flagged L=7 -> 3 legal-pair doubles + 1 single on 4
+      distinct days; flagged L=4 -> 2 doubles on 2 days; multi-grade flagged
+      class uses only the intersection of its grades' pairs; pairs never
+      straddle a covered grade's lunch
+  (l) double-period preflight: unflagged L>5 errors suggesting the subject
+      flag; flagged class with zero shared legal pairs errors naming class
+      and grades; fixed slots must form same-day legal pairs (+ at most one
+      lone single)
+  (m) pinned pairs solve (duplicate-subject rule exempts within-pair repeats
+      only); a same-day repeat that is NOT a pair stays forbidden; legacy
+      requests carry no pairing metadata
 
 Run: ./venv/bin/python test_block_formats.py
 """
@@ -447,6 +458,220 @@ if placed_sh:
           f"{a.teacher} {a.day} B{a.block}")
 check("Karla's lunch window untouched", ts_sh['Karla']['Mon'][5] is None,
       str(ts_sh['Karla']['Mon'][5]))
+
+# ================================================================ TEST 11
+print("\nTEST 11 — double periods: doubles use legal pairs on distinct days")
+TEACHERS_D = TEACHERS + [{'name': 'Sofia', 'status': 'full-time'}]
+
+
+def pairs_excluding(lunch_block):
+    """Consecutive block pairs on the 9-block grid avoiding a lunch block."""
+    return [[b, b + 1] for b in range(1, 9) if lunch_block not in (b, b + 1)]
+
+
+# Realistic per-grade pair lists: e.g. the MS grade's pairs exclude anything
+# touching block 6 (its lunch); HS excludes block 7; K5 excludes block 5.
+PAIRS = {g: pairs_excluding(LUNCH[BAND[g]]) for g in GRADES}
+MS_PAIRS = {tuple(p) for p in PAIRS['7th Grade']}
+HS_PAIRS = {tuple(p) for p in PAIRS['10th Grade']}
+
+
+def find_subject_days(ts, teacher, subject):
+    """day -> sorted list of blocks where teacher teaches subject."""
+    out = {}
+    for day in DAYS:
+        for b in sorted(ts[teacher][day].keys()):
+            entry = ts[teacher][day][b]
+            if entry and entry[1] == subject:
+                out.setdefault(day, []).append(b)
+    return out
+
+
+dbl_classes = []
+for subj in ['Math', 'ELA', 'Science', 'Social Studies']:
+    dbl_classes.append(make_class('Shary', ['7th Grade'], subj, 4))
+    dbl_classes.append(make_class('Ricardo', ['10th Grade'], subj, 4))
+spanish = make_class('Sofia', ['7th Grade'], 'Spanish', 7)       # (a) L=7
+spanish['is_double'] = True
+french = make_class('Sofia', ['10th Grade'], 'French', 4)        # (b) L=4
+french['requires_double_periods'] = True                         # other key accepted
+debate = make_class('Isa', ['7th Grade', '10th Grade'], 'Debate', 4)  # (f) multi-grade
+debate['is_double'] = True
+dbl_classes += [spanish, french, debate]
+
+res_d = generate_schedules(
+    teachers=TEACHERS_D, classes=dbl_classes, rules=RULES,
+    num_options=1, num_attempts=2, max_time_seconds=60.0, grades=GRADES,
+    blocks=NINE_BLOCKS, grade_teachable_blocks=MASKS,
+    grade_block_pairs=PAIRS,
+)
+check("double-period solve succeeds", res_d['status'] == 'success',
+      res_d.get('message', ''))
+if res_d['status'] == 'success':
+    ts_d = res_d['options'][0]['teacherSchedules']
+
+    # (a) flagged L=7 -> 3 doubles + 1 single, 4 distinct days, legal MS pairs
+    spa = find_subject_days(ts_d, 'Sofia', 'Spanish')
+    spa_doubles = [tuple(v) for v in spa.values() if len(v) == 2]
+    spa_singles = [v for v in spa.values() if len(v) == 1]
+    check("L=7: all 7 lessons placed", sum(len(v) for v in spa.values()) == 7, str(spa))
+    check("L=7: meetings on exactly 4 distinct days", len(spa) == 4, str(spa))
+    check("L=7: 3 doubles + 1 single", len(spa_doubles) == 3 and len(spa_singles) == 1, str(spa))
+    check("L=7: every double is a legal 7th-grade pair (no block-6 straddle)",
+          all(d in MS_PAIRS for d in spa_doubles), str(spa_doubles))
+
+    # (b) flagged L=4 -> exactly 2 doubles on 2 days, legal HS pairs
+    fre = find_subject_days(ts_d, 'Sofia', 'French')
+    fre_doubles = [tuple(v) for v in fre.values() if len(v) == 2]
+    check("L=4: exactly 2 doubles on 2 days",
+          len(fre) == 2 and len(fre_doubles) == 2, str(fre))
+    check("L=4: doubles are legal 10th-grade pairs (no block-7 straddle)",
+          all(d in HS_PAIRS for d in fre_doubles), str(fre_doubles))
+
+    # (f) multi-grade class: only intersection pairs (neither block 6 nor 7)
+    deb = find_subject_days(ts_d, 'Isa', 'Debate')
+    deb_doubles = [tuple(v) for v in deb.values() if len(v) == 2]
+    check("multi-grade: 2 doubles on 2 days", len(deb) == 2 and len(deb_doubles) == 2, str(deb))
+    check("multi-grade: doubles only in MS∩HS pair intersection",
+          all(d in (MS_PAIRS & HS_PAIRS) for d in deb_doubles), str(deb_doubles))
+    check("multi-grade: doubles avoid blocks 6 AND 7",
+          all(6 not in d and 7 not in d for d in deb_doubles), str(deb_doubles))
+
+# ================================================================ TEST 12
+print("\nTEST 12 — preflight: unflagged L=7 is impossible, suggests the flag")
+res_u7 = generate_schedules(
+    teachers=TEACHERS_D,
+    classes=[make_class('Sofia', ['7th Grade'], 'Spanish', 7)], rules=RULES,
+    num_options=1, num_attempts=1, max_time_seconds=10.0, grades=GRADES,
+    blocks=NINE_BLOCKS, grade_teachable_blocks=MASKS, grade_block_pairs=PAIRS,
+)
+errs_u7 = (res_u7.get('diagnostics') or {}).get('preflightErrors', [])
+check("unflagged L=7 fails preflight", res_u7['status'] == 'infeasible',
+      res_u7.get('message', ''))
+check("error names the class and suggests double periods",
+      any('Sofia - Spanish' in e and 'double period' in e for e in errs_u7),
+      str(errs_u7[:2]))
+
+# ================================================================ TEST 13
+print("\nTEST 13 — preflight: flagged class with zero shared legal pairs")
+# (i) new fields absent entirely: flagged class still fails closed
+flagged4 = make_class('Sofia', ['7th Grade'], 'Spanish', 4)
+flagged4['is_double'] = True
+res_np = generate_schedules(
+    teachers=TEACHERS_D, classes=[flagged4], rules=RULES,
+    num_options=1, num_attempts=1, max_time_seconds=10.0, grades=GRADES,
+    blocks=NINE_BLOCKS, grade_teachable_blocks=MASKS,
+)
+errs_np = (res_np.get('diagnostics') or {}).get('preflightErrors', [])
+check("flagged class without grade_block_pairs fails preflight",
+      res_np['status'] == 'infeasible'
+      and any('Sofia - Spanish' in e and 'no legal' in e and '7th Grade' in e for e in errs_np),
+      str(errs_np[:2]))
+
+# (ii) empty intersection across a multi-grade class's pairs
+flagged_mg = make_class('Isa', ['7th Grade', '10th Grade'], 'Debate', 4)
+flagged_mg['is_double'] = True
+res_ei = generate_schedules(
+    teachers=TEACHERS_D, classes=[flagged_mg], rules=RULES,
+    num_options=1, num_attempts=1, max_time_seconds=10.0, grades=GRADES,
+    blocks=NINE_BLOCKS, grade_teachable_blocks=MASKS,
+    grade_block_pairs={'7th Grade': [[1, 2]], '10th Grade': [[3, 4]]},
+)
+errs_ei = (res_ei.get('diagnostics') or {}).get('preflightErrors', [])
+check("empty pair intersection fails preflight naming class and grades",
+      res_ei['status'] == 'infeasible'
+      and any('Isa - Debate' in e and '7th Grade' in e and '10th Grade' in e for e in errs_ei),
+      str(errs_ei[:2]))
+
+# ================================================================ TEST 14
+print("\nTEST 14 — fixed slots on a flagged class: pinned pairs")
+# (i) valid pinned pairs (+ one single) solve at exactly those slots.
+# Mon B1+B2 is a same-day repeat - only legal because it's a pinned pair.
+pinned_ok = make_class('Sofia', ['7th Grade'], 'Spanish', 5,
+                       fixed=[('Mon', 1), ('Mon', 2), ('Wed', 3), ('Wed', 4), ('Fri', 8)])
+pinned_ok['is_double'] = True
+res_pk = generate_schedules(
+    teachers=TEACHERS_D, classes=[pinned_ok], rules=RULES,
+    num_options=1, num_attempts=1, max_time_seconds=15.0, grades=GRADES,
+    blocks=NINE_BLOCKS, grade_teachable_blocks=MASKS, grade_block_pairs=PAIRS,
+)
+check("pinned pairs + one single solve", res_pk['status'] == 'success',
+      res_pk.get('message', ''))
+if res_pk['status'] == 'success':
+    ts_pk = res_pk['options'][0]['teacherSchedules']
+    placed = find_subject_days(ts_pk, 'Sofia', 'Spanish')
+    check("lessons pinned exactly where fixed",
+          placed == {'Mon': [1, 2], 'Wed': [3, 4], 'Fri': [8]}, str(placed))
+
+# (ii) same-day fixed slots that are NOT a legal pair fail preflight
+pinned_bad = make_class('Sofia', ['7th Grade'], 'Spanish', 2,
+                        fixed=[('Mon', 1), ('Mon', 3)])
+pinned_bad['is_double'] = True
+res_pb = generate_schedules(
+    teachers=TEACHERS_D, classes=[pinned_bad], rules=RULES,
+    num_options=1, num_attempts=1, max_time_seconds=10.0, grades=GRADES,
+    blocks=NINE_BLOCKS, grade_teachable_blocks=MASKS, grade_block_pairs=PAIRS,
+)
+errs_pb = (res_pb.get('diagnostics') or {}).get('preflightErrors', [])
+check("non-adjacent same-day fixed slots fail preflight",
+      res_pb['status'] == 'infeasible'
+      and any('not a legal double-period pair' in e for e in errs_pb),
+      str(errs_pb[:2]))
+
+# (iii) two lone fixed singles (L even) fail preflight
+pinned_lone = make_class('Sofia', ['7th Grade'], 'Spanish', 2,
+                         fixed=[('Mon', 1), ('Tues', 2)])
+pinned_lone['is_double'] = True
+res_pl = generate_schedules(
+    teachers=TEACHERS_D, classes=[pinned_lone], rules=RULES,
+    num_options=1, num_attempts=1, max_time_seconds=10.0, grades=GRADES,
+    blocks=NINE_BLOCKS, grade_teachable_blocks=MASKS, grade_block_pairs=PAIRS,
+)
+errs_pl = (res_pl.get('diagnostics') or {}).get('preflightErrors', [])
+check("two lone fixed singles fail preflight",
+      res_pl['status'] == 'infeasible'
+      and any('lone fixed lesson' in e for e in errs_pl),
+      str(errs_pl[:2]))
+
+# ================================================================ TEST 15
+print("\nTEST 15 — duplicate-subject rule still blocks non-pair same-day repeats")
+# (g) a third same-day occurrence: pinned double Mon B1+B2 plus ANOTHER class
+# of the same grade+subject fixed the same day -> infeasible (not preflight)
+pinned_pair = make_class('Sofia', ['7th Grade'], 'Spanish', 2,
+                         fixed=[('Mon', 1), ('Mon', 2)])
+pinned_pair['is_double'] = True
+third = make_class('Karla', ['7th Grade'], 'Spanish', 1, fixed=[('Mon', 4)])
+res_3rd = generate_schedules(
+    teachers=TEACHERS_D, classes=[pinned_pair, third], rules=RULES,
+    num_options=1, num_attempts=1, max_time_seconds=15.0, grades=GRADES,
+    blocks=NINE_BLOCKS, grade_teachable_blocks=MASKS, grade_block_pairs=PAIRS,
+)
+errs_3rd = (res_3rd.get('diagnostics') or {}).get('preflightErrors', [])
+check("third same-day occurrence next to a pinned pair is infeasible",
+      res_3rd['status'] == 'infeasible' and not errs_3rd,
+      f"status={res_3rd['status']} preflight={errs_3rd[:1]}")
+
+# unflagged same-day repeat (not a pair) stays forbidden by the solver
+rep = make_class('Sofia', ['7th Grade'], 'Spanish', 2,
+                 fixed=[('Mon', 1), ('Mon', 3)])
+res_rep = generate_schedules(
+    teachers=TEACHERS_D, classes=[rep], rules=RULES,
+    num_options=1, num_attempts=1, max_time_seconds=15.0, grades=GRADES,
+    blocks=NINE_BLOCKS, grade_teachable_blocks=MASKS, grade_block_pairs=PAIRS,
+)
+errs_rep = (res_rep.get('diagnostics') or {}).get('preflightErrors', [])
+check("unflagged same-day repeat still infeasible (solver, not preflight)",
+      res_rep['status'] == 'infeasible' and not errs_rep,
+      f"status={res_rep['status']} preflight={errs_rep[:1]}")
+
+# ================================================================ TEST 16
+print("\nTEST 16 — legacy requests carry no pairing metadata")
+set_blocks(None)
+sess_leg = build_sessions(class_objs(legacy_classes), grades=legacy_grades)
+check("legacy sessions: no pair ids, no double-class flags",
+      all(s.pair_id is None and not s.is_double_class and s.pair_slots is None
+          for s in sess_leg),
+      str([(s.teacher, s.subject) for s in sess_leg if s.pair_id is not None][:3]))
 
 # ================================================================ summary
 print("\n" + "=" * 60)

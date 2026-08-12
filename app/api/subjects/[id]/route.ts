@@ -11,7 +11,8 @@ export async function PUT(
   try {
     const [data] = await sql`
       UPDATE subjects
-      SET name = COALESCE(${body.name ?? null}, name)
+      SET name = COALESCE(${body.name ?? null}, name),
+          requires_double_periods = COALESCE(${body.requires_double_periods ?? null}, requires_double_periods)
       WHERE id = ${id}
       RETURNING *
     `

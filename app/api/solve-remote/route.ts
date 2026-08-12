@@ -33,6 +33,7 @@ interface SolveRequest {
     daysPerWeek: number
     isElective?: boolean  // Electives skip grade conflicts
     isCotaught?: boolean  // Co-taught classes scheduled together
+    is_double?: boolean   // Subject requires double periods (consecutive-block pairs)
     availableDays?: string[]
     availableBlocks?: number[]
     fixedSlots?: [string, number][]
@@ -58,6 +59,8 @@ interface SolveRequest {
   // Per-quarter block format (absent = legacy 5-block behavior)
   blocks?: number[]
   grade_teachable_blocks?: Record<string, number[]>
+  // Grade display name -> consecutive block pairs legal for double periods
+  grade_block_pairs?: Record<string, [number, number][]>
 }
 
 export async function POST(request: NextRequest) {
@@ -100,6 +103,7 @@ export async function POST(request: NextRequest) {
         // Per-quarter block format (absent = legacy 5-block behavior)
         blocks: body.blocks,
         grade_teachable_blocks: body.grade_teachable_blocks,
+        grade_block_pairs: body.grade_block_pairs,
       }),
     })
 

@@ -34,6 +34,34 @@ export function getTemplateBlocks(
 }
 
 /**
+ * Consecutive block pairs a grade can hold a double period in.
+ * Two blocks pair when they are adjacent in the grade's RESOLVED row list with
+ * no non-block row (break, lunch, transition) between them — so a pair never
+ * straddles the morning break or the grade's own lunch, but blocks separated
+ * only by another band's lunch row (scoped away from this grade) do pair.
+ * Returns [earlierBlock, laterBlock] tuples sorted by position.
+ */
+export function getPairableBlocksForGrade(
+  template: Pick<TimetableTemplate, 'rows'> | null | undefined,
+  gradeId: string
+): [number, number][] {
+  if (!template?.rows?.length) return []
+  const rows = resolveRowsForGrade(template.rows, gradeId)
+  const pairs: [number, number][] = []
+  for (let i = 0; i < rows.length - 1; i++) {
+    const a = rows[i]
+    const b = rows[i + 1]
+    if (
+      a.type === 'block' && typeof a.blockNumber === 'number' &&
+      b.type === 'block' && typeof b.blockNumber === 'number'
+    ) {
+      pairs.push([a.blockNumber, b.blockNumber])
+    }
+  }
+  return pairs
+}
+
+/**
  * Block numbers a specific grade can be scheduled into.
  * A block row scoped away from a grade (e.g. that band's lunch window) is not
  * teachable for that grade. Falls back to all template blocks when the grade

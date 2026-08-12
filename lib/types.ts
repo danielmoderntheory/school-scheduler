@@ -28,6 +28,7 @@ export interface ClassEntry {
   daysPerWeek: number;
   isElective?: boolean;  // Electives skip grade conflicts
   isCotaught?: boolean;  // Co-taught classes must be scheduled at the same time
+  isDouble?: boolean;    // Subject requires double periods: lessons pair into consecutive same-day blocks
   availableDays?: string[];
   availableBlocks?: number[];
   fixedSlots?: [string, number][]; // [day, block][]
@@ -227,7 +228,7 @@ export interface PendingTransfer {
 }
 
 export interface ValidationError {
-  type: 'teacher_conflict' | 'grade_conflict' | 'subject_conflict' | 'unplaced' | 'locked_teacher_missing' | 'locked_teacher_modified' | 'session_count' | 'study_hall_coverage' | 'back_to_back' | 'fixed_slot_violation' | 'availability_violation' | 'unknown_class' | 'no_lunch';
+  type: 'teacher_conflict' | 'grade_conflict' | 'subject_conflict' | 'unplaced' | 'locked_teacher_missing' | 'locked_teacher_modified' | 'session_count' | 'study_hall_coverage' | 'back_to_back' | 'fixed_slot_violation' | 'availability_violation' | 'unknown_class' | 'no_lunch' | 'double_period';
   message: string;
   cells: CellLocation[];
   blockId?: string;

@@ -59,6 +59,8 @@ INSERT INTO grades (name, display_name, is_combined, combined_grades, sort_order
 CREATE TABLE subjects (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     name TEXT NOT NULL UNIQUE,
+    -- Subject meets as double periods: each meeting = two consecutive same-day blocks
+    requires_double_periods BOOLEAN DEFAULT false,
     created_at TIMESTAMPTZ DEFAULT NOW(),
     deleted_at TIMESTAMPTZ DEFAULT NULL
 );

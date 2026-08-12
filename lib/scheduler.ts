@@ -36,14 +36,18 @@ interface BlockState {
   blocks: number[];
   /** Grade name -> set of block numbers that grade can be scheduled in. null = unrestricted */
   gradeBlocks: Map<string, Set<number>> | null;
+  /** Grade name -> allowed [earlier, later] block pairs for double periods. null = no pairing */
+  gradePairs: Map<string, [number, number][]> | null;
 }
 
 let activeBlocks: number[] = [...BLOCKS];
 let activeGradeBlocks: Map<string, Set<number>> | null = null;
+let activeGradePairs: Map<string, [number, number][]> | null = null;
 
 function resolveBlockState(
   blocks?: number[],
-  teachableBlocksByGrade?: Record<string, number[]>
+  teachableBlocksByGrade?: Record<string, number[]>,
+  gradeBlockPairs?: Record<string, [number, number][]>
 ): BlockState {
   const resolvedBlocks = blocks && blocks.length > 0 ? [...blocks] : [...BLOCKS];
   let gradeBlocks: Map<string, Set<number>> | null = null;
@@ -53,12 +57,20 @@ function resolveBlockState(
       gradeBlocks.set(grade, new Set(allowed));
     }
   }
-  return { blocks: resolvedBlocks, gradeBlocks };
+  let gradePairs: Map<string, [number, number][]> | null = null;
+  if (gradeBlockPairs) {
+    gradePairs = new Map();
+    for (const [grade, pairs] of Object.entries(gradeBlockPairs)) {
+      gradePairs.set(grade, pairs.map(p => [p[0], p[1]] as [number, number]));
+    }
+  }
+  return { blocks: resolvedBlocks, gradeBlocks, gradePairs };
 }
 
 function applyBlockState(state: BlockState): void {
   activeBlocks = state.blocks;
   activeGradeBlocks = state.gradeBlocks;
+  activeGradePairs = state.gradePairs;
 }
 
 /**
@@ -85,6 +97,28 @@ function getTeachableBlocksForGrades(gradeNames: string[]): Set<number> | null {
 function isBlockTeachableForGrades(gradeNames: string[], block: number): boolean {
   const teachable = getTeachableBlocksForGrades(gradeNames);
   return teachable === null || teachable.has(block);
+}
+
+/**
+ * Legal double-period block pairs usable by a class covering the given grades:
+ * the intersection of the pairs allowed for EVERY covered grade. A grade with
+ * no entry in the map has no legal pairs, so the intersection is empty
+ * (fail closed). Returns [] when no gradeBlockPairs map is in effect.
+ */
+function getLegalPairsForGrades(gradeNames: string[]): [number, number][] {
+  if (!activeGradePairs || gradeNames.length === 0) return [];
+  let result: [number, number][] | null = null;
+  for (const g of gradeNames) {
+    const pairs = activeGradePairs.get(g) ?? [];
+    if (result === null) {
+      result = [...pairs];
+    } else {
+      const prev: [number, number][] = result;
+      result = prev.filter(([a, b]) => pairs.some(([pa, pb]) => pa === a && pb === b));
+    }
+    if (result.length === 0) return [];
+  }
+  return result ?? [];
 }
 
 // ============================================================================
@@ -215,17 +249,28 @@ function assertFixedSlotsLeaveLunch(
   // teacher -> dayIdx -> candidate blocks consumed by fixed slots
   const fixedByTeacherDay = new Map<string, Map<number, Set<number>>>();
   for (const s of sessions) {
-    if (!s.isFixed || s.validSlots.length !== 1) continue;
+    if (!s.isFixed) continue;
+    // A fixed single pins one slot; a fixed double meeting pins both slots of
+    // its lone placement (same day by construction).
+    let slots: number[];
+    if (s.placements) {
+      if (s.placements.length !== 1) continue;
+      slots = [s.placements[0][0], s.placements[0][1]];
+    } else {
+      if (s.validSlots.length !== 1) continue;
+      slots = s.validSlots;
+    }
     const info = teacherLunch.get(s.teacher);
     if (!info?.enforced) continue;
-    const slot = s.validSlots[0];
-    const block = activeBlocks[slotToBlock(slot)];
-    if (!info.candidates.has(block)) continue;
-    const dayIdx = slotToDay(slot);
-    if (!fixedByTeacherDay.has(s.teacher)) fixedByTeacherDay.set(s.teacher, new Map());
-    const byDay = fixedByTeacherDay.get(s.teacher)!;
-    if (!byDay.has(dayIdx)) byDay.set(dayIdx, new Set());
-    byDay.get(dayIdx)!.add(block);
+    for (const slot of slots) {
+      const block = activeBlocks[slotToBlock(slot)];
+      if (!info.candidates.has(block)) continue;
+      const dayIdx = slotToDay(slot);
+      if (!fixedByTeacherDay.has(s.teacher)) fixedByTeacherDay.set(s.teacher, new Map());
+      const byDay = fixedByTeacherDay.get(s.teacher)!;
+      if (!byDay.has(dayIdx)) byDay.set(dayIdx, new Set());
+      byDay.get(dayIdx)!.add(block);
+    }
   }
 
   for (const [teacher, byDay] of fixedByTeacherDay) {
@@ -332,7 +377,28 @@ interface Session {
   isElective?: boolean;
   isCotaught?: boolean;
   cotaughtGroupId?: string; // Sessions with same grade+subject but different teachers
+  /** True for a DOUBLE meeting: occupies both slots of one placement atomically */
+  isDoubleMeeting?: boolean;
+  /**
+   * Double meetings only: legal [firstSlot, secondSlot] placements (same day,
+   * consecutive blocks per the gradeBlockPairs config). The solver's assignment
+   * value for a double meeting is an INDEX into this array, not a slot number.
+   */
+  placements?: [number, number][];
+  /**
+   * Identity of the source class for double-period classes (index into the
+   * class list). Used to enforce "each meeting of a flagged class lands on a
+   * distinct day" independently of the toggleable no_duplicate_subjects rule.
+   */
+  classKey?: number;
 }
+
+/**
+ * ClassEntry with the double-period flag. Kept as a local extension so this
+ * module compiles whether or not lib/types.ts has gained the field yet;
+ * plain ClassEntry[] arguments remain assignable (legacy calls unchanged).
+ */
+export type SchedulerClassEntry = ClassEntry & { isDouble?: boolean };
 
 function buildSessions(classes: ClassEntry[], teachers?: Teacher[]): Session[] {
   const sessions: Session[] = [];
@@ -360,11 +426,52 @@ function buildSessions(classes: ClassEntry[], teachers?: Teacher[]): Session[] {
     }
   }
 
-  classes.forEach(cls => {
+  classes.forEach((cls, clsIdx) => {
+    const isDouble = (cls as SchedulerClassEntry).isDouble === true;
+    const gradeNames = parseGrades(cls.grade);
+    const legalPairs = isDouble ? getLegalPairsForGrades(gradeNames) : [];
+    const useDoubles = isDouble && legalPairs.length > 0;
+    const L = cls.daysPerWeek;
+    // classKey marks sessions of double-period classes so every meeting of the
+    // class (double or single) lands on a distinct day.
+    const classKey = isDouble ? clsIdx : undefined;
+
+    // Preflight: unflagged classes can hold at most 5 single lessons (one per day)
+    if (!isDouble && L > 5) {
+      throw new Error(
+        `Class '${cls.teacher} - ${cls.subject}' has ${L} lessons per week, ` +
+        `but '${cls.subject}' is not a double-period subject; at most 5 single lessons fit in a week`
+      );
+    }
+    // Preflight: flagged class with no legal shared pairs fails closed for any
+    // lesson count (matches the Python solver) — an empty intersection means a
+    // template/config problem that should surface, not silently become singles.
+    if (isDouble && !useDoubles) {
+      throw new Error(
+        `Class '${cls.teacher} - ${cls.subject}' requires double periods, ` +
+        `but there are no legal consecutive block pairs shared by all of its grades (${cls.grade})`
+      );
+    }
+    // Preflight: even paired up, meetings must fit on 5 distinct days (L > 10)
+    if (useDoubles && Math.floor(L / 2) + (L % 2) > 5) {
+      throw new Error(
+        `Class '${cls.teacher} - ${cls.subject}' has ${L} lessons per week; ` +
+        `even as double periods they cannot fit on 5 distinct days`
+      );
+    }
+    // Fail closed: the co-taught pairing machinery is slot-based and cannot
+    // place two teachers' double meetings atomically together.
+    if (useDoubles && Math.floor(L / 2) > 0 && cls.isCotaught) {
+      throw new Error(
+        `Class '${cls.teacher} - ${cls.subject}' is both co-taught and a double-period subject; ` +
+        `co-taught double periods are not supported`
+      );
+    }
+
     if (cls.fixedSlots && cls.fixedSlots.length > 0) {
       // Fail closed when a fixed slot lands in a block some covered grade
       // can't use (its band's lunch) — mirrors the backend preflight check.
-      const fixedTeachable = getTeachableBlocksForGrades(parseGrades(cls.grade));
+      const fixedTeachable = getTeachableBlocksForGrades(gradeNames);
       cls.fixedSlots.forEach(([day, block]) => {
         if (fixedTeachable !== null && !fixedTeachable.has(block)) {
           throw new Error(
@@ -372,20 +479,94 @@ function buildSessions(classes: ClassEntry[], teachers?: Teacher[]): Session[] {
             `but Block ${block} is not a teachable block for ${cls.grade}`
           );
         }
-        const dayIdx = DAYS.indexOf(day);
-        const blockIdx = activeBlocks.indexOf(block);
-        const slot = dayBlockToSlot(dayIdx, blockIdx);
-        sessions.push({
-          id: id++,
-          teacher: cls.teacher,
-          grade: cls.grade,
-          subject: cls.subject,
-          validSlots: [slot],
-          isFixed: true,
-          isElective: cls.isElective,
-          isCotaught: cls.isCotaught,
-        });
       });
+
+      if (useDoubles) {
+        // Fixed slots on a flagged class must form same-day legal pairs,
+        // plus at most one lone single block when L is odd.
+        const byDay = new Map<string, number[]>();
+        for (const [day, block] of cls.fixedSlots) {
+          if (!byDay.has(day)) byDay.set(day, []);
+          byDay.get(day)!.push(block);
+        }
+        let singleCount = 0;
+        const maxSingles = L % 2;
+        for (const [day, blocksOnDay] of byDay) {
+          const dayIdx = DAYS.indexOf(day);
+          if (blocksOnDay.length === 1) {
+            singleCount++;
+            if (singleCount > maxSingles) {
+              throw new Error(
+                `Class '${cls.teacher} - ${cls.subject}' requires double periods, but its fixed slot ` +
+                `on ${day} Block ${blocksOnDay[0]} is a lone single block; fixed slots must form ` +
+                `legal same-day pairs${maxSingles === 1 ? ' plus at most one single' : ''}`
+              );
+            }
+            const slot = dayBlockToSlot(dayIdx, activeBlocks.indexOf(blocksOnDay[0]));
+            sessions.push({
+              id: id++,
+              teacher: cls.teacher,
+              grade: cls.grade,
+              subject: cls.subject,
+              validSlots: [slot],
+              isFixed: true,
+              isElective: cls.isElective,
+              isCotaught: cls.isCotaught,
+              classKey,
+            });
+          } else if (blocksOnDay.length === 2) {
+            const idxA = activeBlocks.indexOf(blocksOnDay[0]);
+            const idxB = activeBlocks.indexOf(blocksOnDay[1]);
+            const [first, second] = idxA <= idxB
+              ? [blocksOnDay[0], blocksOnDay[1]]
+              : [blocksOnDay[1], blocksOnDay[0]];
+            if (!legalPairs.some(([a, b]) => a === first && b === second)) {
+              throw new Error(
+                `Class '${cls.teacher} - ${cls.subject}' requires double periods, but its fixed slots ` +
+                `on ${day} (Blocks ${first}, ${second}) do not form an allowed consecutive pair for ${cls.grade}`
+              );
+            }
+            const sA = dayBlockToSlot(dayIdx, activeBlocks.indexOf(first));
+            const sB = dayBlockToSlot(dayIdx, activeBlocks.indexOf(second));
+            sessions.push({
+              id: id++,
+              teacher: cls.teacher,
+              grade: cls.grade,
+              subject: cls.subject,
+              validSlots: [],
+              isFixed: true,
+              isElective: cls.isElective,
+              isCotaught: cls.isCotaught,
+              isDoubleMeeting: true,
+              placements: [[sA, sB]],
+              classKey,
+            });
+          } else {
+            throw new Error(
+              `Class '${cls.teacher} - ${cls.subject}' requires double periods, but has ` +
+              `${blocksOnDay.length} fixed slots on ${day}; only a two-block pair ` +
+              `(plus at most one single elsewhere) is allowed`
+            );
+          }
+        }
+      } else {
+        cls.fixedSlots.forEach(([day, block]) => {
+          const dayIdx = DAYS.indexOf(day);
+          const blockIdx = activeBlocks.indexOf(block);
+          const slot = dayBlockToSlot(dayIdx, blockIdx);
+          sessions.push({
+            id: id++,
+            teacher: cls.teacher,
+            grade: cls.grade,
+            subject: cls.subject,
+            validSlots: [slot],
+            isFixed: true,
+            isElective: cls.isElective,
+            isCotaught: cls.isCotaught,
+            classKey,
+          });
+        });
+      }
     } else {
       let validSlots = getValidSlots(
         cls.availableDays || DAYS,
@@ -401,22 +582,73 @@ function buildSessions(classes: ClassEntry[], teachers?: Teacher[]): Session[] {
 
       // Restrict to blocks teachable by ALL grades this class covers
       // (multi-grade classes spanning bands must avoid every band's lunch block)
-      const teachable = getTeachableBlocksForGrades(parseGrades(cls.grade));
+      const teachable = getTeachableBlocksForGrades(gradeNames);
       if (teachable !== null) {
         validSlots = validSlots.filter(s => teachable.has(activeBlocks[slotToBlock(s)]));
       }
 
-      for (let i = 0; i < cls.daysPerWeek; i++) {
-        sessions.push({
-          id: id++,
-          teacher: cls.teacher,
-          grade: cls.grade,
-          subject: cls.subject,
-          validSlots: [...validSlots],
-          isFixed: false,
-          isElective: cls.isElective,
-          isCotaught: cls.isCotaught,
-        });
+      if (useDoubles) {
+        // Enumerate legal placements: for each day, each legal pair whose two
+        // blocks both survive availability/teachability filtering. A pair
+        // touching a lunch-masked block yields no placement (masks eat it).
+        const slotSet = new Set(validSlots);
+        const placements: [number, number][] = [];
+        for (let dayIdx = 0; dayIdx < DAYS.length; dayIdx++) {
+          for (const [bA, bB] of legalPairs) {
+            const idxA = activeBlocks.indexOf(bA);
+            const idxB = activeBlocks.indexOf(bB);
+            if (idxA === -1 || idxB === -1) continue;
+            const sA = dayBlockToSlot(dayIdx, idxA);
+            const sB = dayBlockToSlot(dayIdx, idxB);
+            if (slotSet.has(sA) && slotSet.has(sB)) {
+              placements.push([sA, sB]);
+            }
+          }
+        }
+
+        const numDoubles = Math.floor(L / 2);
+        for (let i = 0; i < numDoubles; i++) {
+          sessions.push({
+            id: id++,
+            teacher: cls.teacher,
+            grade: cls.grade,
+            subject: cls.subject,
+            validSlots: [],
+            isFixed: false,
+            isElective: cls.isElective,
+            isCotaught: cls.isCotaught,
+            isDoubleMeeting: true,
+            placements: placements.map(p => [p[0], p[1]] as [number, number]),
+            classKey,
+          });
+        }
+        for (let i = 0; i < L % 2; i++) {
+          sessions.push({
+            id: id++,
+            teacher: cls.teacher,
+            grade: cls.grade,
+            subject: cls.subject,
+            validSlots: [...validSlots],
+            isFixed: false,
+            isElective: cls.isElective,
+            isCotaught: cls.isCotaught,
+            classKey,
+          });
+        }
+      } else {
+        for (let i = 0; i < L; i++) {
+          sessions.push({
+            id: id++,
+            teacher: cls.teacher,
+            grade: cls.grade,
+            subject: cls.subject,
+            validSlots: [...validSlots],
+            isFixed: false,
+            isElective: cls.isElective,
+            isCotaught: cls.isCotaught,
+            classKey,
+          });
+        }
       }
     }
   });
@@ -523,6 +755,10 @@ function solveBacktracking(
   const gradeSlots = new Map<string, Set<number>>();  // gradeName -> occupied slots (non-elective)
   const electiveGradeSlots = new Map<string, Set<number>>();  // gradeName -> occupied slots (elective)
   const gradeSubjectDay = new Map<string, Set<number>>(); // "gradeName|subject" -> set of days
+  // classKey -> days already holding a meeting of that double-period class.
+  // Enforced unconditionally (not gated on no_duplicate_subjects): every
+  // meeting of a flagged class must land on a distinct day.
+  const classDayUsed = new Map<number, Set<number>>();
 
   // Track which co-taught sessions have been assigned (to skip them in main loop)
   const assignedCotaughtSessions = new Set<number>();
@@ -560,6 +796,11 @@ function solveBacktracking(
     }
   }
 
+  // Domain size for MRV ordering: double meetings choose among placements,
+  // singles among valid slots.
+  const domainSize = (s: Session): number =>
+    s.placements ? s.placements.length : s.validSlots.length;
+
   // Sort sessions: fixed first, then by constraint level, deprioritized teachers last
   const sortedSessions = [...sessions].sort((a, b) => {
     if (a.isFixed && !b.isFixed) return -1;
@@ -568,7 +809,7 @@ function solveBacktracking(
     const aDepri = deprioritizeTeachers?.has(a.teacher) ? 1 : 0;
     const bDepri = deprioritizeTeachers?.has(b.teacher) ? 1 : 0;
     if (aDepri !== bDepri) return aDepri - bDepri;
-    return a.validSlots.length - b.validSlots.length;
+    return domainSize(a) - domainSize(b);
   });
 
   function isValid(session: Session, slot: number): boolean {
@@ -600,6 +841,13 @@ function solveBacktracking(
       }
     }
 
+    // Double-period classes: every meeting on a distinct day (always enforced,
+    // independent of the no_duplicate_subjects toggle)
+    if (session.classKey !== undefined &&
+        classDayUsed.get(session.classKey)?.has(slotToDay(slot))) {
+      return false;
+    }
+
     // Teacher lunch (HARD): never place a session into the teacher's LAST free
     // candidate lunch window on that day — every day must keep one window open
     if (teacherLunch) {
@@ -618,6 +866,109 @@ function solveBacktracking(
     }
 
     return true;
+  }
+
+  // Validate an atomic double-meeting placement: BOTH blocks must clear
+  // teacher conflicts, grade conflicts, masks (already baked into placements),
+  // the subject/day rule, distinct meeting days, and the teacher_lunch guard.
+  function isValidDoublePlacement(session: Session, sA: number, sB: number): boolean {
+    const occupied = teacherSlots.get(session.teacher);
+    if (occupied?.has(sA) || occupied?.has(sB)) return false;
+
+    const grades = parseGrades(session.grade);
+    const isElective = session.isElective === true;
+    for (const g of grades) {
+      const gs = gradeSlots.get(g);
+      if (gs?.has(sA) || gs?.has(sB)) return false;
+      if (!isElective) {
+        const es = electiveGradeSlots.get(g);
+        if (es?.has(sA) || es?.has(sB)) return false;
+      }
+    }
+
+    // Both slots share a day by construction; the duplicate-subject rule is
+    // relaxed WITHIN the pair (checked once for the day, before either block
+    // is marked) but still blocks any other same-subject session that day.
+    const dayIdx = slotToDay(sA);
+    if (isRuleEnabled(rules, 'no_duplicate_subjects')) {
+      for (const g of grades) {
+        if (gradeSubjectDay.get(`${g}|${session.subject}`)?.has(dayIdx)) return false;
+      }
+    }
+
+    // Each meeting of the class on a distinct day (always enforced)
+    if (session.classKey !== undefined &&
+        classDayUsed.get(session.classKey)?.has(dayIdx)) {
+      return false;
+    }
+
+    // Teacher lunch (HARD): the pair may consume up to TWO candidate windows
+    // at once — count the windows left free after BOTH blocks are placed.
+    if (teacherLunch) {
+      const lunch = teacherLunch.get(session.teacher);
+      if (lunch?.enforced) {
+        const bA = activeBlocks[slotToBlock(sA)];
+        const bB = activeBlocks[slotToBlock(sB)];
+        if (lunch.candidates.has(bA) || lunch.candidates.has(bB)) {
+          let freeWindows = 0;
+          for (const bIdx of lunch.candidateIdxs) {
+            const s = dayBlockToSlot(dayIdx, bIdx);
+            if (s === sA || s === sB) continue; // consumed by this placement
+            if (!occupied?.has(s)) freeWindows++;
+          }
+          if (freeWindows === 0) return false;
+        }
+      }
+    }
+
+    return true;
+  }
+
+  function assignDouble(session: Session, placementIdx: number): void {
+    const [sA, sB] = session.placements![placementIdx];
+    assignment.set(session.id, placementIdx);
+    const t = teacherSlots.get(session.teacher)!;
+    t.add(sA);
+    t.add(sB);
+
+    const grades = parseGrades(session.grade);
+    const dayIdx = slotToDay(sA);
+    const isElective = session.isElective === true;
+    grades.forEach(g => {
+      const map = isElective ? electiveGradeSlots : gradeSlots;
+      map.get(g)!.add(sA);
+      map.get(g)!.add(sB);
+      const key = `${g}|${session.subject}`;
+      if (!gradeSubjectDay.has(key)) gradeSubjectDay.set(key, new Set());
+      gradeSubjectDay.get(key)!.add(dayIdx);
+    });
+
+    if (session.classKey !== undefined) {
+      if (!classDayUsed.has(session.classKey)) classDayUsed.set(session.classKey, new Set());
+      classDayUsed.get(session.classKey)!.add(dayIdx);
+    }
+  }
+
+  function unassignDouble(session: Session, placementIdx: number): void {
+    const [sA, sB] = session.placements![placementIdx];
+    assignment.delete(session.id);
+    const t = teacherSlots.get(session.teacher)!;
+    t.delete(sA);
+    t.delete(sB);
+
+    const grades = parseGrades(session.grade);
+    const dayIdx = slotToDay(sA);
+    const isElective = session.isElective === true;
+    grades.forEach(g => {
+      const map = isElective ? electiveGradeSlots : gradeSlots;
+      map.get(g)!.delete(sA);
+      map.get(g)!.delete(sB);
+      gradeSubjectDay.get(`${g}|${session.subject}`)?.delete(dayIdx);
+    });
+
+    if (session.classKey !== undefined) {
+      classDayUsed.get(session.classKey)?.delete(dayIdx);
+    }
   }
 
   // Check if a slot is valid for an entire co-taught group (all teachers must be free)
@@ -664,6 +1015,11 @@ function solveBacktracking(
       if (!gradeSubjectDay.has(key)) gradeSubjectDay.set(key, new Set());
       gradeSubjectDay.get(key)!.add(day);
     });
+
+    if (session.classKey !== undefined) {
+      if (!classDayUsed.has(session.classKey)) classDayUsed.set(session.classKey, new Set());
+      classDayUsed.get(session.classKey)!.add(day);
+    }
   }
 
   // Assign all sessions in a co-taught group to the same slot
@@ -695,6 +1051,10 @@ function solveBacktracking(
       const key = `${g}|${session.subject}`;
       gradeSubjectDay.get(key)?.delete(day);
     });
+
+    if (session.classKey !== undefined) {
+      classDayUsed.get(session.classKey)?.delete(day);
+    }
   }
 
   // Unassign all sessions in a co-taught group
@@ -722,6 +1082,31 @@ function solveBacktracking(
     // Skip if this session was already assigned as part of a co-taught group
     if (assignedCotaughtSessions.has(session.id)) {
       return solve(idx + 1);
+    }
+
+    // Double meetings place BOTH blocks of one placement atomically —
+    // either both blocks commit or neither does.
+    if (session.isDoubleMeeting && session.placements) {
+      const placements = session.placements;
+      let placementIdxs = placements
+        .map((_, i) => i)
+        .filter(i => isValidDoublePlacement(session, placements[i][0], placements[i][1]));
+
+      if (randomize) {
+        placementIdxs = shuffle(placementIdxs);
+      }
+
+      for (const pi of placementIdxs) {
+        assignDouble(session, pi);
+
+        const result = solve(idx + 1);
+        if (result === true) return true;
+        if (result === 'timeout') return 'timeout';
+
+        unassignDouble(session, pi);
+      }
+
+      return false;
     }
 
     // Check if this session is part of a co-taught group
@@ -809,18 +1194,24 @@ function buildSchedules(
   });
 
   sessions.forEach(s => {
-    const slot = assignment.get(s.id);
-    if (slot === undefined) return;
+    const value = assignment.get(s.id);
+    if (value === undefined) return;
 
-    const day = DAYS[slotToDay(slot)];
-    const block = activeBlocks[slotToBlock(slot)];
+    // For double meetings the assignment value is an index into placements;
+    // expand to both occupied slots. Singles carry the slot number directly.
+    const slots = s.placements ? s.placements[value] : [value];
 
-    teacherSchedules[s.teacher][day][block] = [s.grade, s.subject];
-    parseGrades(s.grade).forEach(g => {
-      if (gradeSchedules[g]) {
-        gradeSchedules[g][day][block] = [s.teacher, s.subject];
-      }
-    });
+    for (const slot of slots) {
+      const day = DAYS[slotToDay(slot)];
+      const block = activeBlocks[slotToBlock(slot)];
+
+      teacherSchedules[s.teacher][day][block] = [s.grade, s.subject];
+      parseGrades(s.grade).forEach(g => {
+        if (gradeSchedules[g]) {
+          gradeSchedules[g][day][block] = [s.teacher, s.subject];
+        }
+      });
+    }
   });
 
   return { teacherSchedules, gradeSchedules };
@@ -1267,7 +1658,8 @@ function redistributeOpenBlocks(
   teacherSchedules: Record<string, TeacherSchedule>,
   gradeSchedules: Record<string, GradeSchedule>,
   fullTimeTeachers: string[],
-  teacherLunch?: Map<string, TeacherLunchInfo>
+  teacherLunch?: Map<string, TeacherLunchInfo>,
+  immovableClasses?: Set<string> // "teacher|subject" keys that must never be moved (double periods)
 ): void {
   const getBackToBackSlots = (teacher: string) => {
     const pairs: { day: string; block: number }[] = [];
@@ -1339,6 +1731,10 @@ function redistributeOpenBlocks(
             if (!entry || !isScheduledClass(entry[1]) || !entry[0]) {
               continue;
             }
+
+            // Never move sessions of double-period classes: relocating half a
+            // pair (or even its odd single) would break the pairing invariant.
+            if (immovableClasses?.has(`${teacher}|${entry[1]}`)) continue;
 
             if (wouldCreateBTB(teacher, targetDay, targetBlock)) continue;
 
@@ -1541,17 +1937,23 @@ function getStudyHallEligibleStatuses(rules: SchedulingRule[] | undefined): Set<
  *   them, e.g. "6th Grade") -> block numbers that grade may be scheduled in.
  *   A grade absent from the map may use all blocks. Classes covering multiple
  *   grades are restricted to the intersection of their grades' teachable blocks.
+ * @param gradeBlockPairs - Optional map of grade NAME -> allowed [earlier, later]
+ *   block pairs for double periods. A double-period class may only use pairs
+ *   present for EVERY grade it covers. Absent (or empty for a covered grade) =
+ *   no pairing; flagged classes then schedule as singles and fail preflight
+ *   when their lessons can't fit.
  */
 export async function generateSchedules(
   teachers: Teacher[],
-  classes: ClassEntry[],
+  classes: SchedulerClassEntry[],
   options: GeneratorOptions = {},
   blocks?: number[],
-  teachableBlocksByGrade?: Record<string, number[]>
+  teachableBlocksByGrade?: Record<string, number[]>,
+  gradeBlockPairs?: Record<string, [number, number][]>
 ): Promise<GeneratorResult> {
   // Stamp the block configuration into module state. Re-applied after every
   // await below so interleaved calls can't corrupt this call's configuration.
-  const blockState = resolveBlockState(blocks, teachableBlocksByGrade);
+  const blockState = resolveBlockState(blocks, teachableBlocksByGrade, gradeBlockPairs);
   applyBlockState(blockState);
 
   const {
@@ -1635,6 +2037,15 @@ export async function generateSchedules(
   // Fail closed: fixed slots alone must not fill every candidate lunch window
   if (teacherLunch) {
     assertFixedSlotsLeaveLunch(sessions, teacherLunch);
+  }
+
+  // Sessions of double-period classes are pinned during back-to-back
+  // redistribution — moving one block of a pair would split the double.
+  const immovableClasses = new Set<string>();
+  for (const c of classes) {
+    if (c.isDouble === true) {
+      immovableClasses.add(`${c.teacher}|${c.subject}`);
+    }
   }
 
   // Pre-compute locked grade slots (slots occupied by locked teachers' classes)
@@ -1868,7 +2279,10 @@ export async function generateSchedules(
     fillOpenBlocks(ts);
     // Only redistribute open blocks if the no_btb_open rule is enabled
     if (isRuleEnabled(rules, 'no_btb_open')) {
-      redistributeOpenBlocks(ts, gs, fullTimeUnlocked, teacherLunch);
+      redistributeOpenBlocks(
+        ts, gs, fullTimeUnlocked, teacherLunch,
+        immovableClasses.size > 0 ? immovableClasses : undefined
+      );
     }
 
     // CRITICAL: Rebuild grade schedules from teacher schedules to ensure consistency.

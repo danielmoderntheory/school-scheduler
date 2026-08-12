@@ -67,9 +67,13 @@ class ClassEntry(BaseModel):
     grades: Optional[list[str]] = None  # New: array of grade names
     gradeDisplay: Optional[str] = None  # Display name for UI
     subject: str
-    daysPerWeek: int = 1
+    daysPerWeek: int = 1  # Lessons (blocks) per week - may exceed 5 for double-period subjects
     isElective: bool = False  # Electives skip grade conflicts
     isCotaught: bool = False  # Co-taught classes must be scheduled together
+    # Subject requires double periods: meetings are two consecutive blocks.
+    # Accept either key; the solver reads both (is_double wins if set).
+    is_double: Optional[bool] = None
+    requires_double_periods: Optional[bool] = None
     availableDays: Optional[list[str]] = None
     availableBlocks: Optional[list[int]] = None
     fixedSlots: Optional[list[list]] = None  # [[day, block], ...]
@@ -99,6 +103,10 @@ class SolveRequest(BaseModel):
     # Absent = legacy 5-block behavior ([1..5], all blocks teachable for every grade).
     blocks: Optional[list[int]] = None  # Block numbers, e.g. [1..9] for the 9-block format
     grade_teachable_blocks: Optional[dict[str, list[int]]] = None  # grade name -> teachable block numbers
+    # Legal double-period pairs per grade: grade display name -> [[earlierBlock, laterBlock], ...].
+    # Built upstream from the timetable (pairs never straddle a break or the grade's lunch).
+    # Absent = no pairing available (legacy requests unchanged).
+    grade_block_pairs: Optional[dict[str, list[list[int]]]] = None
 
 
 class SolveResponse(BaseModel):
@@ -143,6 +151,9 @@ async def solve_schedule(request: SolveRequest):
         logger.info(f"  Block format: {request.blocks} ({len(request.blocks)} blocks/day)")
     if request.grade_teachable_blocks:
         logger.info(f"  Grade teachable blocks: {request.grade_teachable_blocks}")
+    if request.grade_block_pairs:
+        num_double = sum(1 for c in classes if c.get('is_double') or c.get('requires_double_periods'))
+        logger.info(f"  Grade block pairs: {request.grade_block_pairs} ({num_double} double-period classes)")
 
     # Log detailed info only when DEBUG_SOLVER is enabled
     if DEBUG_SOLVER:
@@ -193,6 +204,7 @@ async def solve_schedule(request: SolveRequest):
             grades=request.grades,
             blocks=request.blocks,
             grade_teachable_blocks=request.grade_teachable_blocks,
+            grade_block_pairs=request.grade_block_pairs,
         )
 
         elapsed = time.time() - start_time

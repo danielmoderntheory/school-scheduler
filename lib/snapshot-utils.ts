@@ -23,6 +23,7 @@ export interface ClassSnapshot {
   is_cotaught: boolean
   subject_id: string | null
   subject_name: string | null
+  subject_requires_double_periods?: boolean
   days_per_week: number
   restrictions: Array<{
     restriction_type: 'fixed_slot' | 'available_days' | 'available_blocks'
@@ -116,6 +117,7 @@ export function parseClassesFromSnapshot(snapshot: ClassSnapshot[]): ClassEntry[
       daysPerWeek: c.days_per_week,
       isElective: c.is_elective || false,
       isCotaught: c.is_cotaught || false,
+      isDouble: c.subject_requires_double_periods === true,
       availableDays,
       availableBlocks,
       fixedSlots: fixedSlots.length > 0 ? fixedSlots : undefined,
