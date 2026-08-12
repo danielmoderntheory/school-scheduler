@@ -310,22 +310,25 @@ export default function TimetableSettingsPage() {
         </p>
       </div>
 
-      {/* Template switcher */}
+      {/* Template switcher — an explicit dropdown (not tabs) so an accidental
+          click can't quietly land edits on the wrong template */}
       {templates.length > 1 && (
-        <div className="mb-4 flex items-center gap-1 border-b">
-          {templates.map((t) => (
-            <button
-              key={t.id}
-              onClick={() => setSelectedTemplateId(t.id)}
-              className={`px-4 py-2 text-sm font-medium border-b-2 -mb-px transition-colors ${
-                t.id === template.id
-                  ? "border-primary text-foreground"
-                  : "border-transparent text-muted-foreground hover:text-foreground"
-              }`}
-            >
-              {t.name}
-            </button>
-          ))}
+        <div className="mb-4 flex items-center gap-2">
+          <label htmlFor="template-select" className="text-sm font-medium text-muted-foreground">
+            Template:
+          </label>
+          <select
+            id="template-select"
+            value={template.id}
+            onChange={(e) => setSelectedTemplateId(e.target.value)}
+            className="border rounded-md px-3 py-1.5 text-sm font-medium bg-background"
+          >
+            {templates.map((t) => (
+              <option key={t.id} value={t.id}>
+                {t.name}
+              </option>
+            ))}
+          </select>
         </div>
       )}
 
