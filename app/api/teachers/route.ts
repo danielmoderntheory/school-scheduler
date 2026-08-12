@@ -25,7 +25,7 @@ export async function POST(request: NextRequest) {
       VALUES (
         ${body.name},
         ${body.status || TEACHER_STATUS_FULL_TIME},
-        ${body.can_supervise_study_hall || false},
+        ${body.can_supervise_study_hall ?? true},
         ${body.notes || null},
         ${body.available_days !== undefined ? JSON.stringify(body.available_days) : null},
         ${body.available_blocks !== undefined ? JSON.stringify(body.available_blocks) : null}

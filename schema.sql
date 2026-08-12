@@ -12,7 +12,8 @@ CREATE TABLE teachers (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     name TEXT NOT NULL UNIQUE,
     status TEXT NOT NULL CHECK (status IN ('full-time', 'part-time')),
-    can_supervise_study_hall BOOLEAN DEFAULT false,
+    -- False = excluded from study hall supervision; new teachers default to eligible
+    can_supervise_study_hall BOOLEAN DEFAULT true,
     notes TEXT,
     available_days JSONB DEFAULT NULL,
     available_blocks JSONB DEFAULT NULL,
