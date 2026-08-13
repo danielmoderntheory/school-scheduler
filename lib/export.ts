@@ -406,6 +406,13 @@ function formatGradeCell(raw: unknown): string {
     return `${teacher} - ${subject}`
   }
 
+  // Same subject from several teachers = one co-taught class, not an elective
+  const subjects = new Set(classEntries.map(([, subject]) => subject))
+  if (subjects.size === 1) {
+    const teachers = classEntries.map(([teacher]) => teacher).filter(Boolean).join(" / ")
+    return `${teachers} - ${classEntries[0][1]}`
+  }
+
   // Multiple electives - just show "Elective"
   return "Elective"
 }

@@ -190,7 +190,14 @@ export function ScheduleGrid({
         // Filter to actual classes (not OPEN or Study Hall)
         const classEntries = entries.filter(([, subject]) => isScheduledClass(subject))
         if (classEntries.length > 1) {
-          // Multiple classes at same time = Elective period
+          // Same subject from several teachers = a co-taught class (e.g. K/1
+          // Science with Daniela + Nati), ONE class — never an elective.
+          const subjects = new Set(classEntries.map(([, subject]) => subject))
+          if (subjects.size === 1) {
+            const teachers = classEntries.map(([t]) => t).filter(Boolean).join(" / ")
+            return { entry: [teachers, classEntries[0][1]], isMultiple: false }
+          }
+          // Different subjects at the same time = Elective period
           return { entry: ["", "Elective"], isMultiple: true }
         }
         // Single entry or only OPEN/Study Hall - return first
