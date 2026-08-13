@@ -61,6 +61,54 @@ let activeGradeBlocks: Map<string, Set<number>> | null = null;
 let activeGradePairs: Map<string, [number, number][]> | null = null;
 let activeGradeConflicts: Map<string, [number, number][]> | null = null;
 let activeGradeLunchBlocks: Map<string, Set<number>> | null = null;
+// Blocks each teacher could ever hold a CLASS in (see
+// computeTeacherUsableBlocks). Idle cells outside a teacher's set are not
+// schedulable free time, so open counts / back-to-back detection skip them
+// (mirrors backend compute_teacher_usable_blocks). null = no filtering.
+// Set explicitly at every entry point alongside applyBlockState — it derives
+// from the CLASS LIST, which BlockState does not carry.
+let activeTeacherUsableBlocks: Map<string, Set<number>> | null = null;
+
+/**
+ * Per class: the intersection of its grades' teachable blocks (a grade absent
+ * from the map is teachable everywhere). Per teacher: the union over all
+ * their classes. Teachers whose union covers every active block are omitted
+ * (no filtering needed). Returns null without a teachable-blocks map (legacy)
+ * or when no teacher ends up filtered.
+ */
+function computeTeacherUsableBlocks(
+  classes: { teacher: string; grades?: string[] }[]
+): Map<string, Set<number>> | null {
+  if (!activeGradeBlocks) return null;
+  const allBlocks = new Set(activeBlocks);
+  const usable = new Map<string, Set<number>>();
+  for (const c of classes) {
+    let cset = usable.get(c.teacher);
+    if (!cset) {
+      cset = new Set<number>();
+      usable.set(c.teacher, cset);
+    }
+    let classBlocks = [...allBlocks];
+    for (const g of c.grades || []) {
+      const allowed = activeGradeBlocks.get(g);
+      if (allowed) classBlocks = classBlocks.filter(b => allowed.has(b));
+    }
+    for (const b of classBlocks) cset.add(b);
+  }
+  let filtered: Map<string, Set<number>> | null = null;
+  for (const [teacher, set] of usable) {
+    if (set.size === allBlocks.size) continue; // full coverage — no filtering
+    if (!filtered) filtered = new Map();
+    filtered.set(teacher, set);
+  }
+  return filtered;
+}
+
+/** Is this idle (empty/OPEN) cell real schedulable free time for the teacher? */
+function idleBlockCounts(teacher: string, block: number): boolean {
+  const usable = activeTeacherUsableBlocks?.get(teacher);
+  return !usable || usable.has(block);
+}
 
 function resolveBlockState(
   blocks?: number[],
@@ -2062,7 +2110,17 @@ function countBackToBack(
     let prevOpen = false;
     activeBlocks.forEach(block => {
       const entry = daySchedule?.[block];
-      const currOpen = block !== lunchBlock && (!entry || !isScheduledClass(entry[1]));
+      // Empty/OPEN cells count as open only at blocks the teacher could ever
+      // hold a class in; Study Hall always counts (real supervision, "open"
+      // for BTB purposes even at otherwise-unusable blocks).
+      let currOpen: boolean;
+      if (block === lunchBlock) {
+        currOpen = false;
+      } else if (!entry || isOpenBlock(entry[1])) {
+        currOpen = idleBlockCounts(teacher, block);
+      } else {
+        currOpen = !isScheduledClass(entry[1]);
+      }
       if (prevOpen && currOpen) count++;
       prevOpen = currOpen;
     });
@@ -2109,14 +2167,18 @@ function redistributeOpenBlocks(
     DAYS.forEach(day => {
       const daySchedule = teacherSchedules[teacher][day];
       const lunchBlock = candidates ? designateTeacherLunch(daySchedule, candidates) : null;
+      // Empty/OPEN cells count as open only at class-usable blocks (a gap no
+      // class could ever fill is not an issue worth chasing); Study Hall
+      // always counts. Mirrors countBackToBack.
+      const openAt = (entry: [string, string] | null | undefined, b: number): boolean => {
+        if (b === lunchBlock) return false;
+        if (!entry || isOpenBlock(entry[1])) return idleBlockCounts(teacher, b);
+        return !isScheduledClass(entry[1]);
+      };
       for (let i = 0; i < activeBlocks.length - 1; i++) {
         const b1 = activeBlocks[i];
         const b2 = activeBlocks[i + 1];
-        const entry1 = daySchedule[b1];
-        const entry2 = daySchedule[b2];
-        const isOpen1 = b1 !== lunchBlock && (!entry1 || !isScheduledClass(entry1[1]));
-        const isOpen2 = b2 !== lunchBlock && (!entry2 || !isScheduledClass(entry2[1]));
-        if (isOpen1 && isOpen2) {
+        if (openAt(daySchedule[b1], b1) && openAt(daySchedule[b2], b2)) {
           pairs.push({ day, block: b2 });
         }
       }
@@ -2125,14 +2187,20 @@ function redistributeOpenBlocks(
   };
 
   const wouldCreateBTB = (teacher: string, day: string, block: number): boolean => {
+    // An idle neighbor at a class-unusable block is not real free time, so
+    // vacating next to it creates no back-to-back pair (mirrors countBackToBack).
+    const neighborOpen = (entry: [string, string] | null | undefined, b: number): boolean => {
+      if (!entry || isOpenBlock(entry[1])) return idleBlockCounts(teacher, b);
+      return !isScheduledClass(entry[1]);
+    };
     const blockIdx = activeBlocks.indexOf(block);
     if (blockIdx > 0) {
-      const prev = teacherSchedules[teacher][day][activeBlocks[blockIdx - 1]];
-      if (!prev || !isScheduledClass(prev[1])) return true;
+      const prevB = activeBlocks[blockIdx - 1];
+      if (neighborOpen(teacherSchedules[teacher][day][prevB], prevB)) return true;
     }
     if (blockIdx < activeBlocks.length - 1) {
-      const next = teacherSchedules[teacher][day][activeBlocks[blockIdx + 1]];
-      if (!next || !isScheduledClass(next[1])) return true;
+      const nextB = activeBlocks[blockIdx + 1];
+      if (neighborOpen(teacherSchedules[teacher][day][nextB], nextB)) return true;
     }
     return false;
   };
@@ -2495,9 +2563,13 @@ export function __testRedistributeOpenBlocks(
     gradeLunchBlocks?: Record<string, number[]>;
     immovableClasses?: Set<string>;
     enforceTeacherLunch?: boolean;
+    usableBlocksByTeacher?: Record<string, number[]>;
   } = {}
 ): void {
   applyBlockState(resolveBlockState(opts.blocks, opts.teachableBlocksByGrade, opts.gradeBlockPairs, opts.gradeBlockConflicts, opts.gradeLunchBlocks));
+  activeTeacherUsableBlocks = opts.usableBlocksByTeacher
+    ? new Map(Object.entries(opts.usableBlocksByTeacher).map(([t, bs]) => [t, new Set(bs)]))
+    : null;
   const teacherLunch = opts.enforceTeacherLunch
     ? buildTeacherLunchFromSchedules(teacherSchedules)
     : undefined;
@@ -2530,6 +2602,7 @@ export function __testDesignateTeacherLunch(
   blocks?: number[]
 ): number | null {
   applyBlockState(resolveBlockState(blocks));
+  activeTeacherUsableBlocks = null;
   return designateTeacherLunch(daySchedule, new Set(candidates));
 }
 
@@ -2540,9 +2613,12 @@ export function __testDesignateTeacherLunch(
 export function __testCountBackToBack(
   teacherSchedules: Record<string, TeacherSchedule>,
   teacher: string,
-  opts: { blocks?: number[]; lunchCandidates?: Record<string, number[]> } = {}
+  opts: { blocks?: number[]; lunchCandidates?: Record<string, number[]>; usableBlocksByTeacher?: Record<string, number[]> } = {}
 ): number {
   applyBlockState(resolveBlockState(opts.blocks));
+  activeTeacherUsableBlocks = opts.usableBlocksByTeacher
+    ? new Map(Object.entries(opts.usableBlocksByTeacher).map(([t, bs]) => [t, new Set(bs)]))
+    : null;
   const teacherLunch = opts.lunchCandidates
     ? lunchInfoFromCandidates(opts.lunchCandidates)
     : undefined;
@@ -2557,9 +2633,12 @@ export function __testCalculateStats(
   teacherSchedules: Record<string, TeacherSchedule>,
   teachers: Teacher[],
   fullTimeTeachers: string[],
-  opts: { blocks?: number[]; lunchCandidates?: Record<string, number[]> } = {}
+  opts: { blocks?: number[]; lunchCandidates?: Record<string, number[]>; usableBlocksByTeacher?: Record<string, number[]> } = {}
 ): TeacherStat[] {
   applyBlockState(resolveBlockState(opts.blocks));
+  activeTeacherUsableBlocks = opts.usableBlocksByTeacher
+    ? new Map(Object.entries(opts.usableBlocksByTeacher).map(([t, bs]) => [t, new Set(bs)]))
+    : null;
   const teacherLunch = opts.lunchCandidates
     ? lunchInfoFromCandidates(opts.lunchCandidates)
     : undefined;
@@ -2587,7 +2666,9 @@ function calculateStats(
       activeBlocks.forEach(block => {
         const entry = daySchedule?.[block];
         if (!entry || isOpenBlock(entry[1])) {
-          if (block !== lunchBlock) open++;
+          // Designated lunch and class-unusable idle cells are not real free
+          // time — neither is counted as open (mirrors compute_teacher_stats)
+          if (block !== lunchBlock && idleBlockCounts(t.name, block)) open++;
         } else if (isStudyHall(entry[1])) {
           studyHall++;
         } else {
@@ -2741,6 +2822,11 @@ export async function generateSchedules(
   // await below so interleaved calls can't corrupt this call's configuration.
   const blockState = resolveBlockState(blocks, teachableBlocksByGrade, gradeBlockPairs, gradeBlockConflicts, gradeLunchBlocks);
   applyBlockState(blockState);
+  // Class-usable blocks per teacher, from the FULL class list (locked
+  // teachers included — their stats count too). Re-stamped alongside every
+  // applyBlockState re-application below.
+  const teacherUsableState = computeTeacherUsableBlocks(classes);
+  activeTeacherUsableBlocks = teacherUsableState;
 
   const {
     numOptions = 3,
@@ -2905,6 +2991,7 @@ export async function generateSchedules(
   onProgress?.(0, numAttempts, 'Initializing solver...');
   await new Promise(resolve => setTimeout(resolve, 10));
   applyBlockState(blockState);
+  activeTeacherUsableBlocks = teacherUsableState;
 
   const candidates: {
     attempt: number;
@@ -2930,6 +3017,7 @@ export async function generateSchedules(
     // Allow UI to update
     await new Promise(resolve => setTimeout(resolve, 5));
     applyBlockState(blockState);
+    activeTeacherUsableBlocks = teacherUsableState;
 
     // Build deprioritize set from previously found unique solutions
     // This forces the solver to explore different regions of the solution space
@@ -3245,11 +3333,17 @@ export function reassignStudyHalls(
   blocks?: number[],
   teachableBlocksByGrade?: Record<string, number[]>,
   gradeBlockConflicts?: Record<string, [number, number][]>,
-  gradeLunchBlocks?: Record<string, number[]>
+  gradeLunchBlocks?: Record<string, number[]>,
+  usableBlocksByTeacher?: Record<string, number[]>
 ): { success: boolean; newOption?: ScheduleOption; message?: string; noChanges?: boolean } {
   // Stamp the block configuration into module state (this function is fully
   // synchronous, so a single application at entry is deterministic per call)
   applyBlockState(resolveBlockState(blocks, teachableBlocksByGrade, undefined, gradeBlockConflicts, gradeLunchBlocks));
+  // No class list is available here, so the class-usable blocks come from the
+  // caller (the page derives them from the generation's classes snapshot).
+  activeTeacherUsableBlocks = usableBlocksByTeacher
+    ? new Map(Object.entries(usableBlocksByTeacher).map(([t, bs]) => [t, new Set(bs)]))
+    : null;
 
   // Teacher lunch hard constraint — derived from the placed class schedules
   // (no class list is available here). Same gating as generateSchedules.

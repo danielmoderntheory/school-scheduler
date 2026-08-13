@@ -1300,9 +1300,17 @@ def test_22():
         check("legacy e2e teacherStats still cover all 25 blocks", not bad5,
               str(bad5[:2]))
     if result_l['status'] == 'success':
+        # 45 blocks minus one designated lunch per day = 40 — except teachers
+        # whose class-usable union leaves ADDITIONAL windows nothing of theirs
+        # can ever meet in: those idle cells are not free time and are not
+        # counted either. Here that is Isa alone (single 7th+10th class:
+        # usable = intersection = 9 - {6, 7}; each day one of {6, 7} is the
+        # designated lunch and the OTHER is class-unusable -> 40 - 5 = 35).
+        expected = {'Isa': 35}
         bad_l = [s for s in result_l['options'][0]['teacherStats']
-                 if s['teaching'] + s['studyHall'] + s['open'] != 40]
-        check("masked e2e stats drop exactly one lunch block per day (45 -> 40)",
+                 if s['teaching'] + s['studyHall'] + s['open']
+                 != expected.get(s['teacher'], 40)]
+        check("masked e2e stats drop lunch + class-unusable idle blocks",
               not bad_l, str(bad_l[:2]))
 
     # (d) redistribution: a "hole" that is only lunch-adjacent is left alone.
@@ -1569,6 +1577,104 @@ def test_25():
     check("(c) grade absent from explicit lunch map keeps masked-complement windows",
           fallback.get('Oscar') == {5, 9}, str(fallback))
 test_25()
+
+
+# ================================================================ TEST 26
+print("\nTEST 26 — class-unusable idle blocks are not OPEN: stats, BTB, and")
+print("redistribution skip them (e.g. K-5-only teacher after K-5 gives up B9)")
+def test_26():
+    import copy
+    from solver import (compute_teacher_usable_blocks, compute_teacher_stats,
+                        count_back_to_back, redistribute_open_blocks)
+    set_blocks(NINE_BLOCKS)
+    G1 = '1st Grade'
+    k5_teachable = [1, 2, 3, 4, 6, 7, 8]  # 1st surrendered block 9; lunch = 5
+    masks = {G1: k5_teachable, '7th Grade': MASKS['7th Grade']}
+
+    # (a) usable map: K-5-only teacher filtered; full-coverage teacher omitted
+    entries = class_objs([make_class('Sydney', [G1], 'Math', 5),
+                          make_class('Oscar', [G1], 'Music', 2),
+                          make_class('Oscar', ['7th Grade'], 'Music', 2)])
+    usable = compute_teacher_usable_blocks(entries, masks)
+    check("(a) K-5-only teacher's usable set excludes the surrendered block",
+          usable.get('Sydney') == set(k5_teachable), str(usable.get('Sydney')))
+    check("(a) teacher whose classes cover every block is omitted (no filtering)",
+          'Oscar' not in usable, str(sorted(usable)))
+    check("(a) legacy (no masks) computes no filtering at all",
+          compute_teacher_usable_blocks(entries, None) == {})
+
+    # (b) counting: idle 8+9 is a phantom pair for Sydney (9 unusable), a real
+    # pair for a cross-band teacher (no usable filtering)
+    def day_sched(open_blocks):
+        return {b: (['', 'OPEN'] if b in open_blocks else [G1, f'C{b}'])
+                for b in NINE_BLOCKS}
+    ts_cnt = {'Sydney': {DAYS[0]: day_sched({5, 8, 9}),
+                         **{d: day_sched({5, 9}) for d in DAYS[1:]}}}
+    check("(b) phantom (8,9) pair not counted with the usable set",
+          count_back_to_back(ts_cnt, 'Sydney', {5},
+                             usable_blocks=set(k5_teachable)) == 0
+          and count_back_to_back(ts_cnt, 'Sydney', {5}) == 1)
+    st = compute_teacher_stats(ts_cnt, [Teacher(name='Sydney', status='full-time')],
+                               {'Sydney': {5}},
+                               {'Sydney': set(k5_teachable)})[0]
+    check("(b) open count excludes surrendered-block idles (Mon B8 only)",
+          st.open == 1 and st.back_to_back_issues == 0,
+          f"open={st.open} btb={st.back_to_back_issues}")
+    st_legacy = compute_teacher_stats(ts_cnt, [Teacher(name='Sydney', status='full-time')],
+                                      {'Sydney': {5}})[0]
+    check("(b) without the usable map the same idles still count (cross-band)",
+          st_legacy.open == 6 and st_legacy.back_to_back_issues == 1,
+          f"open={st_legacy.open} btb={st_legacy.back_to_back_issues}")
+
+    # (c) redistribution: Tue has a real (6,7) hole; the ONLY movable class is
+    # Mon B8 (everything else frozen). Vacating Mon B8 sits next to idle B9 —
+    # a phantom pair. With the usable map the move happens and fixes Tue;
+    # without it (cross-band semantics) the vacate is refused as creating BTB.
+    def build():
+        mon = {b: [G1, f'Fix{b}'] for b in [1, 2, 3, 4, 6, 7]}
+        mon.update({5: ['', 'OPEN'], 8: [G1, 'MoveX'], 9: ['', 'OPEN']})
+        tue = {b: [G1, f'Tix{b}'] for b in [1, 2, 3, 4, 8]}
+        tue.update({5: ['', 'OPEN'], 6: ['', 'OPEN'], 7: ['', 'OPEN'], 9: ['', 'OPEN']})
+        rest = {b: [G1, f'R{b}'] for b in k5_teachable}
+        rest.update({5: ['', 'OPEN'], 9: ['', 'OPEN']})
+        ts = {'Sydney': {DAYS[0]: copy.deepcopy(mon), DAYS[1]: copy.deepcopy(tue),
+                         **{d: copy.deepcopy(rest) for d in DAYS[2:]}}}
+        gs = {G1: {d: {b: ([None, None] if ts['Sydney'][d][b][1] == 'OPEN'
+                           else ['Sydney', ts['Sydney'][d][b][1]])
+                       for b in NINE_BLOCKS} for d in DAYS}}
+        for d in DAYS:
+            for b in NINE_BLOCKS:
+                if gs[G1][d][b][0] is None:
+                    gs[G1][d][b] = None
+        return ts, gs
+    frozen = {('Sydney', G1, f'{p}{b}') for p in ('Fix', 'Tix', 'R')
+              for b in NINE_BLOCKS}
+    lunch_w = {'Sydney': {5}}
+
+    ts_a, gs_a = build()
+    redistribute_open_blocks(ts_a, gs_a, ['Sydney'], grade_teachable_blocks=masks,
+                             teacher_lunch_windows=lunch_w,
+                             frozen_class_entries=frozen,
+                             teacher_usable_blocks={'Sydney': set(k5_teachable)})
+    check("(c) with the usable map the vacate next to idle B9 is allowed and"
+          " the real Tue hole gets fixed",
+          count_back_to_back(ts_a, 'Sydney', {5},
+                             usable_blocks=set(k5_teachable)) == 0
+          and ts_a['Sydney'][DAYS[1]][7] == [G1, 'MoveX'],
+          str(ts_a['Sydney'][DAYS[1]][7]))
+    check("(c) no violation created: Mon B9 stays empty/OPEN",
+          ts_a['Sydney'][DAYS[0]][9][1] == 'OPEN')
+
+    ts_b, gs_b = build()
+    redistribute_open_blocks(ts_b, gs_b, ['Sydney'], grade_teachable_blocks=masks,
+                             teacher_lunch_windows=lunch_w,
+                             frozen_class_entries=frozen)
+    check("(c) control: without the usable map the phantom pair blocks the"
+          " move (cross-band semantics unchanged)",
+          ts_b['Sydney'][DAYS[0]][8] == [G1, 'MoveX']
+          and count_back_to_back(ts_b, 'Sydney', {5}) >= 1,
+          str(ts_b['Sydney'][DAYS[1]][7]))
+test_26()
 
 
 fails = [n for n, ok in results if not ok]

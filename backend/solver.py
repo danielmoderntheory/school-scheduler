@@ -358,6 +358,42 @@ def compute_teacher_lunch_candidates(
     return {t: c for t, c in candidates.items() if c}
 
 
+def compute_teacher_usable_blocks(class_entries: list,
+                                  grade_teachable_blocks: dict) -> dict:
+    """Blocks each teacher could ever hold a CLASS in.
+
+    Per class: the intersection of its grades' teachable blocks (a grade
+    absent from the masks is teachable everywhere). Per teacher: the union
+    over all their classes. An empty/OPEN slot OUTSIDE this set is not real
+    schedulable free time - e.g. a K-5-only teacher during Block 9 after K-5
+    surrendered that block - so open counts and back-to-back detection
+    exclude it, exactly like the designated lunch block. The JS solver and
+    the page's recalculateOptionStats apply the same rule.
+
+    Study halls may still legitimately occupy such blocks (supervision is not
+    teaching one of the teacher's classes); occupied cells are unaffected -
+    this map only reclassifies IDLE cells. The study-hall spread heuristic
+    (count_open_blocks in add_study_halls) deliberately keeps counting them:
+    a teacher idle at such a block really is available to supervise there.
+
+    Returns {} when no masks are provided (legacy requests - no filtering).
+    Teachers whose union covers every block are omitted (no filtering needed).
+    """
+    if not grade_teachable_blocks:
+        return {}
+    blocks_set = set(BLOCKS)
+    usable: dict[str, set] = {}
+    for c in class_entries:
+        cset = usable.setdefault(c.teacher, set())
+        class_blocks = blocks_set
+        for g in (c.grades or []):
+            mask = grade_teachable_blocks.get(g)
+            if mask is not None:
+                class_blocks = class_blocks & set(mask)
+        cset |= class_blocks
+    return {t: u for t, u in usable.items() if u != blocks_set}
+
+
 def build_sessions(
     classes: list[ClassEntry],
     locked_grade_slots: dict[str, set[int]] = None,
@@ -1726,10 +1762,17 @@ def redistribute_open_blocks(teacher_schedules: dict, grade_schedules: dict,
                              teacher_lunch_windows: dict = None,
                              frozen_class_entries: set = None,
                              class_allowed_pairs: dict = None,
-                             grade_block_conflicts: dict = None) -> None:
+                             grade_block_conflicts: dict = None,
+                             teacher_usable_blocks: dict = None) -> None:
     """
     Post-processing to break up consecutive OPEN blocks by swapping classes around.
     This mimics the JavaScript solver's redistributeOpenBlocks function.
+
+    teacher_usable_blocks: optional dict mapping teacher name -> set of blocks
+    the teacher could ever hold a class in (compute_teacher_usable_blocks). An
+    idle cell outside the set is not schedulable free time, so it is never
+    counted as OPEN for back-to-back detection here - redistribution does not
+    chase gaps it could never fill (e.g. a K-5-only teacher's Block 9).
 
     grade_teachable_blocks: optional dict mapping grade name -> set/list of block
     numbers the grade can be taught in. A class is never moved into a block that
@@ -1830,29 +1873,41 @@ def redistribute_open_blocks(teacher_schedules: dict, grade_schedules: dict,
                     return True
         return False
 
+    def _idle_open_at(teacher: str, entry, b: int, lunch_block) -> bool:
+        """Is this cell "open" for BTB purposes? Empty and OPEN cells count
+        only at blocks the teacher could ever hold a class in (see
+        teacher_usable_blocks); Study Hall always counts; the designated
+        lunch block never does."""
+        if b == lunch_block:
+            return False
+        if entry and len(entry) > 1 and entry[1] == 'Study Hall':
+            return True
+        if entry and not (len(entry) > 1 and entry[1] == 'OPEN'):
+            return False
+        usable = (teacher_usable_blocks or {}).get(teacher)
+        return usable is None or b in usable
+
     def day_btb_count(teacher: str, day_sched: dict) -> int:
         """Lunch-aware back-to-back OPEN count for one day's schedule dict.
         The teacher's designated lunch block (recomputed for the given
-        pattern) counts as NOT open."""
+        pattern) counts as NOT open, nor do idle cells at blocks the teacher
+        could never hold a class in."""
         cand = (teacher_lunch_windows or {}).get(teacher)
         lunch_block = designate_teacher_lunch(day_sched, cand) if cand else None
         count = 0
         for i in range(len(BLOCKS) - 1):
             b1, b2 = BLOCKS[i], BLOCKS[i + 1]
-            e1 = day_sched.get(b1)
-            e2 = day_sched.get(b2)
-            is_open1 = ((not e1 or (len(e1) > 1 and e1[1] in ('OPEN', 'Study Hall')))
-                        and b1 != lunch_block)
-            is_open2 = ((not e2 or (len(e2) > 1 and e2[1] in ('OPEN', 'Study Hall')))
-                        and b2 != lunch_block)
-            if is_open1 and is_open2:
+            if (_idle_open_at(teacher, day_sched.get(b1), b1, lunch_block)
+                    and _idle_open_at(teacher, day_sched.get(b2), b2, lunch_block)):
                 count += 1
         return count
 
     def get_back_to_back_slots(teacher: str) -> list[tuple[str, int]]:
         """Get (day, block) pairs where there's a back-to-back OPEN issue.
         The teacher's designated lunch block is NOT open: it breaks OPEN
-        chains, so a "hole" that is only lunch-adjacent is not an issue."""
+        chains, so a "hole" that is only lunch-adjacent is not an issue.
+        Idle cells at class-unusable blocks are likewise NOT open - a gap
+        no class could ever fill is not an issue worth chasing."""
         pairs = []
         schedule = teacher_schedules.get(teacher, {})
         cand = (teacher_lunch_windows or {}).get(teacher)
@@ -1861,11 +1916,8 @@ def redistribute_open_blocks(teacher_schedules: dict, grade_schedules: dict,
             lunch_block = designate_teacher_lunch(day_sched, cand) if cand else None
             for i in range(len(BLOCKS) - 1):
                 b1, b2 = BLOCKS[i], BLOCKS[i + 1]
-                entry1 = day_sched.get(b1)
-                entry2 = day_sched.get(b2)
-                is_open1 = (not entry1 or (len(entry1) > 1 and entry1[1] in ('OPEN', 'Study Hall'))) and b1 != lunch_block
-                is_open2 = (not entry2 or (len(entry2) > 1 and entry2[1] in ('OPEN', 'Study Hall'))) and b2 != lunch_block
-                if is_open1 and is_open2:
+                if (_idle_open_at(teacher, day_sched.get(b1), b1, lunch_block)
+                        and _idle_open_at(teacher, day_sched.get(b2), b2, lunch_block)):
                     pairs.append((day, b2))  # Return the second slot to try to fill
         return pairs
 
@@ -2064,7 +2116,9 @@ def redistribute_open_blocks(teacher_schedules: dict, grade_schedules: dict,
                 }
 
                 lunch_cand = (teacher_lunch_windows or {}).get(teacher)
-                before = count_back_to_back(teacher_schedules, teacher, lunch_cand)
+                usable = (teacher_usable_blocks or {}).get(teacher)
+                before = count_back_to_back(teacher_schedules, teacher, lunch_cand,
+                                            usable_blocks=usable)
                 for d, b in vacated:
                     teacher_schedules[teacher][d][b] = ['', 'OPEN']
                 for tb in tgt_pair:
@@ -2077,7 +2131,8 @@ def redistribute_open_blocks(teacher_schedules: dict, grade_schedules: dict,
                             grade_schedules[g][d][b] = None
                     for tb in tgt_pair:
                         grade_schedules[g].setdefault(issue_day, {})[tb] = [teacher, subject]
-                after = count_back_to_back(teacher_schedules, teacher, lunch_cand)
+                after = count_back_to_back(teacher_schedules, teacher, lunch_cand,
+                                           usable_blocks=usable)
                 if after < before:
                     return True
 
@@ -2511,7 +2566,7 @@ def designate_teacher_lunch(teacher_schedule_day: dict, candidates) -> Optional[
 
 
 def count_back_to_back(teacher_schedules: dict, teacher: str,
-                       lunch_candidates=None) -> int:
+                       lunch_candidates=None, usable_blocks=None) -> int:
     """Count back-to-back OPEN blocks for a teacher.
 
     Both OPEN and Study Hall count as "open" for this calculation, since
@@ -2520,9 +2575,27 @@ def count_back_to_back(teacher_schedules: dict, teacher: str,
     lunch_candidates: optional set of the teacher's candidate lunch window
     block numbers. When provided, each day's designated Lunch block (see
     designate_teacher_lunch) is treated as NOT open - it breaks OPEN chains.
+
+    usable_blocks: optional set of blocks the teacher could ever hold a class
+    in (see compute_teacher_usable_blocks). When provided, an OPEN cell at a
+    block OUTSIDE the set is NOT open - it is not schedulable free time, so
+    it neither forms nor extends a back-to-back pair. Study Hall cells keep
+    their normal "open" treatment regardless (they are real supervision that
+    may legitimately sit at such blocks).
     """
     count = 0
     schedule = teacher_schedules.get(teacher, {})
+
+    def is_open(cell, b, lunch_block):
+        if b == lunch_block:
+            return False
+        if not (cell and len(cell) > 1):
+            return False
+        if cell[1] == 'Study Hall':
+            return True
+        if cell[1] != 'OPEN':
+            return False
+        return usable_blocks is None or b in usable_blocks
 
     for day in DAYS:
         day_sched = schedule.get(day, {})
@@ -2530,17 +2603,8 @@ def count_back_to_back(teacher_schedules: dict, teacher: str,
                        if lunch_candidates else None)
         for i in range(len(BLOCKS) - 1):
             b1, b2 = BLOCKS[i], BLOCKS[i + 1]
-            cell1 = day_sched.get(b1)
-            cell2 = day_sched.get(b2)
-
-            # Both OPEN and Study Hall count as "open" for BTB detection;
-            # the designated lunch block counts as NOT open
-            is_open1 = (cell1 and len(cell1) > 1 and cell1[1] in ('OPEN', 'Study Hall')
-                        and b1 != lunch_block)
-            is_open2 = (cell2 and len(cell2) > 1 and cell2[1] in ('OPEN', 'Study Hall')
-                        and b2 != lunch_block)
-
-            if is_open1 and is_open2:
+            if (is_open(day_sched.get(b1), b1, lunch_block)
+                    and is_open(day_sched.get(b2), b2, lunch_block)):
                 count += 1
 
     return count
@@ -2571,7 +2635,8 @@ def count_same_day_open(teacher_schedules: dict, teacher: str) -> int:
 
 
 def compute_teacher_stats(teacher_schedules: dict, teachers: list[Teacher],
-                          teacher_lunch_windows: dict = None) -> list[TeacherStat]:
+                          teacher_lunch_windows: dict = None,
+                          teacher_usable_blocks: dict = None) -> list[TeacherStat]:
     """Compute statistics for each teacher.
 
     teacher_lunch_windows: optional dict mapping teacher name -> set of
@@ -2580,6 +2645,13 @@ def compute_teacher_stats(teacher_schedules: dict, teachers: list[Teacher],
     count (it is neither teaching nor study hall - simply not counted) and
     from back-to-back OPEN detection. Legacy requests (no windows) are
     byte-identical to the previous behavior.
+
+    teacher_usable_blocks: optional dict mapping teacher name -> set of
+    blocks the teacher could ever hold a class in (see
+    compute_teacher_usable_blocks). Idle cells outside the set are not
+    schedulable free time, so - like the designated lunch - they are simply
+    not counted as open. Scheduled content (classes, study halls) at such
+    blocks still counts normally.
     """
     stats = []
     teacher_status = {t.name: t.status for t in teachers}
@@ -2589,6 +2661,7 @@ def compute_teacher_stats(teacher_schedules: dict, teachers: list[Teacher],
         study_hall = 0
         open_blocks = 0
         lunch_candidates = (teacher_lunch_windows or {}).get(teacher)
+        usable = (teacher_usable_blocks or {}).get(teacher)
 
         for day in DAYS:
             day_sched = schedule.get(day, {})
@@ -2598,6 +2671,9 @@ def compute_teacher_stats(teacher_schedules: dict, teachers: list[Teacher],
                 cell = day_sched.get(block)
                 if block == lunch_block:
                     continue  # designated lunch: neither open nor used
+                idle = cell is None or (len(cell) > 1 and cell[1] == 'OPEN')
+                if idle and usable is not None and block not in usable:
+                    continue  # class-unusable window: not real free time
                 if cell is None:
                     open_blocks += 1
                 elif len(cell) > 1:
@@ -2608,7 +2684,8 @@ def compute_teacher_stats(teacher_schedules: dict, teachers: list[Teacher],
                     else:
                         teaching += 1
 
-        btb = count_back_to_back(teacher_schedules, teacher, lunch_candidates)
+        btb = count_back_to_back(teacher_schedules, teacher, lunch_candidates,
+                                 usable_blocks=usable)
 
         stats.append(TeacherStat(
             teacher=teacher,
@@ -2997,6 +3074,14 @@ def generate_schedules(
         teacher_lunch_windows = compute_teacher_lunch_candidates(
             sessions, grade_teachable, grade_lunch_blocks) or None
 
+    # Blocks each teacher could ever hold a class in (all teachers, including
+    # locked ones - class_objs covers every class). Idle cells outside a
+    # teacher's set are not schedulable free time: open counts, back-to-back
+    # detection, and redistribution targeting all skip them. Empty (= no
+    # filtering) for legacy requests without per-grade masks.
+    teacher_usable_blocks = compute_teacher_usable_blocks(
+        class_objs, grade_teachable or None) or None
+
     if on_progress:
         on_progress(0, num_attempts, 'Initializing CP-SAT solver...')
 
@@ -3361,7 +3446,7 @@ def generate_schedules(
             # IMPORTANT: Only redistribute for non-locked teachers to preserve locked schedules
             if is_rule_enabled(rules, 'no_btb_open'):
                 unlocked_full_time = [t for t in full_time_names if t not in locked_teacher_names]
-                redistribute_open_blocks(ts, gs, unlocked_full_time, grade_teachable_blocks=grade_teachable or None, teacher_lunch_windows=teacher_lunch_windows, frozen_class_entries=frozen_class_entries, class_allowed_pairs=class_allowed_pairs, grade_block_conflicts=block_conflicts or None)
+                redistribute_open_blocks(ts, gs, unlocked_full_time, grade_teachable_blocks=grade_teachable or None, teacher_lunch_windows=teacher_lunch_windows, frozen_class_entries=frozen_class_entries, class_allowed_pairs=class_allowed_pairs, grade_block_conflicts=block_conflicts or None, teacher_usable_blocks=teacher_usable_blocks)
 
             # CRITICAL: Rebuild grade schedules from teacher schedules to ensure consistency.
             # This is a destructive rebuild that ensures grade_schedules always match teacher_schedules,
@@ -3374,7 +3459,8 @@ def generate_schedules(
                 # Lunch-aware: each teacher's designated daily lunch block is
                 # not OPEN, so it never counts toward back-to-back issues
                 total_btb = sum(
-                    count_back_to_back(ts, t, (teacher_lunch_windows or {}).get(t))
+                    count_back_to_back(ts, t, (teacher_lunch_windows or {}).get(t),
+                                       usable_blocks=(teacher_usable_blocks or {}).get(t))
                     for t in full_time_names
                 )
             else:
@@ -3478,7 +3564,8 @@ def generate_schedules(
     solutions_to_use = unique[skip_top_solutions:skip_top_solutions + num_options] if skip_top_solutions > 0 else unique[:num_options]
     for i, c in enumerate(solutions_to_use):
         stats = compute_teacher_stats(c['teacher_schedules'], teacher_objs,
-                                      teacher_lunch_windows)
+                                      teacher_lunch_windows,
+                                      teacher_usable_blocks=teacher_usable_blocks)
 
         options.append({
             'optionNumber': i + 1,

@@ -130,6 +130,98 @@ export function getLunchBlocksForGrade(
 }
 
 /**
+ * Parse a template time string ("8:00-8:20", "12:35-1:20", "2:05-2:45") into
+ * minutes-since-midnight [start, end]. Times carry no am/pm marker; the school
+ * day runs ~7:00-18:00, so hours 1-6 are PM (add 12) and 7-12 are AM (12 stays
+ * 12 = noon). Returns null for anything malformed or inverted.
+ */
+function parseTimeRange(time: string | undefined): [number, number] | null {
+  if (!time) return null
+  const m = /^\s*(\d{1,2}):(\d{2})\s*-\s*(\d{1,2}):(\d{2})\s*$/.exec(time)
+  if (!m) return null
+  const toMinutes = (h: number, min: number): number | null => {
+    if (h < 1 || h > 12 || min < 0 || min > 59) return null
+    if (h >= 1 && h <= 6) h += 12 // afternoon
+    return h * 60 + min
+  }
+  const start = toMinutes(parseInt(m[1], 10), parseInt(m[2], 10))
+  const end = toMinutes(parseInt(m[3], 10), parseInt(m[4], 10))
+  if (start === null || end === null || end <= start) return null
+  return [start, end]
+}
+
+/**
+ * Display labels for a grade's UNAVAILABLE blocks (non-teachable and not
+ * lunch), derived from what the grade actually does during that window: the
+ * grade's own break/transition row with the largest time overlap. E.g. after
+ * the K-5 afternoon restructure, K-5 grades map Block 9 (2:05-2:45) to their
+ * "End of Day Meeting / SEL" row (2:30-2:45). Blocks with no overlapping row
+ * (or unparseable times) get no entry — callers fall back to a plain dash.
+ * The label comes straight from the template row, so renaming it in
+ * Settings → Timetable (e.g. to just "SEL") flows through everywhere.
+ */
+export function getUnavailableBlockLabelsForGrade(
+  template: Pick<TimetableTemplate, 'rows'> | null | undefined,
+  gradeId: string
+): Record<number, string> {
+  if (!template?.rows?.length) return {}
+  const teachable = new Set(getTeachableBlocksForGrade(template, gradeId))
+  const lunch = new Set(getLunchBlocksForGrade(template, gradeId))
+  const resolved = resolveRowsForGrade(template.rows, gradeId)
+  const resolvedSet = new Set(resolved)
+
+  const labels: Record<number, string> = {}
+  for (const block of getTemplateBlocks(template)) {
+    if (teachable.has(block) || lunch.has(block)) continue
+    // The grade resolves no row for this block, so take the window from any
+    // block row carrying this number — preferring one scoped to OTHER grades
+    // (that is the actual bell window the grade sits outside of).
+    const blockRows = template.rows.filter(
+      row => row.type === 'block' && row.blockNumber === block
+    )
+    const sourceRow = blockRows.find(row => !resolvedSet.has(row)) ?? blockRows[0]
+    const blockRange = parseTimeRange(sourceRow?.time)
+    if (!blockRange) continue
+
+    let best: { label: string; overlap: number } | null = null
+    for (const row of resolved) {
+      if (row.type !== 'break' && row.type !== 'transition') continue
+      const range = parseTimeRange(row.time)
+      if (!range) continue
+      const overlap = Math.min(blockRange[1], range[1]) - Math.max(blockRange[0], range[0])
+      if (overlap > 0 && (!best || overlap > best.overlap)) {
+        best = { label: row.label, overlap }
+      }
+    }
+    if (best?.label) labels[block] = best.label
+  }
+  return labels
+}
+
+/**
+ * A grade's true bell time for each of its blocks, from its RESOLVED template
+ * block rows (e.g. post-restructure K-5: Block 8 -> "1:40-2:25" while
+ * 6th-12th resolve "1:20-2:00"). Only rows with parseable times are included;
+ * blocks the grade resolves no row for (e.g. K-5's surrendered Block 9) get
+ * no entry. Callers use this for grade-view row-header times and for the
+ * straddling-class time labels in teacher views. Empty without a template.
+ */
+export function getBlockTimesForGrade(
+  template: Pick<TimetableTemplate, 'rows'> | null | undefined,
+  gradeId: string
+): Record<number, string> {
+  if (!template?.rows?.length) return {}
+  const times: Record<number, string> = {}
+  for (const row of resolveRowsForGrade(template.rows, gradeId)) {
+    if (row.type !== 'block' || typeof row.blockNumber !== 'number') continue
+    if (row.time && parseTimeRange(row.time)) {
+      times[row.blockNumber] = row.time
+    }
+  }
+  return times
+}
+
+/**
  * Block numbers a specific grade can be scheduled into.
  * A block row scoped away from a grade (e.g. that band's lunch window) is not
  * teachable for that grade. Falls back to all template blocks when the grade

@@ -40,7 +40,7 @@ import { Textarea } from "@/components/ui/textarea"
 import { Label } from "@/components/ui/label"
 import Link from "next/link"
 import type { ScheduleOption, TeacherSchedule, GradeSchedule, Teacher, FloatingBlock, PendingPlacement, ValidationError, CellLocation, ClassEntry, OpenBlockLabels, PendingTransfer, TimetableTemplate } from "@/lib/types"
-import { resolveRowsForGrade, getTemplateBlocks, getTeachableBlocksForGrade, getPairableBlocksForGrade, getBlockConflictsForGrade, getLunchBlocksForGrade } from "@/lib/timetable-utils"
+import { resolveRowsForGrade, getTemplateBlocks, getTeachableBlocksForGrade, getPairableBlocksForGrade, getBlockConflictsForGrade, getLunchBlocksForGrade, getUnavailableBlockLabelsForGrade, getBlockTimesForGrade } from "@/lib/timetable-utils"
 import { parseClassesFromSnapshot, parseTeachersFromSnapshot, parseRulesFromSnapshot, hasValidSnapshots, detectClassChanges, detectTeacherChanges, applyTeacherRenames, applyTeacherChangesToSnapshot, computeExpectedTeachingSessions, findMismatchedTeachers, type GenerationStats, type ChangeDetectionResult, type CurrentClass, type ClassSnapshot, type TeacherSnapshot, type TeacherChangeResult } from "@/lib/snapshot-utils"
 import { parseGradeDisplayToNumbers, parseGradeDisplayToNames, gradesOverlap, gradesEqual, gradeNumToDisplay, isClassElective, isClassCotaught, shouldIgnoreGradeConflict, formatGradeDisplayCompact } from "@/lib/grade-utils"
 import { BLOCK_TYPE_OPEN, BLOCK_TYPE_STUDY_HALL, isOpenBlock, isStudyHall, isScheduledClass, isOccupiedBlock, entryIsOpen, entryIsOccupied, entryIsScheduledClass, isFullTime, setOpenBlockLabel, recalculateOptionStats, getFirstGradeEntry, isMultipleEntryCell, type LunchContext, getTeacherLunchCandidates, designateTeacherLunch } from "@/lib/schedule-utils"
@@ -572,21 +572,77 @@ export default function HistoryDetailPage() {
     return map
   }, [timetableTemplate, gradesData])
 
+  // Labels for a grade's unavailable (non-teachable, non-lunch) blocks, keyed
+  // by grade display name: what the grade actually does in that window per its
+  // break/transition rows (e.g. K-5's Block 9 -> "End of Day Meeting / SEL").
+  // Blocks without an entry render as a plain dash. Empty on legacy quarters.
+  const unavailableLabelsByGrade = useMemo(() => {
+    const map: Record<string, Record<number, string>> = {}
+    if (!timetableTemplate) return map
+    for (const g of gradesData) {
+      map[g.display_name] = getUnavailableBlockLabelsForGrade(timetableTemplate, g.id)
+    }
+    return map
+  }, [timetableTemplate, gradesData])
+
+  // Blocks each teacher could ever hold a CLASS in (per class: intersection
+  // of its grades' teachable blocks; per teacher: union over their classes),
+  // from the generation's classes snapshot. An idle cell outside a teacher's
+  // set is not schedulable free time (e.g. a K-5-only teacher at Block 9
+  // after K-5 surrendered it): teacher grids render it "N/A" instead of OPEN,
+  // and stats recalculation excludes it from open/back-to-back counts —
+  // matching both solvers. Teachers whose union covers every block are
+  // omitted (no filtering). Empty without a template or classes snapshot.
+  const teacherUsableBlocks = useMemo(() => {
+    const map: Record<string, number[]> = {}
+    if (!timetableTemplate) return map
+    const snapshot = generation?.stats?.classes_snapshot
+    if (!snapshot || snapshot.length === 0) return map
+    const union = new Map<string, Set<number>>()
+    for (const c of snapshot) {
+      if (!c.teacher_name) continue
+      let cset = union.get(c.teacher_name)
+      if (!cset) {
+        cset = new Set<number>()
+        union.set(c.teacher_name, cset)
+      }
+      let classBlocks = templateBlocks
+      for (const g of c.grades || []) {
+        const teachable = teachableBlocksByGrade[g.display_name]
+        if (teachable) classBlocks = classBlocks.filter(b => teachable.includes(b))
+      }
+      for (const b of classBlocks) cset.add(b)
+    }
+    for (const [teacher, set] of union) {
+      if (set.size === templateBlocks.length) continue
+      map[teacher] = [...set].sort((a, b) => a - b)
+    }
+    return map
+  }, [timetableTemplate, generation?.stats?.classes_snapshot, teachableBlocksByGrade, templateBlocks])
+
   // Lunch context for stats recalculation. Defined only when the template
   // actually masks some grade's blocks (per-grade lunch windows) — then every
   // teacher gets a designated daily Lunch block that is excluded from open /
   // back-to-back counts. Passed to recalculateOptionStats at every call site
   // so post-edit stats match the solvers' lunch-aware stats. Undefined on
-  // legacy/unmasked quarters (recalc behaves exactly as before).
+  // legacy/unmasked quarters (recalc behaves exactly as before). Carries the
+  // per-teacher class-usable blocks so idle cells at unusable blocks are
+  // likewise excluded (parity with both solvers).
   const lunchContext = useMemo<LunchContext | undefined>(() => {
     if (!timetableTemplate) return undefined
     const hasMasking = Object.values(teachableBlocksByGrade).some(
       tb => tb.length < templateBlocks.length
     )
     return hasMasking
-      ? { teachableBlocksByGrade, blocks: templateBlocks, lunchBlocksByGrade }
+      ? {
+          teachableBlocksByGrade,
+          blocks: templateBlocks,
+          lunchBlocksByGrade,
+          usableBlocksByTeacher:
+            Object.keys(teacherUsableBlocks).length > 0 ? teacherUsableBlocks : undefined,
+        }
       : undefined
-  }, [timetableTemplate, teachableBlocksByGrade, templateBlocks, lunchBlocksByGrade])
+  }, [timetableTemplate, teachableBlocksByGrade, templateBlocks, lunchBlocksByGrade, teacherUsableBlocks])
 
   // Legal double-period block pairs per grade, keyed by grade DISPLAY NAME
   // (same convention as teachableBlocksByGrade). Empty per grade / overall when
@@ -606,6 +662,20 @@ export default function HistoryDetailPage() {
     const map: Record<string, [number, number][]> = {}
     for (const g of gradesData) {
       map[g.display_name] = getBlockConflictsForGrade(timetableTemplate, g.id)
+    }
+    return map
+  }, [timetableTemplate, gradesData])
+
+  // A grade's true bell time per block, from its RESOLVED template rows,
+  // keyed by grade display name (e.g. post-restructure K-5: {8: "1:40-2:25"}
+  // while 6th-12th carry {8: "1:20-2:00"}). Grade grids show these under the
+  // row headers so every row is truthful per grade; teacher grids use them
+  // for straddling-class time labels. Empty on legacy quarters.
+  const blockTimesByGrade = useMemo(() => {
+    const map: Record<string, Record<number, string>> = {}
+    if (!timetableTemplate) return map
+    for (const g of gradesData) {
+      map[g.display_name] = getBlockTimesForGrade(timetableTemplate, g.id)
     }
     return map
   }, [timetableTemplate, gradesData])
@@ -2757,7 +2827,8 @@ export default function HistoryDetailPage() {
       timetableTemplate ? templateBlocks : undefined,
       timetableTemplate ? teachableBlocksByGrade : undefined,
       timetableTemplate ? solverGradeBlockConflicts : undefined,
-      timetableTemplate ? lunchBlocksByGrade : undefined
+      timetableTemplate ? lunchBlocksByGrade : undefined,
+      timetableTemplate && Object.keys(teacherUsableBlocks).length > 0 ? teacherUsableBlocks : undefined
     )
 
     if (!result.success) {
@@ -8009,6 +8080,8 @@ export default function HistoryDetailPage() {
                       blocks={templateBlocks}
                       lunchContext={lunchContext}
                       blockConflictsByGrade={timetableTemplate ? gradeBlockConflictsByGrade : undefined}
+                      blockTimesByGrade={timetableTemplate ? blockTimesByGrade : undefined}
+                      usableBlocksByTeacher={timetableTemplate ? teacherUsableBlocks : undefined}
                     />
                   ))
               : Object.entries(publicOption.gradeSchedules)
@@ -8023,6 +8096,8 @@ export default function HistoryDetailPage() {
                       blocks={templateBlocks}
                       lunchBlocksByGrade={lunchBlocksByGrade}
                       teachableBlocksByGrade={timetableTemplate ? teachableBlocksByGrade : undefined}
+                      unavailableLabelsByGrade={timetableTemplate ? unavailableLabelsByGrade : undefined}
+                      blockTimesByGrade={timetableTemplate ? blockTimesByGrade : undefined}
                     />
                   ))
             }
@@ -9829,6 +9904,8 @@ export default function HistoryDetailPage() {
                                 blocks={templateBlocks}
                                 lunchContext={lunchContext}
                                 blockConflictsByGrade={timetableTemplate ? gradeBlockConflictsByGrade : undefined}
+                                blockTimesByGrade={timetableTemplate ? blockTimesByGrade : undefined}
+                                usableBlocksByTeacher={timetableTemplate ? teacherUsableBlocks : undefined}
                               />
                               {/* Unplaced floating blocks from this teacher */}
                               {freeformMode && teacherFloatingBlocks.length > 0 && (
@@ -9917,6 +9994,8 @@ export default function HistoryDetailPage() {
                             blocks={templateBlocks}
                             lunchBlocksByGrade={lunchBlocksByGrade}
                             teachableBlocksByGrade={timetableTemplate ? teachableBlocksByGrade : undefined}
+                            unavailableLabelsByGrade={timetableTemplate ? unavailableLabelsByGrade : undefined}
+                            blockTimesByGrade={timetableTemplate ? blockTimesByGrade : undefined}
                           />
                         ))}
                 </div>

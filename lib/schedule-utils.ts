@@ -570,6 +570,18 @@ export interface LunchContext {
    * afternoon block). Absent = legacy derivation from teachableBlocksByGrade.
    */
   lunchBlocksByGrade?: Record<string, number[]>
+  /**
+   * Blocks each teacher could ever hold a CLASS in (per class: intersection
+   * of its grades' teachable blocks; per teacher: union over their classes),
+   * keyed by teacher name. An idle (empty/OPEN) cell at a block OUTSIDE the
+   * teacher's set is not schedulable free time — e.g. a K-5-only teacher
+   * during Block 9 after K-5 surrendered it — so it is not counted as open
+   * and never forms a back-to-back pair, exactly like the designated lunch.
+   * Study halls at such blocks still count normally (supervision is real).
+   * A teacher missing from the map gets no filtering. Both solvers apply the
+   * same rule internally; this keeps page-recalculated stats in parity.
+   */
+  usableBlocksByTeacher?: Record<string, number[]>
 }
 
 /**
@@ -706,6 +718,10 @@ export function recalculateOptionStats(option: ScheduleOption, lunchContext?: Lu
     // Candidate lunch windows for this teacher; [] disables lunch handling
     // for this teacher (legacy callers and legacy quarters stay byte-identical).
     const lunchCandidates = lunchContext ? getTeacherLunchCandidates(schedule, lunchContext) : []
+    // Blocks this teacher could ever hold a class in; null = no filtering
+    // (legacy callers, or teacher missing from the map).
+    const usableList = lunchContext?.usableBlocksByTeacher?.[stat.teacher]
+    const usable = usableList ? new Set(usableList) : null
     let teaching = 0, studyHall = 0, open = 0, backToBackIssues = 0
 
     for (const day of DAYS_ORDER) {
@@ -717,6 +733,10 @@ export function recalculateOptionStats(option: ScheduleOption, lunchContext?: Lu
         const entry = schedule?.[day]?.[block]
         if (block === lunchBlock) {
           // Designated lunch: neither open nor used, and it breaks OPEN chains
+          prevWasOpen = false
+        } else if ((!entry || isOpenBlock(entry[1])) && usable && !usable.has(block)) {
+          // Idle cell at a class-unusable block: not schedulable free time —
+          // neither open nor part of a back-to-back pair (mirrors both solvers)
           prevWasOpen = false
         } else if (!entry || isOpenBlock(entry[1])) {
           open++

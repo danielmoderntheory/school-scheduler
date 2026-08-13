@@ -37,6 +37,11 @@ interface ScheduleGridProps {
   // the grade surrendered, like K-5's Block 9) and renders as a muted, inert
   // dash. Absent prop, or a grade missing from the map = current behavior.
   teachableBlocksByGrade?: Record<string, number[]>
+  // Grade view only: labels for unavailable cells (grade display name ->
+  // block number -> what the grade does in that window per its template rows,
+  // e.g. K-5's Block 9 -> "End of Day Meeting / SEL"). A labeled unavailable
+  // cell shows the label instead of the plain dash; still muted and inert.
+  unavailableLabelsByGrade?: Record<string, Record<number, string>>
   // Teacher view only: per-grade cross-block conflicts from the timetable
   // template (grade display name -> [block, conflictingBlock] pairs; real-time
   // window overlaps, e.g. K-5's shifted last class at Block 8 running into the
@@ -45,6 +50,20 @@ interface ScheduleGridProps {
   // inert — the teacher is still mid-class then, not free. Absent = current
   // behavior.
   blockConflictsByGrade?: Record<string, [number, number][]>
+  // Teacher view only: block time strings per grade (grade display name ->
+  // block number -> the grade's template row time, e.g. K-5's Block 8 ->
+  // "1:40-2:25"). Used to render a straddling class's true time range on its
+  // source cell and the "B8 until 2:25" label on the continuation cell.
+  // Absent = generic fallback labels.
+  blockTimesByGrade?: Record<string, Record<number, string>>
+  // Teacher view only: blocks each teacher could ever hold a class in
+  // (teacher name -> union over their classes of the intersection of each
+  // class's grades' teachable blocks). An idle cell OUTSIDE the teacher's
+  // set — e.g. a K-5-only teacher at Block 9 after K-5 surrendered it — is
+  // not schedulable free time: it renders as an inert muted "N/A" instead of
+  // OPEN. Scheduled content (incl. study halls) always wins. Absent, or a
+  // teacher missing from the map = current behavior.
+  usableBlocksByTeacher?: Record<string, number[]>
   // Teacher view only: lunch context for the quarter (per-grade teachable
   // blocks + template block list). When present, each teacher-day's designated
   // Lunch block (the same designation the stats layer uses) renders with the
@@ -97,7 +116,10 @@ export function ScheduleGrid({
   blocks = LEGACY_BLOCKS,
   lunchBlocksByGrade,
   teachableBlocksByGrade,
+  unavailableLabelsByGrade,
   blockConflictsByGrade,
+  blockTimesByGrade,
+  usableBlocksByTeacher,
   lunchContext,
   changeStatus,
   showCheckbox,
@@ -196,11 +218,12 @@ export function ScheduleGrid({
   // (prop absent, legacy quarter, or teacher with no parseable taught grades)
   // leaves the map empty and rendering identical to today.
   const teacherLunchByDay: Record<string, number | null> = {}
+  let teacherLunchCandidates: number[] = []
   if (type === "teacher" && lunchContext) {
-    const lunchCandidates = getTeacherLunchCandidates(schedule as TeacherSchedule, lunchContext)
-    if (lunchCandidates.length > 0) {
+    teacherLunchCandidates = getTeacherLunchCandidates(schedule as TeacherSchedule, lunchContext)
+    if (teacherLunchCandidates.length > 0) {
       for (const day of DAYS) {
-        teacherLunchByDay[day] = designateTeacherLunch((schedule as TeacherSchedule)[day], lunchCandidates, blocks)
+        teacherLunchByDay[day] = designateTeacherLunch((schedule as TeacherSchedule)[day], teacherLunchCandidates, blocks)
       }
     }
   }
@@ -263,7 +286,10 @@ export function ScheduleGrid({
   // up in freeform mode no longer blocks (its window is being vacated).
   // Display-level only — solvers and save-time validation enforce the rule;
   // stats treatment of blocked windows is deliberately unchanged here.
-  function getConflictBlockerAt(day: string, block: number): [string, string] | null {
+  function getConflictBlockerAt(
+    day: string,
+    block: number
+  ): { entry: [string, string]; grade: string; sourceBlock: number } | null {
     if (type !== "teacher" || !blockConflictsByGrade) return null
     const { entry } = getCellContent(day, block)
     const cellType = getCellType(entry)
@@ -275,10 +301,65 @@ export function ScheduleGrid({
         const { entry: src } = getCellContent(day, a)
         if (!src || !isScheduledClass(src[1])) continue
         if (freeformMode && isPickedUpCell(day, a)) continue
-        if (parseGradeDisplayToNames(src[0], gradeNames).includes(g)) return src
+        if (parseGradeDisplayToNames(src[0], gradeNames).includes(g)) {
+          return { entry: src, grade: g, sourceBlock: a }
+        }
       }
     }
     return null
+  }
+
+  // The grade-scoped template time of a straddling class, and its end time.
+  // e.g. blockTimesByGrade["4th Grade"][8] = "1:40-2:25" -> end "2:25".
+  // Returns nulls when the map/time is absent — callers fall back to generic
+  // wording ("B8 continues" / "runs into this block").
+  function getStraddleTime(grade: string, block: number): { range: string | null; end: string | null } {
+    const raw = blockTimesByGrade?.[grade]?.[block]
+    if (!raw) return { range: null, end: null }
+    const parts = raw.split("-")
+    const end = parts.length === 2 ? parts[1].trim() : null
+    return { range: raw.replace(/\s*-\s*/, "–"), end: end || null }
+  }
+
+  // Teacher-view straddle SOURCE cell: this class triggers a conflict pair
+  // today (its continuation cell below is currently idle and rendering the
+  // "B8 until 2:25" state). Returns the class's true time range for subtext.
+  function getStraddleSourceRange(day: string, block: number): string | null {
+    if (type !== "teacher" || !blockConflictsByGrade) return null
+    const { entry } = getCellContent(day, block)
+    if (!entry || !isScheduledClass(entry[1])) return null
+    if (freeformMode && isPickedUpCell(day, block)) return null
+    const gradeNames = Object.keys(blockConflictsByGrade)
+    for (const g of parseGradeDisplayToNames(entry[0], gradeNames)) {
+      for (const [a, b] of blockConflictsByGrade[g] || []) {
+        if (a !== block) continue
+        const blocker = getConflictBlockerAt(day, b)
+        if (blocker && blocker.sourceBlock === block) {
+          return getStraddleTime(g, block).range
+        }
+      }
+    }
+    return null
+  }
+
+  // Teacher-view class-unusable cells: no class this teacher teaches can ever
+  // meet at this block (e.g. a K-5-only teacher at Block 9 after K-5
+  // surrendered it). Idle cells only — scheduled content (incl. study halls,
+  // which may legitimately sit at such blocks) and pending freeform
+  // placements always win. Lunch designation and conflict-blocked states take
+  // precedence (both are more specific). No usable-blocks entry = never.
+  function isTeacherUnavailableCell(day: string, block: number): boolean {
+    if (type !== "teacher" || !usableBlocksByTeacher) return false
+    const usable = usableBlocksByTeacher[name]
+    if (!usable || usable.length === 0 || usable.includes(block)) return false
+    // A lunch-candidate window is free time by design (e.g. a K-5-only
+    // teacher's Block 5): it renders as Lunch/labeled-OPEN, never N/A.
+    if (teacherLunchCandidates.includes(block)) return false
+    if (freeformMode && hasPendingPlacement(day, block)) return false
+    const { entry } = getCellContent(day, block)
+    const cellType = getCellType(entry)
+    if (cellType !== "empty" && cellType !== "open") return false
+    return !isConflictBlockedCell(day, block)
   }
 
   // Inert variant of the above for styling/click guards: a pending freeform
@@ -344,6 +425,8 @@ export function ScheduleGrid({
     if (type !== "teacher") return false
     // A conflict-blocked window is not a target: the teacher is still in class
     if (isConflictBlockedCell(day, block)) return false
+    // A class-unusable window is not a target: nothing can ever meet there
+    if (isTeacherUnavailableCell(day, block)) return false
     // Picked-up cells are valid targets (they're essentially empty now)
     if (isPickedUpCell(day, block)) return true
     const { entry } = getCellContent(day, block)
@@ -362,9 +445,21 @@ export function ScheduleGrid({
       return "bg-slate-100/60"
     }
     // Conflict-blocked cells (teacher view) are inert: still teaching a class
-    // whose window runs into this block. Pending freeform placements are
-    // excluded above so they keep their normal styling and stay visible.
+    // whose window runs into this block. Tinted like the class cell above so
+    // the pair reads as one continuous engagement. Pending freeform placements
+    // are excluded above so they keep their normal styling and stay visible.
     if (isConflictBlockedCell(day, block)) {
+      return "bg-green-50/70"
+    }
+    // Class-unusable cells (teacher view) are inert: no class this teacher
+    // teaches can ever meet at this block — not schedulable free time. One
+    // exception: a STUDY HALL may legitimately sit here (supervision is not
+    // teaching one of their classes), so a valid manual-study-hall target
+    // keeps its target affordance instead of the muted treatment.
+    if (isTeacherUnavailableCell(day, block)) {
+      if (manualStudyHallMode && isValidTarget(day, block)) {
+        return "ring-2 ring-inset ring-emerald-500 bg-emerald-100 cursor-pointer hover:bg-emerald-200"
+      }
       return "bg-slate-100/60"
     }
 
@@ -486,6 +581,12 @@ export function ScheduleGrid({
     // is still mid-class there. (Cells holding a pending placement are not
     // "blocked" — clicking them still unplaces as usual.)
     if (isConflictBlockedCell(day, block)) return
+    // Class-unusable windows (teacher view) are not clickable: no class of
+    // this teacher's can meet there, so there is nothing to place, swap, or
+    // label. Exception: a study hall CAN sit there, so a valid manual-study-
+    // hall target stays clickable. (Pending placements unplace as usual.)
+    if (isTeacherUnavailableCell(day, block)
+        && !(manualStudyHallMode && isValidTarget(day, block))) return
 
     // Handle freeform mode
     if (freeformMode && type === "teacher") {
@@ -651,6 +752,15 @@ export function ScheduleGrid({
             <tr key={block} className="border-b last:border-b-0">
               <td className="p-1.5 font-medium text-muted-foreground bg-muted/30 whitespace-nowrap text-xs">
                 B{block}
+                {/* Grade view: this grade's true bell time for the block from
+                    its resolved template row — K-5's B8 reads 1:40–2:25 while
+                    6th-12th read 1:20–2:00. No resolved row (e.g. K-5's
+                    surrendered B9) or no template = bare header (legacy). */}
+                {type === "grade" && blockTimesByGrade?.[name]?.[block] && (
+                  <div className="text-[9px] font-normal leading-tight text-muted-foreground/70">
+                    {blockTimesByGrade[name][block].replace(/\s*-\s*/, "–")}
+                  </div>
+                )}
               </td>
               {DAYS.map((day) => {
                 const { entry, isMultiple } = getCellContent(day, block)
@@ -733,7 +843,21 @@ export function ScheduleGrid({
                         )
                       }
                       if (isUnavailableCell(day, block)) {
-                        // Grade-view unavailable cell: block not on this grade's timetable
+                        // Grade-view unavailable cell: block not on this grade's
+                        // timetable. When the template says what the grade does
+                        // in this window (break/SEL/meeting row), show that
+                        // label; otherwise a plain dash.
+                        const unavailableLabel = unavailableLabelsByGrade?.[name]?.[block]
+                        if (unavailableLabel) {
+                          return (
+                            <span
+                              className="block max-w-full truncate px-1 text-[10px] italic text-slate-500"
+                              title={unavailableLabel}
+                            >
+                              {unavailableLabel}
+                            </span>
+                          )
+                        }
                         return (
                           <span
                             className="text-[10px] text-slate-400"
@@ -743,24 +867,6 @@ export function ScheduleGrid({
                           </span>
                         )
                       }
-                      {
-                        // Teacher-view conflict-blocked cell: still teaching a
-                        // class whose window runs into this block. Checked
-                        // before the lunch/OPEN branches so no "Lunch" label or
-                        // editable OPEN affordance appears on a window the
-                        // teacher isn't actually free in.
-                        const blocker = !placement && !pickedUp ? getConflictBlockerAt(day, block) : null
-                        if (blocker) {
-                          return (
-                            <span
-                              className="text-[10px] italic text-slate-400"
-                              title={`Still in class — ${formatGradeDisplayCompact(blocker[0])} ${blocker[1]} runs into this block`}
-                            >
-                              in class
-                            </span>
-                          )
-                        }
-                      }
                       if (isTeacherLunchCell(day, block)) {
                         // Teacher-view designated lunch label. Replaces only
                         // the OPEN/empty idle content — the cell's td keeps
@@ -769,6 +875,44 @@ export function ScheduleGrid({
                         return (
                           <span className="text-[10px] italic text-amber-700/70">
                             Lunch
+                          </span>
+                        )
+                      }
+                      {
+                        // Teacher-view conflict-blocked cell: still teaching a
+                        // class whose window runs into this block ("B8 until
+                        // 2:25"). Checked before the N/A and OPEN branches so
+                        // no editable OPEN affordance appears on a window the
+                        // teacher isn't actually free in.
+                        const blocker = !placement && !pickedUp ? getConflictBlockerAt(day, block) : null
+                        if (blocker) {
+                          const { end } = getStraddleTime(blocker.grade, blocker.sourceBlock)
+                          const label = end
+                            ? `B${blocker.sourceBlock} until ${end}`
+                            : `B${blocker.sourceBlock} continues`
+                          const title = end
+                            ? `${formatGradeDisplayCompact(blocker.entry[0])} ${blocker.entry[1]} runs until ${end}`
+                            : `${formatGradeDisplayCompact(blocker.entry[0])} ${blocker.entry[1]} runs into this block`
+                          return (
+                            <span
+                              className="block max-w-full truncate px-0.5 text-[10px] italic text-green-800/60"
+                              title={title}
+                            >
+                              {label}
+                            </span>
+                          )
+                        }
+                      }
+                      if (isTeacherUnavailableCell(day, block)) {
+                        // Teacher-view class-unusable cell: nothing this
+                        // teacher teaches can ever meet at this block, so it
+                        // is not real free time — inert, not OPEN.
+                        return (
+                          <span
+                            className="text-[10px] italic text-slate-400"
+                            title="No classes this teacher teaches can meet in this block"
+                          >
+                            N/A
                           </span>
                         )
                       }
@@ -953,6 +1097,11 @@ export function ScheduleGrid({
                         )
                       }
                       if (hasContent) {
+                        // Straddling class (teacher view): show its true time
+                        // range so the cell + its "B8 until 2:25" continuation
+                        // below read as one engagement. Only when the class
+                        // actually triggers a conflict pair today.
+                        const straddleRange = !placement ? getStraddleSourceRange(day, block) : null
                         return (
                           <div className="max-w-full overflow-hidden">
                             <div className="font-medium text-xs leading-tight truncate flex items-center justify-center" title={type === "teacher" ? displayPrimary : displaySecondary}>
@@ -963,6 +1112,11 @@ export function ScheduleGrid({
                               <span className="truncate">{type === "teacher" ? displaySecondary : displayPrimary}</span>
                               {isCotaught && <span className="text-teal-500 ml-1 flex-shrink-0">CO</span>}
                             </div>
+                            {straddleRange && (
+                              <div className="text-[9px] leading-tight text-green-800/60 truncate">
+                                {straddleRange}
+                              </div>
+                            )}
                           </div>
                         )
                       }

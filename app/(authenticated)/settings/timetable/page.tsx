@@ -425,11 +425,21 @@ export default function TimetableSettingsPage() {
                     />
                   </TableCell>
                   <TableCell>
-                    <EditableText
-                      value={row.label}
-                      onSave={(val) => updateRow(actualIdx, "label", val)}
-                      placeholder="e.g. Block 1"
-                    />
+                    <div className="flex items-center gap-2">
+                      <EditableText
+                        value={row.label}
+                        onSave={(val) => updateRow(actualIdx, "label", val)}
+                        placeholder="e.g. Block 1"
+                      />
+                      {(row.conflictsWith?.length ?? 0) > 0 && (
+                        <span
+                          className="shrink-0 rounded-full border border-amber-300 bg-amber-50 px-2 py-0.5 text-[10px] font-medium text-amber-800"
+                          title={`This window overlaps Block${row.conflictsWith!.length > 1 ? "s" : ""} ${row.conflictsWith!.join(", ")}: a teacher taking this block for these grades can hold nothing there that day. Set in the template data (conflictsWith) — keep it in sync if these times change.`}
+                        >
+                          overlaps B{row.conflictsWith!.join(", B")}
+                        </span>
+                      )}
+                    </div>
                   </TableCell>
                   <TableCell>
                     <Select
