@@ -108,10 +108,23 @@ export function getLunchBlocksForGrade(
       .map(row => row.time)
   )
   const lunch = new Set<number>()
+  const masked = new Set<number>()
   for (const row of template.rows) {
     if (row.type !== 'block' || typeof row.blockNumber !== 'number') continue
     if (teachable.has(row.blockNumber)) continue
+    masked.add(row.blockNumber)
     if (breakTimes.has(row.time)) lunch.add(row.blockNumber)
+  }
+  // Fallback: a grade with masked blocks but no time-matched break row (e.g.
+  // a band-crossing combined grade like 8th-9th or an elective span, whose
+  // Lunch rows are scoped to single bands only) keeps the legacy assumption
+  // that every masked block is a lunch window. Without this, such grades
+  // would derive NO lunch blocks and silently lose the teacher-lunch
+  // constraint (and flip Lunch cells to unavailable dashes). Grades that DO
+  // resolve a real lunch row (e.g. K-5 post-restructure: lunch [5], Block 9
+  // surrendered) are unaffected — their non-lunch masked blocks stay out.
+  if (lunch.size === 0 && masked.size > 0) {
+    return [...masked].sort((a, b) => a - b)
   }
   return [...lunch].sort((a, b) => a - b)
 }

@@ -603,9 +603,12 @@ export function getTeacherLunchCandidates(
 
   const candidates = new Set<number>()
   for (const grade of taughtGrades) {
-    if (lunchContext.lunchBlocksByGrade) {
+    if (lunchContext.lunchBlocksByGrade && grade in lunchContext.lunchBlocksByGrade) {
       // Explicit template-derived lunch blocks win (they distinguish lunch
-      // from other masked blocks, e.g. a surrendered afternoon block)
+      // from other masked blocks, e.g. a surrendered afternoon block).
+      // A grade MISSING from the map falls through to the masked-complement
+      // path below — defense in depth so an incomplete map can only ever
+      // over-approximate lunch, never drop a teacher's windows entirely.
       for (const block of lunchContext.lunchBlocksByGrade[grade] ?? []) {
         if (lunchContext.blocks.includes(block)) candidates.add(block)
       }

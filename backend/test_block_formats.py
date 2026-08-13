@@ -1488,6 +1488,89 @@ def test_24():
 test_24()
 
 
+# ================================================================ TEST 25
+print("\nTEST 25 — co-taught straddling classes: reverse checks use the")
+print("teacher's own schedule (grade_schedules records only ONE co-teacher)")
+def test_25():
+    import copy
+    from solver import add_study_halls, redistribute_open_blocks
+    set_blocks(NINE_BLOCKS)
+    B9 = list(solver.BLOCKS)
+
+    # T1 and T2 co-teach 1st Grade Math at Mon block 3 — but grade_schedules
+    # can only record one of them (T1). The reverse-direction checks must
+    # still protect T2, whose own teacher schedule holds the class.
+    CONF = {'1st Grade': [[3, 9]]}
+
+    # (a) redistribution: T2 has a BTB hole (Mon 8,9); the movable 10th-grade
+    # class can only land at Mon 9 (10th is grade-blocked at Mon 8). Filling
+    # Mon 9 while T2 co-teaches the straddler at Mon 3 must be refused.
+    def setup_a():
+        ts = {'T2': {d: {b: ['Filler', 'Class'] for b in B9} for d in DAYS}}
+        ts['T2']['Mon'][3] = ['1st Grade', 'Math']       # co-taught straddler
+        ts['T2']['Mon'][8] = ['', 'OPEN']
+        ts['T2']['Mon'][9] = ['', 'OPEN']                # BTB hole (8,9)
+        ts['T2']['Tues'][4] = ['10th Grade', 'Chem']     # movable class
+        gs = {
+            '1st Grade': {d: {b: None for b in B9} for d in DAYS},
+            '10th Grade': {d: {b: None for b in B9} for d in DAYS},
+        }
+        gs['1st Grade']['Mon'][3] = ['T1', 'Math']       # records the OTHER teacher
+        gs['10th Grade']['Tues'][4] = ['T2', 'Chem']
+        gs['10th Grade']['Mon'][8] = ['Other', 'Sci']    # 8 blocked for 10th
+        return ts, gs
+
+    ts_c, gs_c = setup_a()
+    redistribute_open_blocks(ts_c, gs_c, ['T2'])
+    check("(a) control: without conflicts the class moves into Mon 9",
+          ts_c['T2']['Mon'][9] == ['10th Grade', 'Chem'])
+    ts_r, gs_r = setup_a()
+    redistribute_open_blocks(ts_r, gs_r, ['T2'], grade_block_conflicts=CONF)
+    check("(a) with conflicts the Mon-9 fill is refused for the co-teacher",
+          ts_r['T2']['Mon'][9] != ['10th Grade', 'Chem'])
+
+    # (b) study halls: T2's only open slot is Mon 9; 7th Grade is free only
+    # there. T2 co-teaches the straddler at Mon 3 (grade_schedules says T1).
+    def setup_b():
+        ts = {'T2': {d: {b: ['Filler', 'Class'] for b in B9} for d in DAYS}}
+        ts['T2']['Mon'][3] = ['1st Grade', 'Math']
+        ts['T2']['Mon'][9] = None
+        gs = {
+            '1st Grade': {d: {b: None for b in B9} for d in DAYS},
+            '7th Grade': {d: {b: ['Someone', 'Class'] for b in B9} for d in DAYS},
+        }
+        gs['1st Grade']['Mon'][3] = ['T1', 'Math']
+        gs['7th Grade']['Mon'][9] = None
+        return ts, gs
+    sh_rules = [{'rule_key': 'study_hall_grades', 'enabled': True,
+                 'config': {'grades': ['7th Grade']}},
+                {'rule_key': 'study_hall_distribution', 'enabled': True, 'config': None}]
+    ts_bc, gs_bc = setup_b()
+    a_ctrl = add_study_halls(ts_bc, gs_bc, ['T2'], rules=sh_rules,
+                             grades=['1st Grade', '7th Grade'])
+    check("(b) control: without conflicts the study hall takes T2's Mon 9",
+          any(x.teacher == 'T2' and x.day == 'Mon' and x.block == 9 for x in a_ctrl))
+    ts_bd, gs_bd = setup_b()
+    a_conf = add_study_halls(ts_bd, gs_bd, ['T2'], rules=sh_rules,
+                             grades=['1st Grade', '7th Grade'],
+                             grade_block_conflicts=CONF)
+    check("(b) with conflicts T2's Mon-9 study hall is refused",
+          all(not (x.teacher == 'T2' and x.day == 'Mon' and x.block == 9)
+              for x in a_conf)
+          and ts_bd['T2']['Mon'][9] is None)
+
+    # (c) lunch defense-in-depth: a taught grade MISSING from an explicit
+    # grade_lunch_blocks map falls back to its masked complement instead of
+    # silently contributing no windows.
+    k5_masks = {'1st Grade': [1, 2, 3, 4, 6, 7, 8]}
+    sess = build_sessions(class_objs([make_class('Oscar', ['1st Grade'], 'Math', 3)]),
+                          grades=GRADES, grade_teachable_slots=slot_masks(k5_masks))
+    fallback = compute_teacher_lunch_candidates(sess, k5_masks, {'2nd Grade': [6]})
+    check("(c) grade absent from explicit lunch map keeps masked-complement windows",
+          fallback.get('Oscar') == {5, 9}, str(fallback))
+test_25()
+
+
 fails = [n for n, ok in results if not ok]
 print(f"RESULT: {len(results) - len(fails)}/{len(results)} passed"
       + (f"; FAILED: {fails}" if fails else ""))

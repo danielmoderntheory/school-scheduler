@@ -647,6 +647,59 @@ export default function HistoryDetailPage() {
     return null
   }
 
+  // True when placing an entry into (day, block) of this teacher's schedule
+  // would create a cross-block time overlap (same semantics as
+  // checkBlockOverlapsCore, but as a per-candidate predicate so interactive
+  // pickers never offer a violating cell).
+  // placedGradeDisplay: grade display of the entry being placed — its own
+  // straddle window must be free (forward direction); pass null for entries
+  // that never straddle (e.g. an OPEN placeholder).
+  // vacated: "day|block" slots emptied by the same move (they no longer count
+  // as occupied).
+  function wouldCreateBlockOverlap(
+    schedule: TeacherSchedule | undefined,
+    day: string,
+    block: number,
+    placedGradeDisplay: string | null,
+    vacated?: Set<string>
+  ): boolean {
+    if (!timetableTemplate) return false
+    const gradeNames = Object.keys(gradeBlockConflictsByGrade)
+    if (gradeNames.length === 0) return false
+
+    const occupantAt = (b: number): [string, string] | null => {
+      if (vacated?.has(`${day}|${b}`)) return null
+      const e = schedule?.[day]?.[b]
+      return e && e[1] ? (e as [string, string]) : null
+    }
+
+    // Forward: the placed entry straddles [block -> c]; anything at c (class
+    // or study hall) is a real double-booking.
+    if (placedGradeDisplay) {
+      for (const g of parseGradeDisplayToNames(placedGradeDisplay, gradeNames)) {
+        for (const [b, c] of gradeBlockConflictsByGrade[g] || []) {
+          if (b !== block) continue
+          const other = occupantAt(c)
+          if (other && (isScheduledClass(other[1]) || isStudyHall(other[1]))) return true
+        }
+      }
+    }
+
+    // Reverse: an existing straddling CLASS at b runs into `block`'s window
+    // (study halls never straddle — consistent with checkBlockOverlapsCore).
+    for (const g of gradeNames) {
+      for (const [b, c] of gradeBlockConflictsByGrade[g] || []) {
+        if (c !== block) continue
+        const e = occupantAt(b)
+        if (e && isScheduledClass(e[1]) && parseGradeDisplayToNames(e[0], gradeNames).includes(g)) {
+          return true
+        }
+      }
+    }
+
+    return false
+  }
+
   // parseClassesFromSnapshot defaults availableBlocks to the legacy [1..5]. On a
   // template-driven quarter that default would read as a restriction to blocks
   // 1-5, so widen classes with no explicit available_blocks restriction to all
@@ -2844,6 +2897,9 @@ export default function HistoryDetailPage() {
           if (gradeBusySlots.has(`${day}|${block}`)) continue
           // Block must be teachable for the group's grade(s) (not its band's lunch)
           if (findUnteachableGradeForBlock(grade, block)) continue
+          // No cross-block time overlap (teacher's straddling class runs into
+          // this window, or this straddling-grade study hall's window is busy)
+          if (wouldCreateBlockOverlap(schedule, day, block, grade)) continue
 
           targets.push({ teacher, day, block, grade: '', subject: '' })
         }
@@ -2856,7 +2912,7 @@ export default function HistoryDetailPage() {
     } else {
       toast(`${targets.length} valid target${targets.length !== 1 ? 's' : ''} found`, { icon: <Crosshair className="h-4 w-4 text-violet-500" /> })
     }
-  }, [manualStudyHallMode, selectedStudyHallGroup, previewOption, generation?.options, viewingOption, excludedFromStudyHalls, studyHallMode, templateBlocks, teachableBlocksByGrade])
+  }, [manualStudyHallMode, selectedStudyHallGroup, previewOption, generation?.options, viewingOption, excludedFromStudyHalls, studyHallMode, templateBlocks, teachableBlocksByGrade, gradeBlockConflictsByGrade])
 
   function handleManualStudyHallPlace(teacher: string, day: string, block: number) {
     if (!selectedStudyHallGroup || !manualStudyHallMode) return
@@ -2897,6 +2953,13 @@ export default function HistoryDetailPage() {
     const lunchGrade = findUnteachableGradeForBlock(grade, block)
     if (lunchGrade) {
       toast.error(`Block ${block} is lunch for ${lunchGrade}`)
+      return
+    }
+
+    // Validate: no cross-block time overlap (a straddling class of this
+    // teacher runs into this window, or vice versa)
+    if (wouldCreateBlockOverlap(newTeacherSchedules[teacher], day, block, grade)) {
+      toast.error(`Time overlap: ${teacher} has a class whose real time runs into Block ${block} on ${day}`)
       return
     }
 
@@ -3136,6 +3199,7 @@ export default function HistoryDetailPage() {
       { name: 'Study hall coverage', key: 'study_hall_coverage' },
       { name: 'Fixed slot constraints', key: 'fixed_slot_violation' },
       { name: 'Availability constraints', key: 'availability_violation' },
+      { name: 'Block overlaps', key: 'block_overlap' },
       { name: 'Back-to-back blocks', key: 'back_to_back' },
       { name: 'Teacher lunch breaks', key: 'no_lunch' },
       { name: 'Double periods', key: 'double_period' },
@@ -3303,6 +3367,12 @@ export default function HistoryDetailPage() {
     const targets: CellLocation[] = []
     const schedules = swapWorkingSchedules?.teacherSchedules || selectedResult.teacherSchedules
 
+    // Grade display of the study hall being handed off (its straddle window,
+    // if any, must be free on the receiving teacher)
+    const shGradeDisplay = source.teacher
+      ? schedules[source.teacher]?.[source.day]?.[source.block]?.[0] ?? null
+      : null
+
     // For study hall: find OPEN blocks on eligible teachers at the SAME day/block
     // (the grade needs the study hall at this specific time, we're just changing the teacher)
     // For open: find all OPEN blocks (can swap OPEN with OPEN on any slot)
@@ -3317,7 +3387,8 @@ export default function HistoryDetailPage() {
 
         // Must be same day and block (grade needs study hall at this time)
         const entry = schedule[source.day]?.[source.block]
-        if (entry && isOpenBlock(entry[1])) {
+        if (entry && isOpenBlock(entry[1]) &&
+            !wouldCreateBlockOverlap(schedule, source.day, source.block, shGradeDisplay)) {
           targets.push({ teacher, day: source.day, block: source.block })
         }
       } else {
@@ -3397,6 +3468,10 @@ export default function HistoryDetailPage() {
         // Block must be teachable for all of the class's grades (not a band's lunch)
         if (findUnteachableGradeForBlock(sourceGradeDisplay, block)) continue
 
+        // No cross-block time overlap once the class lands here (its old slot vacates)
+        if (wouldCreateBlockOverlap(teacherSchedule, day, block, sourceGradeDisplay,
+            new Set([`${source.day}|${source.block}`]))) continue
+
         targets.push({ teacher, day, block, grade, subject })
       }
     }
@@ -3446,6 +3521,12 @@ export default function HistoryDetailPage() {
         if (findUnteachableGradeForBlock(sourceGradeDisplay, block)) continue
         const otherGradeDisplay = otherTeacherSchedule[day]?.[block]?.[0] || grade
         if (findUnteachableGradeForBlock(otherGradeDisplay, source.block)) continue
+
+        // No cross-block time overlap on either side of the swap
+        if (wouldCreateBlockOverlap(teacherSchedule, day, block, sourceGradeDisplay,
+            new Set([`${source.day}|${source.block}`]))) continue
+        if (wouldCreateBlockOverlap(otherTeacherSchedule, source.day, source.block, otherGradeDisplay,
+            new Set([`${day}|${block}`]))) continue
 
         // Target is in the OTHER teacher's schedule (where the swap target class is)
         targets.push({ teacher: otherTeacher, day, block, grade, subject: otherSubject })
@@ -3512,6 +3593,10 @@ export default function HistoryDetailPage() {
         // Block must be teachable for all of the class's grades (not a band's lunch)
         if (findUnteachableGradeForBlock(sourceGradeDisplay, block)) continue
 
+        // No cross-block time overlap once the class lands here (its old slot vacates)
+        if (wouldCreateBlockOverlap(teacherSchedule, day, block, sourceGradeDisplay,
+            new Set([`${source.day}|${source.block}`]))) continue
+
         targets.push({ grade: source.grade, day, block, teacher: source.teacher, subject: source.subject })
       }
     }
@@ -3564,6 +3649,12 @@ export default function HistoryDetailPage() {
         if (findUnteachableGradeForBlock(sourceGradeDisplay, block)) continue
         const otherGradeDisplay = otherTeacherSchedule[day]?.[block]?.[0] || source.grade
         if (findUnteachableGradeForBlock(otherGradeDisplay, source.block)) continue
+
+        // No cross-block time overlap on either side of the swap
+        if (wouldCreateBlockOverlap(teacherSchedule, day, block, sourceGradeDisplay,
+            new Set([`${source.day}|${source.block}`]))) continue
+        if (wouldCreateBlockOverlap(otherTeacherSchedule, source.day, source.block, otherGradeDisplay,
+            new Set([`${day}|${block}`]))) continue
 
         targets.push({ grade: source.grade, day, block, teacher: otherTeacher, subject: otherSubject })
       }

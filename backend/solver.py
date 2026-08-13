@@ -325,9 +325,13 @@ def compute_teacher_lunch_candidates(
     (BLOCKS minus the grade's teachable blocks). Correct for templates where
     lunch is the only masking, which is all pre-existing callers send.
 
-    Grades absent from the governing dict contribute no windows. Teachers
-    whose candidate set comes out empty (e.g. legacy 5-block requests, or
-    teachers of only unmasked grades) are omitted.
+    In explicit mode a grade MISSING from grade_lunch_blocks (but present in
+    grade_teachable_blocks) falls back to its legacy masked-complement
+    windows - defense in depth so an incomplete lunch map can only ever
+    over-approximate lunch, never silently drop a teacher's lunch
+    constraint. A grade present with an empty list contributes no windows.
+    Teachers whose candidate set comes out empty (e.g. legacy 5-block
+    requests, or teachers of only unmasked grades) are omitted.
     """
     blocks_set = set(BLOCKS)
     if grade_lunch_blocks:
@@ -335,7 +339,12 @@ def compute_teacher_lunch_candidates(
         for s in sessions:
             cset = candidates.setdefault(s.teacher, set())
             for g in s.grades:
-                cset |= set(grade_lunch_blocks.get(g) or []) & blocks_set
+                if g in grade_lunch_blocks:
+                    cset |= set(grade_lunch_blocks.get(g) or []) & blocks_set
+                else:
+                    mask = (grade_teachable_blocks or {}).get(g)
+                    if mask is not None:
+                        cset |= blocks_set - set(mask)
         return {t: c for t, c in candidates.items() if c}
     if not grade_teachable_blocks:
         return {}
@@ -1804,15 +1813,20 @@ def redistribute_open_blocks(teacher_schedules: dict, grade_schedules: dict,
             for p in grade_block_conflicts.get(g, []):
                 if len(p) == 2 and p[0] == block and occupied(p[1]):
                     return True
-        # Moved class lands inside a straddling class's window: some
-        # conflict-grade class of this teacher at p[0] makes `block` busy
+        # Moved class lands inside a straddling class's window: the teacher's
+        # own class at p[0] (covering conflict grade g) makes `block` busy.
+        # Scan teacher_schedules, NOT grade_schedules: grade_schedules keeps
+        # one teacher per slot, so a co-taught straddling class records only
+        # one of its teachers there and the other would slip through.
+        conflict_grade_names = set(grade_block_conflicts.keys())
         for g, conf_pairs in grade_block_conflicts.items():
-            gsched = grade_schedules.get(g, {}).get(day, {})
             for p in conf_pairs:
                 if len(p) != 2 or p[1] != block or (day, p[0]) in vacated:
                     continue
-                e = gsched.get(p[0])
-                if e and e[0] == teacher and e[1] not in ('OPEN', 'Study Hall'):
+                e = day_sched.get(p[0])
+                if not e or len(e) < 2 or e[1] in ('OPEN', 'Study Hall'):
+                    continue
+                if g in parse_grades_from_database(e[0], conflict_grade_names):
                     return True
         return False
 
@@ -2361,13 +2375,20 @@ def add_study_halls(teacher_schedules: dict, grade_schedules: dict,
                     # the supervisor through the conflicting window too
                     if grade_block_conflicts:
                         blocked = False
+                        # (i) scans the teacher's OWN schedule, not
+                        # grade_schedules: grade_schedules keeps one teacher
+                        # per slot, so a co-taught straddling class records
+                        # only one of its teachers there.
+                        conflict_grade_names = set(grade_block_conflicts.keys())
+                        sup_day_sched = teacher_schedules[teacher][day]
                         for cg, conf_pairs in grade_block_conflicts.items():
-                            gsched = grade_schedules.get(cg, {}).get(day, {})
                             for p in conf_pairs:
                                 if len(p) != 2 or p[1] != block:
                                     continue
-                                e = gsched.get(p[0])
-                                if e and e[0] == teacher and e[1] not in ('OPEN', 'Study Hall'):
+                                e = sup_day_sched.get(p[0])
+                                if not e or len(e) < 2 or e[1] in ('OPEN', 'Study Hall'):
+                                    continue
+                                if cg in parse_grades_from_database(e[0], conflict_grade_names):
                                     blocked = True
                                     break
                             if blocked:

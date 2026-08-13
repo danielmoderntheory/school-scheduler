@@ -273,7 +273,10 @@ function buildTeacherLunchInfo(
     const candidates = new Set<number>();
     for (const group of groups) {
       for (const g of group) {
-        if (activeGradeLunchBlocks) {
+        if (activeGradeLunchBlocks && activeGradeLunchBlocks.has(g)) {
+          // A grade MISSING from the lunch map falls through to the legacy
+          // masked-complement path — defense in depth so an incomplete map
+          // can only over-approximate lunch, never drop a teacher's windows.
           for (const b of activeGradeLunchBlocks.get(g) ?? []) candidates.add(b);
           continue;
         }
