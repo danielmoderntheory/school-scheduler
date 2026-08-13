@@ -759,6 +759,11 @@ export function ScheduleGrid({
                 {type === "grade" &&
                 (teachableBlocksByGrade?.[name]?.indexOf(block) ?? -1) >= 0 ? (
                   <>P{teachableBlocksByGrade![name].indexOf(block) + 1}</>
+                ) : type === "grade" && teachableBlocksByGrade?.[name] ? (
+                  // Non-period rows (lunch, surrendered blocks): the cell
+                  // content already says what happens here — a block number
+                  // from the other numbering system only confuses.
+                  null
                 ) : (
                   <>B{block}</>
                 )}
