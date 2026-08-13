@@ -750,31 +750,27 @@ export function ScheduleGrid({
         <tbody>
           {blocks.map((block) => (
             <tr key={block} className="border-b last:border-b-0">
-              <td className="p-1.5 font-medium text-muted-foreground bg-muted/30 whitespace-nowrap text-xs">
+              <td className="p-1.5 font-medium text-muted-foreground bg-muted/30 text-xs">
                 {/* Grade view: lead with the grade's own period count (its
                     position among this grade's teachable blocks — K-5 runs
-                    P1-P7, MS/HS P1-P8), keeping the global block number as a
-                    small cross-reference. Blocks outside the grade's day
+                    P1-P7, MS/HS P1-P8). Blocks outside the grade's day
                     (lunch, K-5's surrendered B9) and non-grade views keep the
                     plain block header. */}
                 {type === "grade" &&
                 (teachableBlocksByGrade?.[name]?.indexOf(block) ?? -1) >= 0 ? (
-                  <>
-                    P{teachableBlocksByGrade![name].indexOf(block) + 1}
-                    <span className="ml-1 text-[9px] font-normal text-muted-foreground/60">
-                      B{block}
-                    </span>
-                  </>
+                  <>P{teachableBlocksByGrade![name].indexOf(block) + 1}</>
                 ) : (
                   <>B{block}</>
                 )}
                 {/* Grade view: this grade's true bell time for the block from
                     its resolved template row — K-5's B8 reads 1:40–2:25 while
-                    6th-12th read 1:20–2:00. No resolved row (e.g. K-5's
-                    surrendered B9) or no template = bare header (legacy). */}
+                    6th-12th read 1:20–2:00. The zero-width space after the
+                    dash lets the range wrap onto two lines in narrow columns.
+                    No resolved row (e.g. K-5's surrendered B9) or no
+                    template = bare header (legacy). */}
                 {type === "grade" && blockTimesByGrade?.[name]?.[block] && (
                   <div className="text-[9px] font-normal leading-tight text-muted-foreground/70">
-                    {blockTimesByGrade[name][block].replace(/\s*-\s*/, "–")}
+                    {blockTimesByGrade[name][block].replace(/\s*-\s*/, "\u2013\u200b")}
                   </div>
                 )}
               </td>
