@@ -212,11 +212,37 @@ export function getBlockTimesForGrade(
 ): Record<number, string> {
   if (!template?.rows?.length) return {}
   const times: Record<number, string> = {}
-  for (const row of resolveRowsForGrade(template.rows, gradeId)) {
+  const resolved = resolveRowsForGrade(template.rows, gradeId)
+  const resolvedSet = new Set(resolved)
+  for (const row of resolved) {
     if (row.type !== 'block' || typeof row.blockNumber !== 'number') continue
     if (row.time && parseTimeRange(row.time)) {
       times[row.blockNumber] = row.time
     }
+  }
+  // Blocks the grade doesn't teach (its lunch, a surrendered block): show the
+  // time of what the grade actually does in that window — its overlapping
+  // break/transition row (Lunch 11:10-11:50, SEL 2:30-2:45) — so grade-view
+  // row headers keep a truthful time even without a block row.
+  for (const block of getTemplateBlocks(template)) {
+    if (times[block] !== undefined) continue
+    const blockRows = template.rows.filter(
+      row => row.type === 'block' && row.blockNumber === block
+    )
+    const sourceRow = blockRows.find(row => !resolvedSet.has(row)) ?? blockRows[0]
+    const blockRange = parseTimeRange(sourceRow?.time)
+    if (!blockRange) continue
+    let best: { time: string; overlap: number } | null = null
+    for (const row of resolved) {
+      if (row.type !== 'break' && row.type !== 'transition') continue
+      const range = parseTimeRange(row.time)
+      if (!range) continue
+      const overlap = Math.min(blockRange[1], range[1]) - Math.max(blockRange[0], range[0])
+      if (overlap > 0 && (!best || overlap > best.overlap)) {
+        best = { time: row.time, overlap }
+      }
+    }
+    if (best) times[block] = best.time
   }
   return times
 }
