@@ -62,6 +62,61 @@ export function getPairableBlocksForGrade(
 }
 
 /**
+ * Cross-block conflicts for a grade: [block, conflictingBlock] pairs from the
+ * grade's resolved block rows' `conflictsWith` fields. A pair [b, c] means the
+ * grade's block b runs at a real time overlapping block c's window, so a
+ * teacher teaching this grade at block b must have nothing at block c that
+ * day (and vice versa — the solvers enforce it symmetrically). Only conflicts
+ * naming real template blocks are emitted.
+ */
+export function getBlockConflictsForGrade(
+  template: Pick<TimetableTemplate, 'rows'> | null | undefined,
+  gradeId: string
+): [number, number][] {
+  if (!template?.rows?.length) return []
+  const templateBlocks = new Set(getTemplateBlocks(template))
+  const pairs: [number, number][] = []
+  for (const row of resolveRowsForGrade(template.rows, gradeId)) {
+    if (row.type !== 'block' || typeof row.blockNumber !== 'number') continue
+    for (const c of row.conflictsWith ?? []) {
+      if (typeof c === 'number' && c !== row.blockNumber && templateBlocks.has(c)) {
+        pairs.push([row.blockNumber, c])
+      }
+    }
+  }
+  return pairs
+}
+
+/**
+ * Non-teachable blocks that are the grade's lunch/break windows: block rows
+ * scoped away from the grade whose time window coincides with one of the
+ * grade's own break rows (time-string equality — paired rows in a template
+ * share the exact same time, e.g. Block 5 "11:10-11:50" / K-5 Lunch
+ * "11:10-11:50"). A non-teachable block WITHOUT such a break row is simply
+ * unavailable to the grade (e.g. a block the grade surrendered), not lunch —
+ * callers render those differently. Empty when there is no template.
+ */
+export function getLunchBlocksForGrade(
+  template: Pick<TimetableTemplate, 'rows'> | null | undefined,
+  gradeId: string
+): number[] {
+  if (!template?.rows?.length) return []
+  const teachable = new Set(getTeachableBlocksForGrade(template, gradeId))
+  const breakTimes = new Set(
+    resolveRowsForGrade(template.rows, gradeId)
+      .filter(row => row.type === 'break')
+      .map(row => row.time)
+  )
+  const lunch = new Set<number>()
+  for (const row of template.rows) {
+    if (row.type !== 'block' || typeof row.blockNumber !== 'number') continue
+    if (teachable.has(row.blockNumber)) continue
+    if (breakTimes.has(row.time)) lunch.add(row.blockNumber)
+  }
+  return [...lunch].sort((a, b) => a - b)
+}
+
+/**
  * Block numbers a specific grade can be scheduled into.
  * A block row scoped away from a grade (e.g. that band's lunch window) is not
  * teachable for that grade. Falls back to all template blocks when the grade

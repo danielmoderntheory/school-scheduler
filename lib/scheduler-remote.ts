@@ -40,6 +40,8 @@ export interface RemoteGeneratorOptions {
   blocks?: number[]; // Block numbers from the quarter's timetable template (absent = legacy [1..5])
   gradeTeachableBlocks?: Record<string, number[]>; // grade NAME -> teachable block numbers (absent = all blocks)
   gradeBlockPairs?: Record<string, [number, number][]>; // grade NAME -> consecutive block pairs legal for double periods
+  gradeBlockConflicts?: Record<string, [number, number][]>; // grade NAME -> [block, conflictingBlock] cross-block time overlaps
+  gradeLunchBlocks?: Record<string, number[]>; // grade NAME -> TRUE lunch blocks (template-derived; distinguishes lunch from other masked blocks)
 }
 
 export interface ScheduleDiagnostics {
@@ -144,6 +146,8 @@ export async function generateSchedulesRemote(
     blocks,
     gradeTeachableBlocks,
     gradeBlockPairs,
+    gradeBlockConflicts,
+    gradeLunchBlocks,
   } = options;
 
   // Allow UI to render before starting
@@ -212,6 +216,8 @@ export async function generateSchedulesRemote(
       blocks,
       grade_teachable_blocks: gradeTeachableBlocks,
       grade_block_pairs: gradeBlockPairs,
+      grade_block_conflicts: gradeBlockConflicts,
+      grade_lunch_blocks: gradeLunchBlocks,
     };
 
     // Start simulated progress (since we can't get real progress from the API)

@@ -111,6 +111,17 @@ class SolveRequest(BaseModel):
     # never required); is_double classes must pair every meeting.
     # Absent = no pairing available (legacy requests unchanged).
     grade_block_pairs: Optional[dict[str, list[list[int]]]] = None
+    # Cross-block conflicts per grade: grade display name -> [[block, conflictingBlock], ...].
+    # A class covering that grade held at `block` occupies its teacher through
+    # `conflictingBlock`'s real time window (a straddling class, e.g. a shifted
+    # K-5 last block), so the teacher may have nothing at `conflictingBlock`
+    # the same day. Absent = no cross-block conflicts (legacy requests unchanged).
+    grade_block_conflicts: Optional[dict[str, list[list[int]]]] = None
+    # TRUE lunch blocks per grade: grade display name -> [block, ...], derived
+    # from the timetable template (masked block paired with a break row in the
+    # same time window). Distinguishes lunch from other masked blocks (e.g. a
+    # surrendered afternoon block). Absent = legacy masked-block derivation.
+    grade_lunch_blocks: Optional[dict[str, list[int]]] = None
 
 
 class SolveResponse(BaseModel):
@@ -158,6 +169,10 @@ async def solve_schedule(request: SolveRequest):
     if request.grade_block_pairs:
         num_double = sum(1 for c in classes if c.get('is_double') or c.get('requires_double_periods'))
         logger.info(f"  Grade block pairs: {request.grade_block_pairs} ({num_double} double-period classes)")
+    if request.grade_block_conflicts:
+        logger.info(f"  Grade block conflicts: {request.grade_block_conflicts}")
+    if request.grade_lunch_blocks:
+        logger.info(f"  Grade lunch blocks: {request.grade_lunch_blocks}")
 
     # Log detailed info only when DEBUG_SOLVER is enabled
     if DEBUG_SOLVER:
@@ -209,6 +224,8 @@ async def solve_schedule(request: SolveRequest):
             blocks=request.blocks,
             grade_teachable_blocks=request.grade_teachable_blocks,
             grade_block_pairs=request.grade_block_pairs,
+            grade_block_conflicts=request.grade_block_conflicts,
+            grade_lunch_blocks=request.grade_lunch_blocks,
         )
 
         elapsed = time.time() - start_time

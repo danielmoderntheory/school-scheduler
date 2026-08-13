@@ -1338,6 +1338,156 @@ def test_22():
 test_22()
 
 
+def test_23():
+    print("\nTEST 23 — cross-block conflicts (straddling class windows)")
+    import copy
+    from solver import redistribute_open_blocks
+
+    CONF = {'1st Grade': [[8, 9]]}
+    MASKS23 = {'1st Grade': [b for b in NINE_BLOCKS if b not in (5, 9)],
+               '10th Grade': [b for b in NINE_BLOCKS if b != 7]}
+    R23 = [
+        {'rule_key': 'no_duplicate_subjects', 'enabled': True, 'config': None},
+        {'rule_key': 'no_btb_open', 'enabled': True, 'config': None},
+    ]
+    T23 = [{'name': 'X', 'status': 'full-time'}]
+
+    def solve23(classes, conflicts):
+        return generate_schedules(
+            teachers=T23, classes=classes, rules=R23,
+            grades=['1st Grade', '10th Grade'],
+            num_options=3, num_attempts=2, max_time_seconds=20,
+            blocks=NINE_BLOCKS, grade_teachable_blocks=MASKS23,
+            grade_block_conflicts=conflicts,
+        )
+
+    def straddle_violations(opt):
+        v = []
+        for t, days in opt['teacherSchedules'].items():
+            for d in DAYS:
+                dsched = days.get(d, {})
+                e8 = dsched.get(8) or dsched.get('8')
+                e9 = dsched.get(9) or dsched.get('9')
+                is_straddle = (e8 and e8[0] == '1st Grade'
+                               and e8[1] not in ('OPEN', 'Study Hall'))
+                busy9 = e9 is not None and not (len(e9) > 1 and e9[1] == 'OPEN')
+                if is_straddle and busy9:
+                    v.append((t, d, e8, e9))
+        return v
+
+    # (a1) both sides pinned onto the conflict -> infeasible; control solves
+    pinned = [
+        make_class('X', ['1st Grade'], 'Math', 1, fixed=[['Mon', 8]]),
+        make_class('X', ['10th Grade'], 'Chem', 1, fixed=[['Mon', 9]]),
+    ]
+    res_ctrl = solve23(copy.deepcopy(pinned), None)
+    check("(a1) control: pinned 1st@Mon8 + 10th@Mon9 solves without conflicts",
+          res_ctrl['status'] == 'success', res_ctrl.get('message', ''))
+    res_conf = solve23(copy.deepcopy(pinned), CONF)
+    check("(a1) same pins are infeasible with the 8->9 conflict",
+          res_conf['status'] != 'success', res_conf.get('message', ''))
+
+    # (a2) alternative exists -> solver routes around the conflict; every
+    # option is violation-free and all sessions still land
+    flexible = [
+        make_class('X', ['1st Grade'], 'Math', 1, fixed=[['Mon', 8]]),
+        make_class('X', ['10th Grade'], 'Chem', 4),
+    ]
+    res_flex = solve23(copy.deepcopy(flexible), CONF)
+    check("(a2) flexible case solves with the conflict",
+          res_flex['status'] == 'success', res_flex.get('message', ''))
+    if res_flex['status'] == 'success':
+        all_clean = all(not straddle_violations(o) for o in res_flex['options'])
+        check("(a2) no option holds 1st@8 with anything at 9 same day", all_clean)
+        counts_ok = True
+        for o in res_flex['options']:
+            placed = sum(
+                1 for d in DAYS for b in NINE_BLOCKS
+                for e in [o['teacherSchedules']['X'].get(d, {}).get(b)
+                          or o['teacherSchedules']['X'].get(d, {}).get(str(b))]
+                if e and e[1] == 'Chem')
+            counts_ok = counts_ok and placed == 4
+        check("(a2) all 4 Chem sessions still placed in every option", counts_ok)
+
+    # (b) study halls never land inside a straddling class's window
+    set_blocks(NINE_BLOCKS)
+    B9 = list(solver.BLOCKS)
+    ts = {'Sup': {d: {b: ['Filler', 'Class'] for b in B9} for d in DAYS}}
+    ts['Sup']['Mon'][8] = ['1st Grade', 'Math']   # straddling class
+    ts['Sup']['Mon'][9] = None                    # only open slot all week
+    gs = {
+        '1st Grade': {d: {b: None for b in B9} for d in DAYS},
+        '7th Grade': {d: {b: ['Someone', 'Class'] for b in B9} for d in DAYS},
+    }
+    gs['1st Grade']['Mon'][8] = ['Sup', 'Math']
+    gs['7th Grade']['Mon'][9] = None              # 7th free only at Mon 9
+    sh_rules = [{'rule_key': 'study_hall_grades', 'enabled': True,
+                 'config': {'grades': ['7th Grade']}},
+                {'rule_key': 'study_hall_distribution', 'enabled': True, 'config': None}]
+    ts_ctrl, gs_ctrl = copy.deepcopy(ts), copy.deepcopy(gs)
+    a_ctrl = add_study_halls(ts_ctrl, gs_ctrl, ['Sup'], rules=sh_rules,
+                             grades=['1st Grade', '7th Grade'])
+    check("(b) control: without conflicts the study hall takes Mon block 9",
+          any(x.teacher == 'Sup' and x.day == 'Mon' and x.block == 9 for x in a_ctrl))
+    ts_c, gs_c = copy.deepcopy(ts), copy.deepcopy(gs)
+    a_conf = add_study_halls(ts_c, gs_c, ['Sup'], rules=sh_rules,
+                             grades=['1st Grade', '7th Grade'],
+                             grade_block_conflicts=CONF)
+    check("(b) with conflicts the Mon-9 study hall is refused",
+          all(not (x.teacher == 'Sup' and x.day == 'Mon' and x.block == 9)
+              for x in a_conf)
+          and ts_c['Sup']['Mon'][9] is None)
+
+    # (c) redistribution never fills the straddling window's other half
+    def redis_setup():
+        ts = {'Pat': {d: {b: ['Filler', 'Class'] for b in B9} for d in DAYS}}
+        ts['Pat']['Mon'][7] = ['', 'OPEN']        # BTB hole (7,8)
+        ts['Pat']['Mon'][8] = ['', 'OPEN']
+        ts['Pat']['Mon'][9] = ['10th Grade', 'Chem']  # 9 busy
+        ts['Pat']['Tues'][3] = ['1st Grade', 'Math']  # movable straddler
+        gs = {
+            '1st Grade': {d: {b: None for b in B9} for d in DAYS},
+            '10th Grade': {d: {b: None for b in B9} for d in DAYS},
+        }
+        gs['1st Grade']['Tues'][3] = ['Pat', 'Math']
+        gs['10th Grade']['Mon'][9] = ['Pat', 'Chem']
+        gs['1st Grade']['Mon'][7] = ['Other', 'Sci']  # 7 blocked for 1st
+        return ts, gs
+
+    ts_r, gs_r = redis_setup()
+    ts_rc, gs_rc = copy.deepcopy(ts_r), copy.deepcopy(gs_r)
+    redistribute_open_blocks(ts_rc, gs_rc, ['Pat'])
+    check("(c) control: without conflicts the 1st-grade class moves to Mon 8",
+          ts_rc['Pat']['Mon'][8] == ['1st Grade', 'Math'])
+    ts_rr, gs_rr = copy.deepcopy(ts_r), copy.deepcopy(gs_r)
+    redistribute_open_blocks(ts_rr, gs_rr, ['Pat'],
+                             grade_block_conflicts=CONF)
+    check("(c) with conflicts the Mon-8 move is refused (no violation created)",
+          ts_rr['Pat']['Mon'][8] != ['1st Grade', 'Math'])
+
+test_23()
+
+# ================================================================ TEST 24
+print("\nTEST 24 — explicit grade_lunch_blocks: surrendered blocks are not lunch")
+def test_24():
+    set_blocks(NINE_BLOCKS)
+    # 1st Grade masks TWO blocks: 5 (its real lunch) and 9 (surrendered afternoon)
+    k5_masks = {'1st Grade': [1, 2, 3, 4, 6, 7, 8]}
+    sess = build_sessions(class_objs([make_class('Oscar', ['1st Grade'], 'Math', 3)]),
+                          grades=GRADES, grade_teachable_slots=slot_masks(k5_masks))
+    legacy = compute_teacher_lunch_candidates(sess, k5_masks)
+    check("legacy mode: both masked blocks are lunch candidates",
+          legacy.get('Oscar') == {5, 9}, str(legacy))
+    explicit = compute_teacher_lunch_candidates(sess, k5_masks, {'1st Grade': [5]})
+    check("explicit mode: only the true lunch block is a candidate",
+          explicit.get('Oscar') == {5}, str(explicit))
+    weird = compute_teacher_lunch_candidates(
+        sess, k5_masks, {'1st Grade': [5, 42], 'No Such Grade': [6]})
+    check("explicit mode: out-of-format blocks dropped, unknown grades ignored",
+          weird.get('Oscar') == {5}, str(weird))
+test_24()
+
+
 fails = [n for n, ok in results if not ok]
 print(f"RESULT: {len(results) - len(fails)}/{len(results)} passed"
       + (f"; FAILED: {fails}" if fails else ""))

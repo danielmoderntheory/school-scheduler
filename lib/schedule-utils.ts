@@ -562,6 +562,14 @@ export interface LunchContext {
   teachableBlocksByGrade: Record<string, number[]>
   /** Full block list of the quarter's timetable template. */
   blocks: number[]
+  /**
+   * The grades' TRUE lunch blocks (template-derived: a masked block paired
+   * with a break row in the same time window), keyed by grade DISPLAY NAME.
+   * When present it wins over the masked-block approximation — required once
+   * a grade has masked blocks that are NOT lunch (e.g. a surrendered
+   * afternoon block). Absent = legacy derivation from teachableBlocksByGrade.
+   */
+  lunchBlocksByGrade?: Record<string, number[]>
 }
 
 /**
@@ -595,6 +603,14 @@ export function getTeacherLunchCandidates(
 
   const candidates = new Set<number>()
   for (const grade of taughtGrades) {
+    if (lunchContext.lunchBlocksByGrade) {
+      // Explicit template-derived lunch blocks win (they distinguish lunch
+      // from other masked blocks, e.g. a surrendered afternoon block)
+      for (const block of lunchContext.lunchBlocksByGrade[grade] ?? []) {
+        if (lunchContext.blocks.includes(block)) candidates.add(block)
+      }
+      continue
+    }
     const teachable = lunchContext.teachableBlocksByGrade[grade]
     if (!teachable) continue
     for (const block of lunchContext.blocks) {

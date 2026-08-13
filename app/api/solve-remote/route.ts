@@ -61,6 +61,9 @@ interface SolveRequest {
   grade_teachable_blocks?: Record<string, number[]>
   // Grade display name -> consecutive block pairs legal for double periods
   grade_block_pairs?: Record<string, [number, number][]>
+  // Grade display name -> [block, conflictingBlock] cross-block time overlaps
+  grade_block_conflicts?: Record<string, [number, number][]>
+  grade_lunch_blocks?: Record<string, number[]>
 }
 
 export async function POST(request: NextRequest) {
@@ -104,6 +107,8 @@ export async function POST(request: NextRequest) {
         blocks: body.blocks,
         grade_teachable_blocks: body.grade_teachable_blocks,
         grade_block_pairs: body.grade_block_pairs,
+        grade_block_conflicts: body.grade_block_conflicts,
+        grade_lunch_blocks: body.grade_lunch_blocks,
       }),
     })
 

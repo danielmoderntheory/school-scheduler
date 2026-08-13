@@ -178,6 +178,11 @@ export interface TimetableRow {
   type: TimetableRowType
   blockNumber?: number  // Only for type='block': maps to a schedule block (template-defined count)
   grade_ids?: string[]  // Grade UUIDs. Empty/absent = all grades.
+  // Only for type='block': block numbers whose real-time window overlaps this
+  // row's window for these grades (e.g. a K-5 last class shifted off the shared
+  // bells). A teacher teaching this row's block for a scoped grade is busy
+  // during those blocks too — the solvers keep them free on that day.
+  conflictsWith?: number[]
 }
 
 export interface TimetableTemplate {
@@ -228,7 +233,7 @@ export interface PendingTransfer {
 }
 
 export interface ValidationError {
-  type: 'teacher_conflict' | 'grade_conflict' | 'subject_conflict' | 'unplaced' | 'locked_teacher_missing' | 'locked_teacher_modified' | 'session_count' | 'study_hall_coverage' | 'back_to_back' | 'fixed_slot_violation' | 'availability_violation' | 'unknown_class' | 'no_lunch' | 'double_period';
+  type: 'teacher_conflict' | 'grade_conflict' | 'subject_conflict' | 'unplaced' | 'locked_teacher_missing' | 'locked_teacher_modified' | 'session_count' | 'study_hall_coverage' | 'back_to_back' | 'fixed_slot_violation' | 'availability_violation' | 'unknown_class' | 'no_lunch' | 'double_period' | 'block_overlap';
   message: string;
   cells: CellLocation[];
   blockId?: string;

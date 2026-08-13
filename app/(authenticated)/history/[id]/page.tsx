@@ -40,7 +40,7 @@ import { Textarea } from "@/components/ui/textarea"
 import { Label } from "@/components/ui/label"
 import Link from "next/link"
 import type { ScheduleOption, TeacherSchedule, GradeSchedule, Teacher, FloatingBlock, PendingPlacement, ValidationError, CellLocation, ClassEntry, OpenBlockLabels, PendingTransfer, TimetableTemplate } from "@/lib/types"
-import { resolveRowsForGrade, getTemplateBlocks, getTeachableBlocksForGrade, getPairableBlocksForGrade } from "@/lib/timetable-utils"
+import { resolveRowsForGrade, getTemplateBlocks, getTeachableBlocksForGrade, getPairableBlocksForGrade, getBlockConflictsForGrade, getLunchBlocksForGrade } from "@/lib/timetable-utils"
 import { parseClassesFromSnapshot, parseTeachersFromSnapshot, parseRulesFromSnapshot, hasValidSnapshots, detectClassChanges, detectTeacherChanges, applyTeacherRenames, applyTeacherChangesToSnapshot, computeExpectedTeachingSessions, findMismatchedTeachers, type GenerationStats, type ChangeDetectionResult, type CurrentClass, type ClassSnapshot, type TeacherSnapshot, type TeacherChangeResult } from "@/lib/snapshot-utils"
 import { parseGradeDisplayToNumbers, parseGradeDisplayToNames, gradesOverlap, gradesEqual, gradeNumToDisplay, isClassElective, isClassCotaught, shouldIgnoreGradeConflict, formatGradeDisplayCompact } from "@/lib/grade-utils"
 import { BLOCK_TYPE_OPEN, BLOCK_TYPE_STUDY_HALL, isOpenBlock, isStudyHall, isScheduledClass, isOccupiedBlock, entryIsOpen, entryIsOccupied, entryIsScheduledClass, isFullTime, setOpenBlockLabel, recalculateOptionStats, getFirstGradeEntry, isMultipleEntryCell, type LunchContext, getTeacherLunchCandidates, designateTeacherLunch } from "@/lib/schedule-utils"
@@ -556,19 +556,20 @@ export default function HistoryDetailPage() {
     return map
   }, [timetableTemplate, gradesData])
 
-  // Lunch blocks per grade, keyed by grade DISPLAY NAME: template blocks that
-  // are NOT teachable for the grade (its band's lunch window). Empty per grade
-  // on legacy quarters with no template (teachable == all blocks), so grade
-  // grids render exactly as before.
+  // Lunch blocks per grade, keyed by grade DISPLAY NAME: non-teachable blocks
+  // whose window is one of the grade's break rows (its band's lunch window).
+  // Non-teachable blocks WITHOUT a matching break row (e.g. a block the grade
+  // surrendered, like K-5's Block 9) are NOT lunch — grade grids render those
+  // as unavailable via teachableBlocksByGrade instead. Empty per grade on
+  // legacy quarters with no template, so grade grids render exactly as before.
   const lunchBlocksByGrade = useMemo(() => {
     const map: Record<string, number[]> = {}
     if (!timetableTemplate) return map
     for (const g of gradesData) {
-      const teachable = teachableBlocksByGrade[g.display_name] || []
-      map[g.display_name] = templateBlocks.filter(b => !teachable.includes(b))
+      map[g.display_name] = getLunchBlocksForGrade(timetableTemplate, g.id)
     }
     return map
-  }, [timetableTemplate, templateBlocks, teachableBlocksByGrade, gradesData])
+  }, [timetableTemplate, gradesData])
 
   // Lunch context for stats recalculation. Defined only when the template
   // actually masks some grade's blocks (per-grade lunch windows) — then every
@@ -581,8 +582,10 @@ export default function HistoryDetailPage() {
     const hasMasking = Object.values(teachableBlocksByGrade).some(
       tb => tb.length < templateBlocks.length
     )
-    return hasMasking ? { teachableBlocksByGrade, blocks: templateBlocks } : undefined
-  }, [timetableTemplate, teachableBlocksByGrade, templateBlocks])
+    return hasMasking
+      ? { teachableBlocksByGrade, blocks: templateBlocks, lunchBlocksByGrade }
+      : undefined
+  }, [timetableTemplate, teachableBlocksByGrade, templateBlocks, lunchBlocksByGrade])
 
   // Legal double-period block pairs per grade, keyed by grade DISPLAY NAME
   // (same convention as teachableBlocksByGrade). Empty per grade / overall when
@@ -594,6 +597,24 @@ export default function HistoryDetailPage() {
     }
     return map
   }, [timetableTemplate, gradesData])
+
+  // Cross-block conflicts per grade ([block, conflictingBlock] real-time
+  // overlaps from template rows' conflictsWith), keyed by grade DISPLAY NAME —
+  // same convention as teachableBlocksByGrade. Empty per grade when none.
+  const gradeBlockConflictsByGrade = useMemo(() => {
+    const map: Record<string, [number, number][]> = {}
+    for (const g of gradesData) {
+      map[g.display_name] = getBlockConflictsForGrade(timetableTemplate, g.id)
+    }
+    return map
+  }, [timetableTemplate, gradesData])
+
+  // Solver-payload form: only grades that actually have conflicts (omitted
+  // entirely when none — the solvers treat absence as "no conflicts").
+  const solverGradeBlockConflicts = useMemo(() => {
+    const entries = Object.entries(gradeBlockConflictsByGrade).filter(([, pairs]) => pairs.length > 0)
+    return entries.length > 0 ? Object.fromEntries(entries) : undefined
+  }, [gradeBlockConflictsByGrade])
 
   // True when blocks b1/b2 form a legal double-period pair for EVERY grade in
   // the (possibly multi-grade) display string. Fails closed: a grade with no
@@ -1669,6 +1690,21 @@ export default function HistoryDetailPage() {
       const solveGradeBlockPairs = Object.fromEntries(
         gradesData.map(g => [g.display_name, getPairableBlocksForGrade(regenTemplate, g.id)])
       )
+      // Cross-block time overlaps ([block, conflictingBlock]) from template
+      // rows with conflictsWith — only grades that actually have any are sent.
+      const solveGradeBlockConflicts = Object.fromEntries(
+        gradesData
+          .map(g => [g.display_name, getBlockConflictsForGrade(regenTemplate, g.id)] as const)
+          .filter(([, pairs]) => pairs.length > 0)
+      )
+      // TRUE lunch blocks per grade (masked block paired with a break row in
+      // the same time window) — lets the solvers tell lunch apart from other
+      // masked blocks (e.g. a surrendered afternoon block).
+      const solveGradeLunchBlocks = Object.fromEntries(
+        gradesData
+          .map(g => [g.display_name, getLunchBlocksForGrade(regenTemplate, g.id)] as const)
+          .filter(([, lunchBlocks]) => lunchBlocks.length > 0)
+      )
 
       // Auto-escalation strategy: try progressively harder approaches until one works
       // 1. OR-Tools normal (50 seeds, quick per seed)
@@ -1712,6 +1748,8 @@ export default function HistoryDetailPage() {
         blocks: solveBlocks,
         gradeTeachableBlocks: solveGradeTeachableBlocks,
         gradeBlockPairs: solveGradeBlockPairs,
+        gradeBlockConflicts: solveGradeBlockConflicts,
+        gradeLunchBlocks: solveGradeLunchBlocks,
         onProgress: (current, total, message) => {
           setGenerationProgress({ current, total, message: `[OR-Tools] ${message}` })
         }
@@ -1739,6 +1777,8 @@ export default function HistoryDetailPage() {
           blocks: solveBlocks,
           gradeTeachableBlocks: solveGradeTeachableBlocks,
           gradeBlockPairs: solveGradeBlockPairs,
+          gradeBlockConflicts: solveGradeBlockConflicts,
+          gradeLunchBlocks: solveGradeLunchBlocks,
           onProgress: (current, total, message) => {
             setGenerationProgress({ current, total, message: `[OR-Tools Deep] ${message}` })
           }
@@ -1766,7 +1806,7 @@ export default function HistoryDetailPage() {
             onProgress: (current, total, message) => {
               setGenerationProgress({ current, total, message: `[JS] ${message}` })
             }
-          }, solveBlocks, solveGradeTeachableBlocks, solveGradeBlockPairs)
+          }, solveBlocks, solveGradeTeachableBlocks, solveGradeBlockPairs, solveGradeBlockConflicts, solveGradeLunchBlocks)
           result = jsResult
           usedJsFallback = true
           usedStrategy = "js"
@@ -1792,6 +1832,8 @@ export default function HistoryDetailPage() {
           blocks: solveBlocks,
           gradeTeachableBlocks: solveGradeTeachableBlocks,
           gradeBlockPairs: solveGradeBlockPairs,
+          gradeBlockConflicts: solveGradeBlockConflicts,
+          gradeLunchBlocks: solveGradeLunchBlocks,
           onProgress: (current, total, message) => {
             setGenerationProgress({ current, total, message: `[OR-Tools Suboptimal] ${message}` })
           }
@@ -1817,6 +1859,8 @@ export default function HistoryDetailPage() {
           blocks: solveBlocks,
           gradeTeachableBlocks: solveGradeTeachableBlocks,
           gradeBlockPairs: solveGradeBlockPairs,
+          gradeBlockConflicts: solveGradeBlockConflicts,
+          gradeLunchBlocks: solveGradeLunchBlocks,
           onProgress: (current, total, message) => {
             setGenerationProgress({ current, total, message: `[OR-Tools Randomized] ${message}` })
           }
@@ -2634,7 +2678,9 @@ export default function HistoryDetailPage() {
       rules,
       excludedFromStudyHalls,
       timetableTemplate ? templateBlocks : undefined,
-      timetableTemplate ? teachableBlocksByGrade : undefined
+      timetableTemplate ? teachableBlocksByGrade : undefined,
+      timetableTemplate ? solverGradeBlockConflicts : undefined,
+      timetableTemplate ? lunchBlocksByGrade : undefined
     )
 
     if (!result.success) {
@@ -5630,6 +5676,57 @@ export default function HistoryDetailPage() {
     return errors
   }
 
+  /**
+   * CORE: Check cross-block overlap conflicts (hard error, like teacher_conflict).
+   * Template rows may declare `conflictsWith`: a grade's block b really runs at
+   * a time overlapping block c's window (e.g. a K-5 last class shifted off the
+   * shared bells). A teacher teaching such a class at block b is physically
+   * busy through block c — anything else there (class or study hall) is a
+   * real double-booking, even though the block numbers differ.
+   */
+  function checkBlockOverlapsCore(
+    teacherSchedules: Record<string, TeacherSchedule>
+  ): ValidationError[] {
+    const errors: ValidationError[] = []
+    const DAYS = ["Mon", "Tues", "Wed", "Thurs", "Fri"]
+    const gradeNames = Object.keys(gradeBlockConflictsByGrade)
+    if (!timetableTemplate || gradeNames.length === 0) return errors
+    const hasAnyConflicts = gradeNames.some(g => gradeBlockConflictsByGrade[g].length > 0)
+    if (!hasAnyConflicts) return errors
+
+    for (const [teacher, schedule] of Object.entries(teacherSchedules)) {
+      for (const day of DAYS) {
+        for (const block of templateBlocks) {
+          const entry = schedule[day]?.[block]
+          if (!entry || !isScheduledClass(entry[1])) continue
+
+          // Conflict pairs applicable to this entry: union over its grades
+          const targets = parseGradeDisplayToNames(entry[0], gradeNames)
+          const seen = new Set<number>()
+          for (const g of targets) {
+            for (const [b, c] of gradeBlockConflictsByGrade[g] || []) {
+              if (b !== block || seen.has(c)) continue
+              seen.add(c)
+              const other = schedule[day]?.[c]
+              if (other && (isScheduledClass(other[1]) || isStudyHall(other[1]))) {
+                errors.push({
+                  type: 'block_overlap',
+                  message: `[Time Overlap] ${teacher} on ${day}: ${formatGradeDisplayCompact(entry[0], true)} ${entry[1]} in B${block} really runs into B${c}'s time, but B${c} holds ${other[1]}`,
+                  cells: [
+                    { teacher, day, block, grade: entry[0], subject: entry[1] },
+                    { teacher, day, block: c, grade: other[0], subject: other[1] },
+                  ]
+                })
+              }
+            }
+          }
+        }
+      }
+    }
+
+    return errors
+  }
+
   /** Blocks on `day` where `cls` meets in a teacher-schedule map (same matching semantics as entryMatchesClass). */
   function doublePeriodOccurrences(
     teacherSchedules: Record<string, TeacherSchedule>,
@@ -6090,6 +6187,10 @@ export default function HistoryDetailPage() {
     const subjectConflictErrors = checkSubjectConflictsCore(workingSchedules.teacherSchedules)
     errors.push(...subjectConflictErrors)
 
+    // 5b. Cross-block overlap conflicts - use shared core function
+    // (a class in a time-shifted block double-books its overlapped blocks)
+    errors.push(...checkBlockOverlapsCore(workingSchedules.teacherSchedules))
+
     // 6. Fixed slot & availability - use shared core functions if class definitions available
     if (effectiveFreeformClasses) {
       const fixedSlotErrors = checkFixedSlotViolationsCore(workingSchedules.teacherSchedules, effectiveFreeformClasses)
@@ -6417,6 +6518,10 @@ export default function HistoryDetailPage() {
       }
     }
 
+    // 9c. Cross-block overlap conflicts (hard) - a class in a time-shifted
+    // block (template conflictsWith) double-books its overlapped blocks.
+    errors.push(...checkBlockOverlapsCore(option.teacherSchedules))
+
     // 10. Teacher Lunch Coverage (soft warning) - template-driven quarters only.
     // Mirrors the solvers' definition: a teacher's candidate lunch windows are
     // the union, over the grades of the classes they teach in this schedule, of
@@ -6439,9 +6544,16 @@ export default function HistoryDetailPage() {
           }
         }
 
-        // Candidate lunch windows = union of non-teachable blocks across taught grades
+        // Candidate lunch windows = union of the taught grades' TRUE lunch
+        // blocks (template-derived; a surrendered block is masked but NOT
+        // lunch). Falls back to the masked-block complement on legacy data.
         const candidateBlocks = new Set<number>()
         for (const grade of taughtGrades) {
+          const trueLunch = lunchBlocksByGrade[grade]
+          if (trueLunch !== undefined) {
+            trueLunch.forEach(b => candidateBlocks.add(b))
+            continue
+          }
           const teachable = teachableBlocksByGrade[grade]
           if (!teachable) continue
           for (const block of templateBlocks) {
@@ -7775,6 +7887,7 @@ export default function HistoryDetailPage() {
                       showOpenLabels={true}
                       blocks={templateBlocks}
                       lunchContext={lunchContext}
+                      blockConflictsByGrade={timetableTemplate ? gradeBlockConflictsByGrade : undefined}
                     />
                   ))
               : Object.entries(publicOption.gradeSchedules)
@@ -7788,6 +7901,7 @@ export default function HistoryDetailPage() {
                       classesSnapshot={generation?.stats?.classes_snapshot}
                       blocks={templateBlocks}
                       lunchBlocksByGrade={lunchBlocksByGrade}
+                      teachableBlocksByGrade={timetableTemplate ? teachableBlocksByGrade : undefined}
                     />
                   ))
             }
@@ -9576,6 +9690,7 @@ export default function HistoryDetailPage() {
                                 onOpenLabelChange={userRole === "admin" && showOpenLabels && !regenMode && !swapMode && !freeformMode && !studyHallMode ? handleOpenLabelChange : undefined}
                                 blocks={templateBlocks}
                                 lunchContext={lunchContext}
+                                blockConflictsByGrade={timetableTemplate ? gradeBlockConflictsByGrade : undefined}
                               />
                               {/* Unplaced floating blocks from this teacher */}
                               {freeformMode && teacherFloatingBlocks.length > 0 && (
@@ -9663,6 +9778,7 @@ export default function HistoryDetailPage() {
                             classesSnapshot={generation?.stats?.classes_snapshot}
                             blocks={templateBlocks}
                             lunchBlocksByGrade={lunchBlocksByGrade}
+                            teachableBlocksByGrade={timetableTemplate ? teachableBlocksByGrade : undefined}
                           />
                         ))}
                 </div>

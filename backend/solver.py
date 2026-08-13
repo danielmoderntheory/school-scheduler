@@ -306,23 +306,40 @@ def get_study_hall_eligible(teachers: list[Teacher], classes: list[ClassEntry], 
 def compute_teacher_lunch_candidates(
     sessions: list[Session],
     grade_teachable_blocks: dict,
+    grade_lunch_blocks: dict = None,
 ) -> dict[str, set[int]]:
     """Compute each teacher's candidate lunch windows (block numbers).
 
     A teacher's candidate lunch windows are the union, over all grades covered
-    by their sessions, of (BLOCKS minus that grade's teachable blocks) - i.e.
-    the blocks during which at least one band of their students is at lunch.
-    On every day at least one of these windows must stay free of the teacher's
-    obligations so they get a lunch break.
+    by their sessions, of that grade's lunch blocks. On every day at least one
+    of these windows must stay free of the teacher's obligations so they get a
+    lunch break.
 
-    Grades absent from grade_teachable_blocks are teachable in every block and
-    contribute no windows. Teachers whose candidate set comes out empty (e.g.
-    legacy 5-block requests, or teachers of only unmasked grades) are omitted.
+    Explicit mode (grade_lunch_blocks provided): the caller derived each
+    grade's TRUE lunch blocks from the timetable template (a masked block is
+    lunch only when the grade has a break row in the same time window). This
+    distinguishes lunch from other non-teachable blocks - e.g. an afternoon
+    block a grade surrendered is masked but is NOT a lunch window.
+
+    Legacy mode (grade_lunch_blocks absent): lunch blocks are approximated as
+    (BLOCKS minus the grade's teachable blocks). Correct for templates where
+    lunch is the only masking, which is all pre-existing callers send.
+
+    Grades absent from the governing dict contribute no windows. Teachers
+    whose candidate set comes out empty (e.g. legacy 5-block requests, or
+    teachers of only unmasked grades) are omitted.
     """
+    blocks_set = set(BLOCKS)
+    if grade_lunch_blocks:
+        candidates: dict[str, set[int]] = {}
+        for s in sessions:
+            cset = candidates.setdefault(s.teacher, set())
+            for g in s.grades:
+                cset |= set(grade_lunch_blocks.get(g) or []) & blocks_set
+        return {t: c for t, c in candidates.items() if c}
     if not grade_teachable_blocks:
         return {}
-    blocks_set = set(BLOCKS)
-    candidates: dict[str, set[int]] = {}
+    candidates = {}
     for s in sessions:
         cset = candidates.setdefault(s.teacher, set())
         for g in s.grades:
@@ -715,6 +732,8 @@ def suggest_teachers_to_unlock(
     blocks: list = None,
     grade_teachable_blocks: dict = None,
     grade_block_pairs: dict = None,
+    grade_block_conflicts: dict = None,
+    grade_lunch_blocks: dict = None,
 ) -> list[dict]:
     """
     When solver returns infeasible, try unlocking each affecting teacher
@@ -773,6 +792,8 @@ def suggest_teachers_to_unlock(
             blocks=blocks,
             grade_teachable_blocks=grade_teachable_blocks,
             grade_block_pairs=grade_block_pairs,
+            grade_block_conflicts=grade_block_conflicts,
+            grade_lunch_blocks=grade_lunch_blocks,
         )
 
         is_feasible = trial_result.get('status') == 'success' and len(trial_result.get('options', [])) > 0
@@ -815,6 +836,8 @@ def suggest_teachers_to_unlock(
                     blocks=blocks,
                     grade_teachable_blocks=grade_teachable_blocks,
                     grade_block_pairs=grade_block_pairs,
+                    grade_block_conflicts=grade_block_conflicts,
+                    grade_lunch_blocks=grade_lunch_blocks,
                 )
 
                 is_feasible = trial_result.get('status') == 'success' and len(trial_result.get('options', [])) > 0
@@ -884,6 +907,8 @@ def _quick_feasibility_check(
     blocks: list = None,
     grade_teachable_blocks: dict = None,
     grade_block_pairs: dict = None,
+    grade_block_conflicts: dict = None,
+    grade_lunch_blocks: dict = None,
 ) -> dict:
     """
     Run a quick solver check to test feasibility.
@@ -905,12 +930,14 @@ def _quick_feasibility_check(
         blocks=blocks,
         grade_teachable_blocks=grade_teachable_blocks,
         grade_block_pairs=grade_block_pairs,
+        grade_block_conflicts=grade_block_conflicts,
+        grade_lunch_blocks=grade_lunch_blocks,
         # Don't recurse into suggestions for trial runs
         _skip_unlock_suggestions=True,
     )
 
 
-def solve_with_cpsat(sessions: list[Session], seed: int = 0, time_limit: float = 10.0, max_solutions: int = 5, diagnostics: dict = None, rules: list[dict] = None, active_grades: list[str] = None, teacher_lunch_windows: dict = None) -> list[dict]:
+def solve_with_cpsat(sessions: list[Session], seed: int = 0, time_limit: float = 10.0, max_solutions: int = 5, diagnostics: dict = None, rules: list[dict] = None, active_grades: list[str] = None, teacher_lunch_windows: dict = None, grade_block_conflicts: dict = None) -> list[dict]:
     """
     Solve the scheduling problem using CP-SAT.
 
@@ -927,6 +954,12 @@ def solve_with_cpsat(sessions: list[Session], seed: int = 0, time_limit: float =
     lunch block numbers (see compute_teacher_lunch_candidates). When provided,
     a hard constraint keeps at least one candidate window free of the teacher's
     classes on every day. Callers gate this on the 'teacher_lunch' rule.
+
+    grade_block_conflicts: optional dict mapping grade name -> list of
+    (block, conflictingBlock) pairs. A session covering that grade held at
+    `block` occupies its teacher through `conflictingBlock`'s real time window
+    (a straddling class), so no session of the same teacher may sit at
+    `conflictingBlock` the same day.
     """
     import random
     rng = random.Random(seed)
@@ -1373,6 +1406,75 @@ def solve_with_cpsat(sessions: list[Session], seed: int = 0, time_limit: float =
                 elif occupied_lits:
                     model.Add(sum(occupied_lits) <= num_windows - 1 - fixed_occupied)
 
+    # Hard Constraint 6: cross-block conflicts (straddling class windows).
+    # A session covering a conflict grade held at `block` occupies its teacher
+    # through `conflictingBlock`'s real time window (e.g. a shifted K-5 last
+    # class straddling the shared Block 8/9 boundary), so the same teacher may
+    # have NOTHING at `conflictingBlock` that day. Enforced pairwise: for every
+    # (straddling session at block, any session at conflictingBlock) both
+    # cannot hold simultaneously.
+    if grade_block_conflicts:
+        # (block, conflictingBlock) -> set of grade names that straddle it
+        conflict_map: dict[tuple[int, int], set[str]] = {}
+        for g, conf_pairs in grade_block_conflicts.items():
+            for p in conf_pairs or []:
+                if len(p) == 2 and p[0] in BLOCKS and p[1] in BLOCKS and p[0] != p[1]:
+                    conflict_map.setdefault((p[0], p[1]), set()).add(g)
+
+        sessions_by_teacher: dict[str, list] = {}
+        for s in active_sessions:
+            sessions_by_teacher.setdefault(s.teacher, []).append(s)
+
+        # Literal cache: (session id, slot) -> BoolVar (True for fixed-at-slot)
+        occupancy_lits: dict = {}
+
+        def occupies_lit(s, slot):
+            """Literal true iff session s sits at slot; True when fixed there;
+            None when the session can never occupy the slot."""
+            if slot not in s.valid_slots:
+                return None
+            if len(s.valid_slots) == 1:
+                return True
+            key = (s.id, slot)
+            if key not in occupancy_lits:
+                lit = model.NewBoolVar(f'xblk_{s.id}_{slot}')
+                model.Add(slot_vars[s.id] == slot).OnlyEnforceIf(lit)
+                model.Add(slot_vars[s.id] != slot).OnlyEnforceIf(lit.Not())
+                occupancy_lits[key] = lit
+            return occupancy_lits[key]
+
+        for (blk, cblk), conf_grades in conflict_map.items():
+            blk_idx = BLOCKS.index(blk)
+            cblk_idx = BLOCKS.index(cblk)
+            for teacher_name, t_sessions in sessions_by_teacher.items():
+                straddling = [s for s in t_sessions if set(s.grades) & conf_grades]
+                if not straddling:
+                    continue
+                for day_idx in range(len(DAYS)):
+                    a_slot = day_block_to_slot(day_idx, blk_idx)
+                    c_slot = day_block_to_slot(day_idx, cblk_idx)
+                    a_lits = [(s, occupies_lit(s, a_slot)) for s in straddling]
+                    a_lits = [(s, l) for s, l in a_lits if l is not None]
+                    if not a_lits:
+                        continue
+                    b_lits = [(s, occupies_lit(s, c_slot)) for s in t_sessions]
+                    b_lits = [(s, l) for s, l in b_lits if l is not None]
+                    if not b_lits:
+                        continue
+                    for sa, al in a_lits:
+                        for sb, bl in b_lits:
+                            if sa.id == sb.id:
+                                continue  # one session can't sit at both slots
+                            if al is True and bl is True:
+                                # Two fixed sessions violate the conflict outright
+                                model.AddBoolOr([])
+                            elif al is True:
+                                model.Add(bl == 0)
+                            elif bl is True:
+                                model.Add(al == 0)
+                            else:
+                                model.AddBoolOr([al.Not(), bl.Not()])
+
     # Note: Back-to-back OPEN minimization is handled in post-processing via
     # redistribute_open_blocks() which is more effective since it can account for
     # study halls (added after solving) and only applies to full-time teachers.
@@ -1614,7 +1716,8 @@ def redistribute_open_blocks(teacher_schedules: dict, grade_schedules: dict,
                              grade_teachable_blocks: dict = None,
                              teacher_lunch_windows: dict = None,
                              frozen_class_entries: set = None,
-                             class_allowed_pairs: dict = None) -> None:
+                             class_allowed_pairs: dict = None,
+                             grade_block_conflicts: dict = None) -> None:
     """
     Post-processing to break up consecutive OPEN blocks by swapping classes around.
     This mimics the JavaScript solver's redistributeOpenBlocks function.
@@ -1630,6 +1733,11 @@ def redistribute_open_blocks(teacher_schedules: dict, grade_schedules: dict,
     frozen_class_entries: optional set of (teacher, grade_display, subject)
     triples whose sessions must never be moved. Used for classes with fixed
     slots: the user pinned them, so post-processing must not undo the pin.
+
+    grade_block_conflicts: optional dict mapping grade name -> list of
+    [block, conflictingBlock] pairs (straddling class windows). No move may
+    place a straddling class where its conflicting window is occupied, nor
+    place anything inside a window a straddling class already occupies.
 
     class_allowed_pairs: optional dict mapping (teacher, grade_display, subject)
     to the class's legal (earlierBlock, laterBlock) pairs. A day holding two
@@ -1671,6 +1779,42 @@ def redistribute_open_blocks(teacher_schedules: dict, grade_schedules: dict,
             if mask is not None and block not in mask:
                 return False
         return True
+
+    def violates_block_conflict(teacher: str, day: str, block: int,
+                                moved_grades: list, vacated: set) -> bool:
+        """Would placing a class covering `moved_grades` at (day, block) -
+        while vacating the (day, block) slots in `vacated` - break a
+        cross-block conflict (grade_block_conflicts)? Two directions: the
+        moved class may itself straddle into an occupied window, or it may
+        land inside the window of a straddling class already held that day.
+        Study Hall counts as occupied."""
+        if not grade_block_conflicts:
+            return False
+        day_sched = teacher_schedules.get(teacher, {}).get(day, {})
+
+        def occupied(b) -> bool:
+            if (day, b) in vacated:
+                return False
+            e = day_sched.get(b)
+            return e is not None and not (len(e) > 1 and e[1] == 'OPEN')
+
+        # Moved class straddles: covering grade g at `block` needs its
+        # conflicting window free
+        for g in moved_grades:
+            for p in grade_block_conflicts.get(g, []):
+                if len(p) == 2 and p[0] == block and occupied(p[1]):
+                    return True
+        # Moved class lands inside a straddling class's window: some
+        # conflict-grade class of this teacher at p[0] makes `block` busy
+        for g, conf_pairs in grade_block_conflicts.items():
+            gsched = grade_schedules.get(g, {}).get(day, {})
+            for p in conf_pairs:
+                if len(p) != 2 or p[1] != block or (day, p[0]) in vacated:
+                    continue
+                e = gsched.get(p[0])
+                if e and e[0] == teacher and e[1] not in ('OPEN', 'Study Hall'):
+                    return True
+        return False
 
     def day_btb_count(teacher: str, day_sched: dict) -> int:
         """Lunch-aware back-to-back OPEN count for one day's schedule dict.
@@ -1843,6 +1987,20 @@ def redistribute_open_blocks(teacher_schedules: dict, grade_schedules: dict,
                 if not all(grades_teachable_at(grades, tb) for tb in tgt_pair):
                     continue
 
+                # Cross-block conflicts: the pair itself may not span a
+                # conflict of its own grades, and neither landed block may
+                # break one against the rest of the day
+                if grade_block_conflicts:
+                    tgt_set = set(tgt_pair)
+                    if any(len(p) == 2 and p[0] in tgt_set and p[1] in tgt_set
+                           for g in grades
+                           for p in grade_block_conflicts.get(g, [])):
+                        continue
+                    if any(violates_block_conflict(teacher, issue_day, tb,
+                                                   grades, vacated)
+                           for tb in tgt_pair):
+                        continue
+
                 # Both blocks free for every covered grade
                 conflict = False
                 for g in grades:
@@ -1987,6 +2145,12 @@ def redistribute_open_blocks(teacher_schedules: dict, grade_schedules: dict,
                         if not grades_teachable_at(grades, issue_block):
                             continue
 
+                        # Never break a cross-block conflict (straddling
+                        # class windows)
+                        if violates_block_conflict(teacher, issue_day, issue_block,
+                                                   grades, {(target_day, target_block)}):
+                            continue
+
                         # Never move a class into the teacher's last free
                         # candidate lunch window on that day
                         if would_lose_lunch(teacher, issue_day, (issue_block,),
@@ -2049,7 +2213,8 @@ def add_study_halls(teacher_schedules: dict, grade_schedules: dict,
                     grades: list[str] = None,
                     teacher_availability: dict = None,
                     grade_teachable_blocks: dict = None,
-                    teacher_lunch_windows: dict = None) -> list[StudyHallAssignment]:
+                    teacher_lunch_windows: dict = None,
+                    grade_block_conflicts: dict = None) -> list[StudyHallAssignment]:
     """Assign study halls to eligible teachers with open blocks.
 
     Strategy:
@@ -2067,6 +2232,11 @@ def add_study_halls(teacher_schedules: dict, grade_schedules: dict,
             candidate lunch block numbers. A study hall is never assigned to a
             supervisor's last free candidate lunch window on a day (a study
             hall occupies its supervisor, who still needs a lunch break).
+        grade_block_conflicts: Optional dict mapping grade name -> list of
+            [block, conflictingBlock] pairs (straddling class windows). A study
+            hall is never placed at a block a supervisor's straddling class
+            occupies that day, and a study hall for a straddling grade never
+            lands at a block whose conflicting window the supervisor has busy.
 
     Prioritizes teachers with MORE open blocks (not even distribution).
     """
@@ -2182,6 +2352,36 @@ def add_study_halls(teacher_schedules: dict, grade_schedules: dict,
                     if teacher_availability and teacher in teacher_availability:
                         slot = day_block_to_slot(DAYS.index(day), BLOCKS.index(block))
                         if slot not in teacher_availability[teacher]:
+                            continue
+
+                    # Cross-block conflicts (straddling class windows):
+                    # (i) this block may sit inside a window one of the
+                    # supervisor's straddling classes occupies today
+                    # (ii) a study hall for a straddling grade would occupy
+                    # the supervisor through the conflicting window too
+                    if grade_block_conflicts:
+                        blocked = False
+                        for cg, conf_pairs in grade_block_conflicts.items():
+                            gsched = grade_schedules.get(cg, {}).get(day, {})
+                            for p in conf_pairs:
+                                if len(p) != 2 or p[1] != block:
+                                    continue
+                                e = gsched.get(p[0])
+                                if e and e[0] == teacher and e[1] not in ('OPEN', 'Study Hall'):
+                                    blocked = True
+                                    break
+                            if blocked:
+                                break
+                        if not blocked:
+                            for g in group_grades:
+                                for p in grade_block_conflicts.get(g, []):
+                                    if (len(p) == 2 and p[0] == block
+                                            and teacher_schedules[teacher][day].get(p[1]) is not None):
+                                        blocked = True
+                                        break
+                                if blocked:
+                                    break
+                        if blocked:
                             continue
 
                     # All grades in group must be free
@@ -2420,6 +2620,8 @@ def generate_schedules(
     blocks: list = None,  # Block numbers for this quarter's timetable (None = legacy [1..5])
     grade_teachable_blocks: dict = None,  # grade name -> list of teachable block numbers (None = all)
     grade_block_pairs: dict = None,  # grade name -> list of [earlierBlock, laterBlock] legal double pairs
+    grade_block_conflicts: dict = None,  # grade name -> list of [block, conflictingBlock] cross-block conflicts
+    grade_lunch_blocks: dict = None,  # grade name -> list of that grade's TRUE lunch block numbers
     _skip_unlock_suggestions: bool = False,  # Internal: skip unlock suggestions to prevent recursion
 ) -> dict:
     """
@@ -2452,6 +2654,19 @@ def generate_schedules(
             distinct days. Absent field = no pairing available: unflagged classes are
             strictly one lesson per day (legacy behavior); flagged classes needing at
             least one double fail preflight.
+        grade_block_conflicts: Dict mapping grade name to a list of
+            [block, conflictingBlock] pairs. A class covering that grade held at
+            `block` occupies its teacher through `conflictingBlock`'s real time
+            window (e.g. a shifted K-5 last class straddling the shared Block 8/9
+            boundary), so the teacher may have NOTHING at `conflictingBlock` the
+            same day - no class, no study hall. Enforced in the solver and in all
+            post-processing (study halls, redistribution).
+        grade_lunch_blocks: Dict mapping grade name to that grade's TRUE lunch
+            block numbers, derived upstream from the timetable template (a masked
+            block paired with a break row in the same time window). When provided,
+            teacher lunch candidates come from these instead of the masked-block
+            approximation - required once a grade has masked blocks that are NOT
+            lunch (e.g. a surrendered afternoon block). Absent = legacy derivation.
 
     Returns:
         Dict with status, options, message, seeds_completed
@@ -2468,6 +2683,21 @@ def generate_schedules(
         blocks_set = set(BLOCKS)
         for g, tbs in grade_teachable_blocks.items():
             grade_teachable[g] = sorted(b for b in set(tbs or []) if b in blocks_set)
+
+    # Normalize cross-block conflicts: keep only [block, conflictingBlock]
+    # pairs where both blocks exist in this request's block format.
+    block_conflicts: dict[str, list[tuple[int, int]]] = {}
+    if grade_block_conflicts:
+        blocks_set = set(BLOCKS)
+        for g, conf_pairs in grade_block_conflicts.items():
+            cleaned = []
+            for p in conf_pairs or []:
+                if (isinstance(p, (list, tuple)) and len(p) == 2
+                        and p[0] in blocks_set and p[1] in blocks_set
+                        and p[0] != p[1]):
+                    cleaned.append((int(p[0]), int(p[1])))
+            if cleaned:
+                block_conflicts[g] = cleaned
 
     # Slot-index form of the masks (same blocks every day), for session building
     grade_teachable_slots: dict[str, set[int]] = None
@@ -2739,8 +2969,9 @@ def generate_schedules(
     # rule is enabled (missing rule row defaults to enabled). Sessions here
     # already exclude locked teachers, whose schedules we cannot change.
     teacher_lunch_windows = None
-    if grade_teachable and is_rule_enabled(rules, 'teacher_lunch'):
-        teacher_lunch_windows = compute_teacher_lunch_candidates(sessions, grade_teachable) or None
+    if (grade_lunch_blocks or grade_teachable) and is_rule_enabled(rules, 'teacher_lunch'):
+        teacher_lunch_windows = compute_teacher_lunch_candidates(
+            sessions, grade_teachable, grade_lunch_blocks) or None
 
     if on_progress:
         on_progress(0, num_attempts, 'Initializing CP-SAT solver...')
@@ -3047,7 +3278,8 @@ def generate_schedules(
             diagnostics=diagnostics if attempt == 0 else None,
             rules=rules,
             active_grades=active_grades,
-            teacher_lunch_windows=teacher_lunch_windows
+            teacher_lunch_windows=teacher_lunch_windows,
+            grade_block_conflicts=block_conflicts or None
         )
         seeds_completed = attempt + 1
 
@@ -3091,7 +3323,7 @@ def generate_schedules(
             # Add study halls (only if study_hall_distribution rule is enabled and not skipped)
             # skip_study_halls=True means skip entirely (user will reassign after saving)
             if is_rule_enabled(rules, 'study_hall_distribution') and not skip_study_halls:
-                sh_assignments = add_study_halls(ts, gs, eligible, preserve_existing=True, rules=rules, grades=active_grades, teacher_availability=teacher_availability, grade_teachable_blocks=grade_teachable or None, teacher_lunch_windows=teacher_lunch_windows)
+                sh_assignments = add_study_halls(ts, gs, eligible, preserve_existing=True, rules=rules, grades=active_grades, teacher_availability=teacher_availability, grade_teachable_blocks=grade_teachable or None, teacher_lunch_windows=teacher_lunch_windows, grade_block_conflicts=block_conflicts or None)
                 sh_placed = sum(1 for sh in sh_assignments if sh.teacher is not None)
             else:
                 sh_assignments = []
@@ -3105,7 +3337,7 @@ def generate_schedules(
             # IMPORTANT: Only redistribute for non-locked teachers to preserve locked schedules
             if is_rule_enabled(rules, 'no_btb_open'):
                 unlocked_full_time = [t for t in full_time_names if t not in locked_teacher_names]
-                redistribute_open_blocks(ts, gs, unlocked_full_time, grade_teachable_blocks=grade_teachable or None, teacher_lunch_windows=teacher_lunch_windows, frozen_class_entries=frozen_class_entries, class_allowed_pairs=class_allowed_pairs)
+                redistribute_open_blocks(ts, gs, unlocked_full_time, grade_teachable_blocks=grade_teachable or None, teacher_lunch_windows=teacher_lunch_windows, frozen_class_entries=frozen_class_entries, class_allowed_pairs=class_allowed_pairs, grade_block_conflicts=block_conflicts or None)
 
             # CRITICAL: Rebuild grade schedules from teacher schedules to ensure consistency.
             # This is a destructive rebuild that ensures grade_schedules always match teacher_schedules,
@@ -3163,6 +3395,8 @@ def generate_schedules(
                     blocks=blocks,
                     grade_teachable_blocks=grade_teachable_blocks,
                     grade_block_pairs=grade_block_pairs,
+                    grade_block_conflicts=grade_block_conflicts,
+                    grade_lunch_blocks=grade_lunch_blocks,
                 )
                 if unlock_suggestions:
                     diagnostics['unlockSuggestions'] = unlock_suggestions

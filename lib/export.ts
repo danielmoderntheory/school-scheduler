@@ -1,8 +1,8 @@
 import XLSX from "xlsx-js-style"
 import type { ScheduleOption, TeacherSchedule, GradeSchedule, OpenBlockLabels, TimetableRow, TimetableTemplate } from "./types"
 import { BLOCK_TYPE_OPEN, BLOCK_TYPE_STUDY_HALL, isOpenBlock, isStudyHall, isScheduledClass, getOpenBlockAt, getOpenBlockLabel, getScheduleBlockNumbers, getTeacherLunchCandidates, designateTeacherLunch, type LunchContext } from "./schedule-utils"
-import { formatGradeDisplayCompact } from "./grade-utils"
-import { resolveRowsForGrade, getTemplateBlocks, getTeachableBlocksForGrade } from "./timetable-utils"
+import { formatGradeDisplayCompact, parseGradeDisplayToNames } from "./grade-utils"
+import { resolveRowsForGrade, getTemplateBlocks, getTeachableBlocksForGrade, getLunchBlocksForGrade, getBlockConflictsForGrade } from "./timetable-utils"
 
 const DAYS = ["Mon", "Tues", "Wed", "Thurs", "Fri"]
 
@@ -33,11 +33,74 @@ function getLunchBlocksByGrade(exportBlocks: number[], metadata?: ExportMetadata
   const template = metadata?.timetableTemplate
   if (!template || !metadata?.grades) return map
   for (const g of metadata.grades) {
-    const teachable = getTeachableBlocksForGrade(template, g.id)
-    const lunch = exportBlocks.filter(b => !teachable.includes(b))
+    const lunch = getLunchBlocksForGrade(template, g.id).filter(b => exportBlocks.includes(b))
     if (lunch.length > 0) map[g.display_name] = lunch
   }
   return map
+}
+
+// Unavailable blocks per grade: exported blocks that are neither teachable for
+// the grade nor its lunch window — e.g. a block the grade surrendered (K-5's
+// Block 9 under the afternoon-restructure template). These export as a dash
+// rather than "Lunch"/OPEN. Empty on legacy exports (no template).
+function getUnavailableBlocksByGrade(exportBlocks: number[], metadata?: ExportMetadata): Record<string, number[]> {
+  const map: Record<string, number[]> = {}
+  const template = metadata?.timetableTemplate
+  if (!template || !metadata?.grades) return map
+  for (const g of metadata.grades) {
+    const teachable = getTeachableBlocksForGrade(template, g.id)
+    const lunch = getLunchBlocksForGrade(template, g.id)
+    const unavailable = exportBlocks.filter(b => !teachable.includes(b) && !lunch.includes(b))
+    if (unavailable.length > 0) map[g.display_name] = unavailable
+  }
+  return map
+}
+
+// Cross-block conflicts per grade display name ([block, conflictingBlock]
+// real-time overlaps from template rows' conflictsWith). Empty on legacy
+// exports (no template) — then no teacher cell is ever conflict-blocked.
+function getExportBlockConflicts(metadata?: ExportMetadata): Record<string, [number, number][]> {
+  const map: Record<string, [number, number][]> = {}
+  const template = metadata?.timetableTemplate
+  if (!template || !metadata?.grades) return map
+  for (const g of metadata.grades) {
+    const pairs = getBlockConflictsForGrade(template, g.id)
+    if (pairs.length > 0) map[g.display_name] = pairs
+  }
+  return map
+}
+
+// A teacher cell is conflict-blocked when it holds no scheduled content but
+// the teacher's class in another block the same day runs into its window
+// (template cross-block conflict, e.g. K-5's shifted last class at Block 8
+// running into Block 9). The teacher isn't free there, so it exports as a
+// dash — winning over custom OPEN labels and the Lunch designation.
+function isBlockedExportCell(
+  schedule: TeacherSchedule,
+  day: string,
+  block: number,
+  conflictsByGrade: Record<string, [number, number][]>
+): boolean {
+  const entry = schedule[day]?.[block]
+  if (entry && !isOpenBlock(entry[1])) return false
+  const gradeNames = Object.keys(conflictsByGrade)
+  for (const g of gradeNames) {
+    for (const [a, b] of conflictsByGrade[g]) {
+      if (b !== block || a === block) continue
+      const src = schedule[day]?.[a]
+      if (!src || !isScheduledClass(src[1])) continue
+      if (parseGradeDisplayToNames(src[0], gradeNames).includes(g)) return true
+    }
+  }
+  return false
+}
+
+// A grade cell exports as a dash when the block is unavailable to the grade
+// (not teachable, not lunch) and holds no scheduled content — a real class
+// sitting there (data anomaly) still exports as-is so it stays visible.
+function isUnavailableExportCell(formatted: string, unavailableBlocks: number[] | undefined, block: number): boolean {
+  if (!unavailableBlocks || !unavailableBlocks.includes(block)) return false
+  return formatted === "" || formatted === BLOCK_TYPE_OPEN
 }
 
 // Lunch context for teacher-section exports, derived from the same template
@@ -48,13 +111,17 @@ function getExportLunchContext(exportBlocks: number[], metadata?: ExportMetadata
   const template = metadata?.timetableTemplate
   if (!template || !metadata?.grades) return undefined
   const teachableBlocksByGrade: Record<string, number[]> = {}
+  const lunchBlocksByGrade: Record<string, number[]> = {}
   let hasMasking = false
   for (const g of metadata.grades) {
     const teachable = getTeachableBlocksForGrade(template, g.id)
     teachableBlocksByGrade[g.display_name] = teachable
+    lunchBlocksByGrade[g.display_name] = getLunchBlocksForGrade(template, g.id)
     if (exportBlocks.some(b => !teachable.includes(b))) hasMasking = true
   }
-  return hasMasking ? { teachableBlocksByGrade, blocks: exportBlocks } : undefined
+  return hasMasking
+    ? { teachableBlocksByGrade, blocks: exportBlocks, lunchBlocksByGrade }
+    : undefined
 }
 
 // Per-day designated Lunch block for one teacher (same designation rule the
@@ -481,6 +548,7 @@ export function generateXLSX(option: ScheduleOption, metadata?: ExportMetadata):
   // Sort teachers by primary grade (same as history view)
   const sortedTeachers = sortTeachers(Object.entries(option.teacherSchedules), option.teacherStats)
   const exportLunchContext = getExportLunchContext(exportBlocks, metadata)
+  const exportBlockConflicts = getExportBlockConflicts(metadata)
 
   sortedTeachers.forEach(([teacher, schedule]) => {
     const lunchByDay = getTeacherLunchByDay(schedule, exportLunchContext, exportBlocks)
@@ -495,6 +563,12 @@ export function generateXLSX(option: ScheduleOption, metadata?: ExportMetadata):
       const row: (string | number)[] = [`Block ${block}`]
       DAYS.forEach((day) => {
         const entry = schedule[day]?.[block]
+        // Conflict-blocked window: still teaching a class that runs into this
+        // block — not free, so the dash wins over labels and Lunch.
+        if (isBlockedExportCell(schedule, day, block, exportBlockConflicts)) {
+          row.push("—")
+          return
+        }
         // Explicit custom open-block labels win over the inferred Lunch label
         const label = getOpenLabelForCell(schedule, teacher, day, block, option.openBlockLabels)
         if (!label && isTeacherLunchExportCell(entry, lunchByDay, day, block)) {
@@ -540,9 +614,11 @@ export function generateXLSX(option: ScheduleOption, metadata?: ExportMetadata):
   // Sort grades: Kindergarten first, then by grade number
   const sortedGrades = Object.entries(option.gradeSchedules).sort(([a], [b]) => gradeSort(a, b))
   const lunchBlocksByGrade = getLunchBlocksByGrade(exportBlocks, metadata)
+  const unavailableBlocksByGrade = getUnavailableBlocksByGrade(exportBlocks, metadata)
 
   sortedGrades.forEach(([grade, schedule]) => {
     const lunchBlocks = lunchBlocksByGrade[grade]
+    const unavailableBlocks = unavailableBlocksByGrade[grade]
     gradeRowInfo.push({ type: "name", row: gradeData.length })
     gradeData.push([grade])
 
@@ -554,7 +630,11 @@ export function generateXLSX(option: ScheduleOption, metadata?: ExportMetadata):
       const row: (string | number)[] = [`Block ${block}`]
       DAYS.forEach((day) => {
         const cell = formatGradeCell(schedule[day]?.[block])
-        row.push(isLunchExportCell(cell, lunchBlocks, block) ? "Lunch" : cell)
+        row.push(
+          isLunchExportCell(cell, lunchBlocks, block) ? "Lunch"
+            : isUnavailableExportCell(cell, unavailableBlocks, block) ? "—"
+            : cell
+        )
       })
       gradeData.push(row)
     })
@@ -754,6 +834,7 @@ export function generateCSV(option: ScheduleOption, metadata?: ExportMetadata): 
   lines.push("TEACHER SCHEDULES")
   lines.push("")
   const exportLunchContext = getExportLunchContext(exportBlocks, metadata)
+  const exportBlockConflicts = getExportBlockConflicts(metadata)
   sortTeachers(Object.entries(option.teacherSchedules), option.teacherStats).forEach(([teacher, schedule]) => {
     const lunchByDay = getTeacherLunchByDay(schedule, exportLunchContext, exportBlocks)
     lines.push(teacher)
@@ -762,6 +843,12 @@ export function generateCSV(option: ScheduleOption, metadata?: ExportMetadata): 
       const row: string[] = [`Block ${block}`]
       DAYS.forEach((day) => {
         const entry = schedule[day]?.[block]
+        // Conflict-blocked window: still teaching a class that runs into this
+        // block — not free, so the dash wins over labels and Lunch.
+        if (isBlockedExportCell(schedule, day, block, exportBlockConflicts)) {
+          row.push('"—"')
+          return
+        }
         // Explicit custom open-block labels win over the inferred Lunch label
         const label = getOpenLabelForCell(schedule, teacher, day, block, option.openBlockLabels)
         const cell = !label && isTeacherLunchExportCell(entry, lunchByDay, day, block)
@@ -778,15 +865,19 @@ export function generateCSV(option: ScheduleOption, metadata?: ExportMetadata): 
   lines.push("GRADE SCHEDULES")
   lines.push("")
   const lunchBlocksByGrade = getLunchBlocksByGrade(exportBlocks, metadata)
+  const unavailableBlocksByGrade = getUnavailableBlocksByGrade(exportBlocks, metadata)
   Object.entries(option.gradeSchedules).sort(([a], [b]) => gradeSort(a, b)).forEach(([grade, schedule]) => {
     const lunchBlocks = lunchBlocksByGrade[grade]
+    const unavailableBlocks = unavailableBlocksByGrade[grade]
     lines.push(grade)
     lines.push(["", ...DAYS].join(","))
     exportBlocks.forEach((block) => {
       const row: string[] = [`Block ${block}`]
       DAYS.forEach((day) => {
         const rawCell = formatGradeCell(schedule[day]?.[block])
-        const cell = isLunchExportCell(rawCell, lunchBlocks, block) ? "Lunch" : rawCell
+        const cell = isLunchExportCell(rawCell, lunchBlocks, block) ? "Lunch"
+          : isUnavailableExportCell(rawCell, unavailableBlocks, block) ? "—"
+          : rawCell
         row.push(cell ? `"${cell}"` : "")
       })
       lines.push(row.join(","))

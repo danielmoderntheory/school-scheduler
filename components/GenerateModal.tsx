@@ -25,7 +25,7 @@ import {
 import { Loader2, Coffee, AlertTriangle, Users, CheckCircle2, ChevronDown, ChevronRight } from "lucide-react"
 import { generateSchedulesRemote, type RemoteClassEntry, type ScheduleDiagnostics, type SchedulingRule } from "@/lib/scheduler-remote"
 import { DAYS, type Teacher, type TimetableTemplate } from "@/lib/types"
-import { getTemplateBlocks, getTeachableBlocksForGrade, getPairableBlocksForGrade } from "@/lib/timetable-utils"
+import { getTemplateBlocks, getTeachableBlocksForGrade, getPairableBlocksForGrade, getBlockConflictsForGrade, getLunchBlocksForGrade } from "@/lib/timetable-utils"
 import { useGeneration } from "@/lib/generation-context"
 import { calculateGradeBlocks, buildCotaughtGroups, type BlockCountClass } from "@/lib/schedule-utils"
 import toast from "@/lib/toast"
@@ -436,6 +436,21 @@ export function GenerateModal({
       const solveGradeBlockPairs = Object.fromEntries(
         grades.map((g) => [g.display_name, getPairableBlocksForGrade(solveTemplate, g.id)])
       )
+      // Cross-block time overlaps ([block, conflictingBlock]) from template rows
+      // with conflictsWith — only grades that actually have any are sent.
+      const solveGradeBlockConflicts = Object.fromEntries(
+        grades
+          .map((g) => [g.display_name, getBlockConflictsForGrade(solveTemplate, g.id)] as const)
+          .filter(([, pairs]) => pairs.length > 0)
+      )
+      // TRUE lunch blocks per grade (masked block paired with a break row in
+      // the same time window) — lets the solver tell lunch apart from other
+      // masked blocks (e.g. a surrendered afternoon block).
+      const solveGradeLunchBlocks = Object.fromEntries(
+        grades
+          .map((g) => [g.display_name, getLunchBlocksForGrade(solveTemplate, g.id)] as const)
+          .filter(([, lunchBlocks]) => lunchBlocks.length > 0)
+      )
 
       let result = await generateSchedulesRemote(teacherList, classList, {
         numOptions: 1,
@@ -450,6 +465,8 @@ export function GenerateModal({
         blocks: solveBlocks,
         gradeTeachableBlocks: solveGradeTeachableBlocks,
         gradeBlockPairs: solveGradeBlockPairs,
+        gradeBlockConflicts: solveGradeBlockConflicts,
+        gradeLunchBlocks: solveGradeLunchBlocks,
         onProgress: (current, total, message) => {
           setProgress({ current, total, message })
         },
@@ -477,6 +494,8 @@ export function GenerateModal({
             blocks: solveBlocks,
             gradeTeachableBlocks: solveGradeTeachableBlocks,
             gradeBlockPairs: solveGradeBlockPairs,
+            gradeBlockConflicts: solveGradeBlockConflicts,
+            gradeLunchBlocks: solveGradeLunchBlocks,
             onProgress: (current, total, message) => {
               setProgress({ current, total, message: `[Deep] ${message}` })
             },

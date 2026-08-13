@@ -38,16 +38,36 @@ interface BlockState {
   gradeBlocks: Map<string, Set<number>> | null;
   /** Grade name -> allowed [earlier, later] block pairs for double periods. null = no pairing */
   gradePairs: Map<string, [number, number][]> | null;
+  /**
+   * Grade name -> [block, conflictingBlock] cross-block time overlaps. A pair
+   * [b, c] means the grade's block b really overlaps block c's window, so a
+   * teacher teaching that grade at b must have nothing at c the same day
+   * (class or study hall), and vice versa. null = no cross-block conflicts.
+   */
+  gradeConflicts: Map<string, [number, number][]> | null;
+  /**
+   * Grade name -> the grade's TRUE lunch block numbers, derived upstream from
+   * the timetable template (a masked block paired with a break row in the same
+   * time window). When present, teacher lunch candidates come from this map
+   * instead of the masked-block approximation — required once a grade has
+   * masked blocks that are NOT lunch (e.g. a surrendered afternoon block).
+   * null = legacy derivation (complement of teachable blocks).
+   */
+  gradeLunch: Map<string, Set<number>> | null;
 }
 
 let activeBlocks: number[] = [...BLOCKS];
 let activeGradeBlocks: Map<string, Set<number>> | null = null;
 let activeGradePairs: Map<string, [number, number][]> | null = null;
+let activeGradeConflicts: Map<string, [number, number][]> | null = null;
+let activeGradeLunchBlocks: Map<string, Set<number>> | null = null;
 
 function resolveBlockState(
   blocks?: number[],
   teachableBlocksByGrade?: Record<string, number[]>,
-  gradeBlockPairs?: Record<string, [number, number][]>
+  gradeBlockPairs?: Record<string, [number, number][]>,
+  gradeBlockConflicts?: Record<string, [number, number][]>,
+  gradeLunchBlocks?: Record<string, number[]>
 ): BlockState {
   const resolvedBlocks = blocks && blocks.length > 0 ? [...blocks] : [...BLOCKS];
   let gradeBlocks: Map<string, Set<number>> | null = null;
@@ -64,13 +84,31 @@ function resolveBlockState(
       gradePairs.set(grade, pairs.map(p => [p[0], p[1]] as [number, number]));
     }
   }
-  return { blocks: resolvedBlocks, gradeBlocks, gradePairs };
+  let gradeConflicts: Map<string, [number, number][]> | null = null;
+  if (gradeBlockConflicts) {
+    for (const [grade, pairs] of Object.entries(gradeBlockConflicts)) {
+      if (!pairs || pairs.length === 0) continue;
+      if (!gradeConflicts) gradeConflicts = new Map();
+      gradeConflicts.set(grade, pairs.map(p => [p[0], p[1]] as [number, number]));
+    }
+  }
+  let gradeLunch: Map<string, Set<number>> | null = null;
+  if (gradeLunchBlocks) {
+    for (const [grade, lunchBlocks] of Object.entries(gradeLunchBlocks)) {
+      if (!lunchBlocks || lunchBlocks.length === 0) continue;
+      if (!gradeLunch) gradeLunch = new Map();
+      gradeLunch.set(grade, new Set(lunchBlocks.filter(b => resolvedBlocks.includes(b))));
+    }
+  }
+  return { blocks: resolvedBlocks, gradeBlocks, gradePairs, gradeConflicts, gradeLunch };
 }
 
 function applyBlockState(state: BlockState): void {
   activeBlocks = state.blocks;
   activeGradeBlocks = state.gradeBlocks;
   activeGradePairs = state.gradePairs;
+  activeGradeConflicts = state.gradeConflicts;
+  activeGradeLunchBlocks = state.gradeLunch;
 }
 
 /**
@@ -122,6 +160,81 @@ function getLegalPairsForGrades(gradeNames: string[]): [number, number][] {
 }
 
 // ============================================================================
+// CROSS-BLOCK CONFLICTS (hard) — e.g. a K-5 last class shifted off the shared
+// bells straddles two shared blocks: a teacher teaching that grade at block b
+// is really busy through block c's window too. gradeBlockConflicts supplies
+// [b, c] pairs per grade; enforcement is symmetric co-occurrence-forbidden:
+// (conflict-grade class at b) and (ANY obligation at c) never share a day.
+// ============================================================================
+
+/**
+ * Cross-block conflict pairs applicable to a class covering the given grades:
+ * the UNION over covered grades (any covered grade's overlap makes the
+ * teacher busy). Returns [] when no conflict map is in effect. Deduplicated.
+ */
+function getConflictPairsForGrades(gradeNames: string[]): [number, number][] {
+  if (!activeGradeConflicts) return [];
+  const seen = new Set<string>();
+  const result: [number, number][] = [];
+  for (const g of gradeNames) {
+    for (const [b, c] of activeGradeConflicts.get(g) ?? []) {
+      const key = `${b}|${c}`;
+      if (!seen.has(key)) {
+        seen.add(key);
+        result.push([b, c]);
+      }
+    }
+  }
+  return result;
+}
+
+/**
+ * Schedule-map form of the cross-block conflict check, used by the
+ * post-processing passes (study halls, redistribution) that operate on built
+ * TeacherSchedule maps rather than solver session state.
+ *
+ * Would occupying (day, block) — with a class covering `occupyingGrades`, or
+ * with a study hall / any non-class obligation when `occupyingGrades` is
+ * empty — violate a cross-block conflict for this teacher, given the entries
+ * currently in their schedule? Slots in `vacated` ("day|block" strings) are
+ * treated as freed by the same move.
+ */
+function violatesBlockConflicts(
+  teacherSchedules: Record<string, TeacherSchedule>,
+  teacher: string,
+  day: string,
+  block: number,
+  occupyingGrades: string[],
+  vacated?: Set<string>
+): boolean {
+  if (!activeGradeConflicts) return false;
+  const daySchedule = teacherSchedules[teacher]?.[day];
+  const isOccupiedAt = (b: number): boolean => {
+    if (vacated?.has(`${day}|${b}`)) return false;
+    const entry = daySchedule?.[b];
+    return !!entry && isOccupiedBlock(entry[1]);
+  };
+
+  // Forward: the entry being placed is a conflict-grade class at a conflict
+  // source block — its overlap windows must hold nothing.
+  for (const [b, c] of getConflictPairsForGrades(occupyingGrades)) {
+    if (b === block && isOccupiedAt(c)) return true;
+  }
+
+  // Reverse: some existing conflict-grade class of this teacher already
+  // overlaps the window being occupied.
+  for (const b of activeBlocks) {
+    if (b === block || !isOccupiedAt(b)) continue;
+    const entry = daySchedule?.[b];
+    if (!entry || !isScheduledClass(entry[1])) continue;
+    for (const [cb, cc] of getConflictPairsForGrades(parseGrades(entry[0]))) {
+      if (cb === b && cc === block) return true;
+    }
+  }
+  return false;
+}
+
+// ============================================================================
 // TEACHER LUNCH CONSTRAINT (hard, rule_key: 'teacher_lunch')
 // ============================================================================
 // A teacher's CANDIDATE LUNCH WINDOWS are the union, over all grades covered
@@ -153,10 +266,17 @@ function buildTeacherLunchInfo(
   if (!activeGradeBlocks) return result;
 
   for (const [teacher, groups] of gradeGroupsByTeacher) {
-    // Candidate windows: union over covered grades of (activeBlocks \ teachable)
+    // Candidate windows: union over covered grades of the grade's lunch blocks.
+    // Explicit template-derived lunch blocks win (they distinguish lunch from
+    // other masked blocks, e.g. a surrendered afternoon block); without them,
+    // fall back to the legacy approximation (activeBlocks \ teachable).
     const candidates = new Set<number>();
     for (const group of groups) {
       for (const g of group) {
+        if (activeGradeLunchBlocks) {
+          for (const b of activeGradeLunchBlocks.get(g) ?? []) candidates.add(b);
+          continue;
+        }
         const allowed = activeGradeBlocks.get(g);
         if (!allowed) continue; // grade absent from map = unrestricted, no lunch window
         for (const b of activeBlocks) {
@@ -881,6 +1001,47 @@ function solveBacktracking(
   // (its same-day pair count). Checked against session.maxSameDayPairs so a
   // class pairs only when its week cannot fit as singles.
   const pairClassPairCount = new Map<number, number>();
+  // Cross-block conflicts: teacher -> slot -> refcount of placed conflict-grade
+  // sessions whose real-time window overlaps that slot. A refcounted slot may
+  // hold NOTHING for that teacher (class or study hall) while the count > 0.
+  const conflictBlockedSlots = new Map<string, Map<number, number>>();
+
+  // [b, c] conflict pairs applicable to a session (union over covered grades)
+  const sessionConflictPairs = (grades: string[]): [number, number][] =>
+    getConflictPairsForGrades(grades);
+
+  const conflictTargetSlot = (slot: number, conflictBlock: number): number | null => {
+    const idx = activeBlocks.indexOf(conflictBlock);
+    return idx === -1 ? null : dayBlockToSlot(slotToDay(slot), idx);
+  };
+
+  const addConflictBlocks = (teacher: string, slot: number, pairs: [number, number][]): void => {
+    if (pairs.length === 0) return;
+    const blockNum = activeBlocks[slotToBlock(slot)];
+    for (const [b, c] of pairs) {
+      if (b !== blockNum) continue;
+      const target = conflictTargetSlot(slot, c);
+      if (target === null) continue;
+      if (!conflictBlockedSlots.has(teacher)) conflictBlockedSlots.set(teacher, new Map());
+      const map = conflictBlockedSlots.get(teacher)!;
+      map.set(target, (map.get(target) ?? 0) + 1);
+    }
+  };
+
+  const removeConflictBlocks = (teacher: string, slot: number, pairs: [number, number][]): void => {
+    if (pairs.length === 0) return;
+    const blockNum = activeBlocks[slotToBlock(slot)];
+    const map = conflictBlockedSlots.get(teacher);
+    if (!map) return;
+    for (const [b, c] of pairs) {
+      if (b !== blockNum) continue;
+      const target = conflictTargetSlot(slot, c);
+      if (target === null) continue;
+      const count = (map.get(target) ?? 1) - 1;
+      if (count <= 0) map.delete(target);
+      else map.set(target, count);
+    }
+  };
 
   // Track which co-taught sessions have been assigned (to skip them in main loop)
   const assignedCotaughtSessions = new Set<number>();
@@ -938,6 +1099,10 @@ function solveBacktracking(
     // Check teacher conflict - ALWAYS enforced (teacher can't be in two places)
     if (teacherSlots.get(session.teacher)?.has(slot)) return false;
 
+    // Cross-block conflicts (HARD, reverse direction): the slot's real-time
+    // window is overlapped by an already-placed conflict-grade class
+    if (conflictBlockedSlots.get(session.teacher)?.has(slot)) return false;
+
     // Check grade conflicts
     // Rules:
     // - Non-elective classes conflict with ANY class (elective or non-elective) at same grade/slot
@@ -951,6 +1116,18 @@ function solveBacktracking(
 
       // Non-electives also conflict with elective slots
       if (!isElective && electiveGradeSlots.get(g)?.has(slot)) return false;
+    }
+
+    // Cross-block conflicts (HARD, forward direction): placing a conflict-grade
+    // class here makes the teacher busy through the overlapped blocks' windows
+    // too — those slots must currently hold nothing.
+    {
+      const blockNum = activeBlocks[slotToBlock(slot)];
+      for (const [b, c] of sessionConflictPairs(grades)) {
+        if (b !== blockNum) continue;
+        const target = conflictTargetSlot(slot, c);
+        if (target !== null && teacherSlots.get(session.teacher)?.has(target)) return false;
+      }
     }
 
     // Check subject/day conflict - CAN be toggled via rules.
@@ -1023,7 +1200,28 @@ function solveBacktracking(
     const occupied = teacherSlots.get(session.teacher);
     if (occupied?.has(sA) || occupied?.has(sB)) return false;
 
+    // Cross-block conflicts (HARD): neither block may sit in a window
+    // overlapped by a placed conflict-grade class (reverse), and any overlap
+    // windows of the pair's own blocks must hold nothing — including the
+    // pair's other block (forward).
+    const blockedMap = conflictBlockedSlots.get(session.teacher);
+    if (blockedMap?.has(sA) || blockedMap?.has(sB)) return false;
+
     const grades = parseGrades(session.grade);
+    const conflictPairs = sessionConflictPairs(grades);
+    if (conflictPairs.length > 0) {
+      for (const slot of [sA, sB]) {
+        const blockNum = activeBlocks[slotToBlock(slot)];
+        for (const [b, c] of conflictPairs) {
+          if (b !== blockNum) continue;
+          const target = conflictTargetSlot(slot, c);
+          if (target === null) continue;
+          if (target === sA || target === sB) return false; // pair overlaps itself
+          if (occupied?.has(target)) return false;
+        }
+      }
+    }
+
     const isElective = session.isElective === true;
     for (const g of grades) {
       const gs = gradeSlots.get(g);
@@ -1080,6 +1278,9 @@ function solveBacktracking(
     t.add(sB);
 
     const grades = parseGrades(session.grade);
+    const conflictPairs = sessionConflictPairs(grades);
+    addConflictBlocks(session.teacher, sA, conflictPairs);
+    addConflictBlocks(session.teacher, sB, conflictPairs);
     const dayIdx = slotToDay(sA);
     const isElective = session.isElective === true;
     grades.forEach(g => {
@@ -1105,6 +1306,9 @@ function solveBacktracking(
     t.delete(sB);
 
     const grades = parseGrades(session.grade);
+    const conflictPairs = sessionConflictPairs(grades);
+    removeConflictBlocks(session.teacher, sA, conflictPairs);
+    removeConflictBlocks(session.teacher, sB, conflictPairs);
     const dayIdx = slotToDay(sA);
     const isElective = session.isElective === true;
     grades.forEach(g => {
@@ -1149,6 +1353,7 @@ function solveBacktracking(
     teacherSlots.get(session.teacher)!.add(slot);
 
     const grades = parseGrades(session.grade);
+    addConflictBlocks(session.teacher, slot, sessionConflictPairs(grades));
     const day = slotToDay(slot);
     const isElective = session.isElective === true;
 
@@ -1203,6 +1408,7 @@ function solveBacktracking(
     teacherSlots.get(session.teacher)!.delete(slot);
 
     const grades = parseGrades(session.grade);
+    removeConflictBlocks(session.teacher, slot, sessionConflictPairs(grades));
     const day = slotToDay(slot);
     const isElective = session.isElective === true;
 
@@ -1672,6 +1878,12 @@ function addStudyHalls(
           // (e.g. a 6th grade study hall can't land in the MS lunch block)
           if (!isBlockTeachableForGrades(group.grades, block)) continue;
 
+          // Cross-block conflicts (HARD): a study hall may not sit in a window
+          // overlapped by one of the teacher's conflict-grade classes (e.g.
+          // Block 9 while they teach a K-5 class in the shifted Block 8), nor
+          // in a conflict source block whose overlap windows are occupied.
+          if (violatesBlockConflicts(teacherSchedules, teacher, day, block, group.grades)) continue;
+
           // Check teacher availability
           if (teacherAvailability?.has(teacher)) {
             const dayIdx = DAYS.indexOf(day);
@@ -2012,6 +2224,15 @@ function redistributeOpenBlocks(
         // Never swap a class INTO the teacher's last free lunch window
         if (wouldBreakLunch(teacher, issueDay, issueBlock, targetDay, targetBlock)) continue;
 
+        // Cross-block conflicts (HARD): the destination window must not be
+        // overlapped by a conflict-grade class of this teacher, and a
+        // conflict-grade class moving in must find its overlap windows free
+        // (the vacated source counts as freed).
+        if (violatesBlockConflicts(
+          teacherSchedules, teacher, issueDay, issueBlock, grades,
+          new Set([`${targetDay}|${targetBlock}`])
+        )) continue;
+
         // The destination day must not already hold another meeting of this
         // class (would create an unplanned same-day twin / third session)
         let classMeetsOnIssueDay = false;
@@ -2168,6 +2389,20 @@ function redistributeOpenBlocks(
             // ...and must leave the teacher a lunch window on destDay
             if (pairWouldBreakLunch(teacher, destDay, p1, p2, sourceDay, sb1, sb2)) continue;
 
+            // Cross-block conflicts (HARD): neither destination block may
+            // violate a conflict — including the pair overlapping ITSELF
+            // (a conflict-grade class at p1 whose window overlaps p2), which
+            // the schedule-map check can't see because p2 is open until the
+            // move lands.
+            const movedConflictPairs = getConflictPairsForGrades(grades);
+            const pairSelfOverlap = movedConflictPairs.some(([b, c]) =>
+              (b === p1 && c === p2) || (b === p2 && c === p1)
+            );
+            if (pairSelfOverlap) continue;
+            const vacatedPair = new Set([`${sourceDay}|${sb1}`, `${sourceDay}|${sb2}`]);
+            if (violatesBlockConflicts(teacherSchedules, teacher, destDay, p1, grades, vacatedPair)) continue;
+            if (violatesBlockConflicts(teacherSchedules, teacher, destDay, p2, grades, vacatedPair)) continue;
+
             // Apply atomically; keep only on strict BTB-OPEN reduction
             const savedGradeCells = grades.map(g => ({
               g,
@@ -2253,11 +2488,13 @@ export function __testRedistributeOpenBlocks(
     blocks?: number[];
     teachableBlocksByGrade?: Record<string, number[]>;
     gradeBlockPairs?: Record<string, [number, number][]>;
+    gradeBlockConflicts?: Record<string, [number, number][]>;
+    gradeLunchBlocks?: Record<string, number[]>;
     immovableClasses?: Set<string>;
     enforceTeacherLunch?: boolean;
   } = {}
 ): void {
-  applyBlockState(resolveBlockState(opts.blocks, opts.teachableBlocksByGrade, opts.gradeBlockPairs));
+  applyBlockState(resolveBlockState(opts.blocks, opts.teachableBlocksByGrade, opts.gradeBlockPairs, opts.gradeBlockConflicts, opts.gradeLunchBlocks));
   const teacherLunch = opts.enforceTeacherLunch
     ? buildTeacherLunchFromSchedules(teacherSchedules)
     : undefined;
@@ -2482,6 +2719,10 @@ function getStudyHallEligibleStatuses(rules: SchedulingRule[] | undefined): Set<
  *   budget. Classes flagged isDouble must pair (atomic pair meetings, odd
  *   lesson as a single, all on distinct days) and fail preflight with no
  *   legal pairs.
+ * @param gradeBlockConflicts - Optional map of grade NAME -> [block,
+ *   conflictingBlock] cross-block time overlaps (template rows' conflictsWith).
+ *   HARD: a teacher teaching a listed grade at `block` on a day may hold
+ *   nothing at `conflictingBlock` that day (class or study hall), symmetric.
  */
 export async function generateSchedules(
   teachers: Teacher[],
@@ -2489,11 +2730,13 @@ export async function generateSchedules(
   options: GeneratorOptions = {},
   blocks?: number[],
   teachableBlocksByGrade?: Record<string, number[]>,
-  gradeBlockPairs?: Record<string, [number, number][]>
+  gradeBlockPairs?: Record<string, [number, number][]>,
+  gradeBlockConflicts?: Record<string, [number, number][]>,
+  gradeLunchBlocks?: Record<string, number[]>
 ): Promise<GeneratorResult> {
   // Stamp the block configuration into module state. Re-applied after every
   // await below so interleaved calls can't corrupt this call's configuration.
-  const blockState = resolveBlockState(blocks, teachableBlocksByGrade, gradeBlockPairs);
+  const blockState = resolveBlockState(blocks, teachableBlocksByGrade, gradeBlockPairs, gradeBlockConflicts, gradeLunchBlocks);
   applyBlockState(blockState);
 
   const {
@@ -2570,7 +2813,7 @@ export async function generateSchedules(
 
   // Teacher lunch hard constraint — only when a teachable-blocks map is in
   // effect AND the 'teacher_lunch' rule is enabled (missing rule = enabled)
-  const teacherLunch = activeGradeBlocks && isRuleEnabled(rules, 'teacher_lunch')
+  const teacherLunch = (activeGradeLunchBlocks || activeGradeBlocks) && isRuleEnabled(rules, 'teacher_lunch')
     ? buildTeacherLunchFromClasses(classes)
     : undefined;
 
@@ -2986,6 +3229,9 @@ export async function generateSchedules(
  * @param blocks - Ordered block numbers of the timetable (default: legacy [1,2,3,4,5])
  * @param teachableBlocksByGrade - Optional map of grade NAME -> block numbers that
  *   grade may be scheduled in; study halls only land in blocks teachable by their grade
+ * @param gradeBlockConflicts - Optional map of grade NAME -> [block, conflictingBlock]
+ *   cross-block time overlaps; study halls never land in a window overlapped by
+ *   one of the supervisor's conflict-grade classes
  */
 export function reassignStudyHalls(
   option: ScheduleOption,
@@ -2994,15 +3240,17 @@ export function reassignStudyHalls(
   rules?: SchedulingRule[],
   excludedTeachers?: Set<string>,
   blocks?: number[],
-  teachableBlocksByGrade?: Record<string, number[]>
+  teachableBlocksByGrade?: Record<string, number[]>,
+  gradeBlockConflicts?: Record<string, [number, number][]>,
+  gradeLunchBlocks?: Record<string, number[]>
 ): { success: boolean; newOption?: ScheduleOption; message?: string; noChanges?: boolean } {
   // Stamp the block configuration into module state (this function is fully
   // synchronous, so a single application at entry is deterministic per call)
-  applyBlockState(resolveBlockState(blocks, teachableBlocksByGrade));
+  applyBlockState(resolveBlockState(blocks, teachableBlocksByGrade, undefined, gradeBlockConflicts, gradeLunchBlocks));
 
   // Teacher lunch hard constraint — derived from the placed class schedules
   // (no class list is available here). Same gating as generateSchedules.
-  const teacherLunch = activeGradeBlocks && isRuleEnabled(rules, 'teacher_lunch')
+  const teacherLunch = (activeGradeLunchBlocks || activeGradeBlocks) && isRuleEnabled(rules, 'teacher_lunch')
     ? buildTeacherLunchFromSchedules(option.teacherSchedules)
     : undefined;
 
