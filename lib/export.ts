@@ -794,7 +794,14 @@ export function generateXLSX(option: ScheduleOption, metadata?: ExportMetadata):
               const entries = entry as unknown as [string, string][]
               const classEntries = entries.filter(([, subject]) => isScheduledClass(subject))
               if (classEntries.length > 1) {
-                row.push("Elective")
+                // Same subject = one co-taught class, not an elective period
+                const subjects = new Set(classEntries.map(([, subject]) => subject))
+                if (subjects.size === 1) {
+                  const teachers = classEntries.map(([t]) => t).filter(Boolean).join(" / ")
+                  row.push(`${classEntries[0][1]}\n${teachers}`)
+                } else {
+                  row.push("Elective")
+                }
                 return
               }
               // Single class entry or only OPEN/Study Hall - use first entry
