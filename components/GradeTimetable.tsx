@@ -29,6 +29,13 @@ export function GradeTimetable({
       // Filter to actual classes (not OPEN or Study Hall)
       const classEntries = entries.filter(([, subject]) => subject && !isOpenBlock(subject) && !isStudyHall(subject))
       if (classEntries.length > 1) {
+        // Same subject from several teachers = one co-taught class (e.g. K/1
+        // Science, Daniela + Nati) — never an elective period.
+        const subjects = new Set(classEntries.map(([, subject]) => subject))
+        if (subjects.size === 1) {
+          const teacher = classEntries.map(([t]) => t).filter(Boolean).join(" / ")
+          return { subject: classEntries[0][1], teacher }
+        }
         return { subject: "Elective", teacher: "" }
       }
       // Single class entry or only OPEN/Study Hall - use first entry
