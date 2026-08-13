@@ -454,11 +454,12 @@ export function GenerateModal({
 
       let result = await generateSchedulesRemote(teacherList, classList, {
         numOptions: 1,
-        // 20 seeds, not 150: the per-seed time budget is maxTime/attempts, and
-        // the 9-block model (doubles, pairing budgets, lunch windows) needs
-        // ~10s/seed on Cloud Run's single CPU. 150 attempts starved every seed
-        // to <2s and returned UNKNOWN on a schedule that solves comfortably.
-        numAttempts: 20,
+        // 9 seeds, not 20: the per-seed time budget is maxTime/attempts, and
+        // the 26/27 model (exact-fill K-5 week + cross-block conflicts +
+        // doubles + lunch windows) needs 25-40s/seed on Cloud Run's single
+        // CPU. 280/9 ≈ 31s/seed (backend caps at 30s). More seeds starve
+        // every seed and return UNKNOWN on a schedule that provably solves.
+        numAttempts: 9,
         maxTimeSeconds: 280,
         rules,
         grades: gradeNames,
@@ -487,7 +488,7 @@ export function GenerateModal({
 
           const deepResult = await generateSchedulesRemote(teacherList, classList, {
             numOptions: 1,
-            numAttempts: 15,
+            numAttempts: 4,
             maxTimeSeconds: 120,
             rules,
             grades: gradeNames,

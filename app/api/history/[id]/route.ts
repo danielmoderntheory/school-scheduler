@@ -20,7 +20,7 @@ export async function GET(
       const [result] = await sql`
         SELECT
           sg.id, sg.quarter_id, sg.generated_at, sg.selected_option,
-          sg.notes, sg.is_starred, sg.is_saved,
+          sg.notes, sg.is_starred, sg.is_saved, sg.deleted_at,
           sg.options->((sg.selected_option - 1)::int) as selected_schedule,
           q.id as quarter_id_ref,
           q.name as quarter_name

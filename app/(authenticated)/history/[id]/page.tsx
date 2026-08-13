@@ -332,6 +332,7 @@ interface Generation {
   id: string
   quarter_id: string
   generated_at: string
+  deleted_at?: string | null
   selected_option: number | null
   notes: string | null
   is_starred: boolean
@@ -1311,6 +1312,28 @@ export default function HistoryDetailPage() {
     }
   }
 
+  async function handleRestoreArchived() {
+    if (!generation) return
+    setSaving(true)
+    try {
+      const res = await fetch(`/api/history/${id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "undelete" }),
+      })
+      if (res.ok) {
+        setGeneration({ ...generation, deleted_at: null })
+        toast("Schedule restored to history", { icon: successIcon })
+      } else {
+        toast.error("Failed to restore schedule")
+      }
+    } catch (error) {
+      toast.error("Failed to restore schedule")
+    } finally {
+      setSaving(false)
+    }
+  }
+
   async function handleUnstar() {
     if (!generation) return
     setSaving(true)
@@ -1788,9 +1811,10 @@ export default function HistoryDetailPage() {
       setGenerationProgress({ current: 0, total: 100, message: "Starting OR-Tools solver..." })
       remoteResult = await generateSchedulesRemote(teachers, classes, {
         numOptions: 1,
-        // 20 seeds, not 50 — the 9-block model needs ~10s/seed on Cloud Run's
-        // single CPU; more attempts just starves each seed's time budget
-        numAttempts: 20,
+        // 4 seeds — the 26/27 model (exact-fill K-5 + cross-block conflicts)
+        // needs 25-40s/seed on Cloud Run's single CPU (backend caps 30s);
+        // more attempts just starves each seed's time budget
+        numAttempts: 4,
         maxTimeSeconds: 120,
         lockedTeachers: lockedSchedules,
         teachersNeedingStudyHalls,
@@ -1819,7 +1843,7 @@ export default function HistoryDetailPage() {
         setGenerationProgress({ current: 0, total: 100, message: "Trying deeper exploration..." })
         remoteResult = await generateSchedulesRemote(teachers, classes, {
           numOptions: 1,
-          numAttempts: 15,
+          numAttempts: 4,
           maxTimeSeconds: 120,
           lockedTeachers: lockedSchedules,
           teachersNeedingStudyHalls,
@@ -1873,7 +1897,7 @@ export default function HistoryDetailPage() {
         setGenerationProgress({ current: 0, total: 100, message: "Trying suboptimal solutions..." })
         remoteResult = await generateSchedulesRemote(teachers, classes, {
           numOptions: 1,
-          numAttempts: 15,
+          numAttempts: 4,
           maxTimeSeconds: 120,
           lockedTeachers: lockedSchedules,
           teachersNeedingStudyHalls,
@@ -1900,7 +1924,7 @@ export default function HistoryDetailPage() {
         setGenerationProgress({ current: 0, total: 100, message: "Trying randomized scoring..." })
         remoteResult = await generateSchedulesRemote(teachers, classes, {
           numOptions: 1,
-          numAttempts: 15,
+          numAttempts: 4,
           maxTimeSeconds: 120,
           lockedTeachers: lockedSchedules,
           teachersNeedingStudyHalls,
@@ -7816,6 +7840,12 @@ export default function HistoryDetailPage() {
 
     return (
       <div className="max-w-7xl mx-auto p-8">
+        {generation.deleted_at && (
+          <div className="mb-4 rounded-md border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-900 no-print">
+            <strong>This schedule is archived</strong> — it was archived on{" "}
+            {new Date(generation.deleted_at).toLocaleString()} and no longer appears in History.
+          </div>
+        )}
         {/* Header */}
         <div className="mb-6">
           <h1 className="text-2xl font-bold mb-2">
@@ -8004,6 +8034,23 @@ export default function HistoryDetailPage() {
 
   return (
     <div className="max-w-7xl mx-auto p-8">
+      {generation.deleted_at && (
+        <div className="mb-4 flex items-center justify-between gap-3 rounded-md border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-900 no-print">
+          <span>
+            <strong>This schedule is archived</strong> — it was archived on{" "}
+            {new Date(generation.deleted_at).toLocaleString()} and no longer appears in History.
+          </span>
+          {userRole === "admin" && (
+            <button
+              onClick={handleRestoreArchived}
+              disabled={saving}
+              className="shrink-0 rounded-md border border-amber-400 bg-white px-3 py-1.5 font-medium text-amber-900 hover:bg-amber-100 disabled:opacity-50"
+            >
+              Restore
+            </button>
+          )}
+        </div>
+      )}
       <div className="mb-6">
         <div className="flex items-center justify-between mb-2">
           <div className="flex items-center gap-4">

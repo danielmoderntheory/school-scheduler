@@ -2731,7 +2731,10 @@ def generate_schedules(
                 for d in range(len(DAYS))
                 for bi in block_idxs
             }
-    time_per_attempt = min(10.0, max_time_seconds / num_attempts)
+    # 30s cap (was 10s): the 26/27 model (exact-fill K-5 week + cross-block
+    # conflicts + lunch + doubles) needs 25-40s per seed on Cloud Run's single
+    # vCPU. Callers control totals via num_attempts * max_time_seconds.
+    time_per_attempt = min(30.0, max_time_seconds / num_attempts)
 
     # Validate required inputs
     if not teachers or len(teachers) == 0:
