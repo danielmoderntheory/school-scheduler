@@ -751,7 +751,23 @@ export function ScheduleGrid({
           {blocks.map((block) => (
             <tr key={block} className="border-b last:border-b-0">
               <td className="p-1.5 font-medium text-muted-foreground bg-muted/30 whitespace-nowrap text-xs">
-                B{block}
+                {/* Grade view: lead with the grade's own period count (its
+                    position among this grade's teachable blocks — K-5 runs
+                    P1-P7, MS/HS P1-P8), keeping the global block number as a
+                    small cross-reference. Blocks outside the grade's day
+                    (lunch, K-5's surrendered B9) and non-grade views keep the
+                    plain block header. */}
+                {type === "grade" &&
+                (teachableBlocksByGrade?.[name]?.indexOf(block) ?? -1) >= 0 ? (
+                  <>
+                    P{teachableBlocksByGrade![name].indexOf(block) + 1}
+                    <span className="ml-1 text-[9px] font-normal text-muted-foreground/60">
+                      B{block}
+                    </span>
+                  </>
+                ) : (
+                  <>B{block}</>
+                )}
                 {/* Grade view: this grade's true bell time for the block from
                     its resolved template row — K-5's B8 reads 1:40–2:25 while
                     6th-12th read 1:20–2:00. No resolved row (e.g. K-5's
