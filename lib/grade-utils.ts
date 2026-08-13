@@ -215,8 +215,13 @@ export function formatGradeDisplayCompact(display: string, includeGradeSuffix: b
 export function parseGradeDisplayToNames(gradeDisplay: string, validGradeNames: string[]): string[] {
   const grades: string[] = []
 
-  // Check for Kindergarten
-  if (gradeDisplay.toLowerCase().includes('kindergarten') || gradeDisplay === 'K') {
+  // Check for Kindergarten — including the bare 'K' token used by
+  // combined-grade display names like 'K-1st Grades'
+  if (
+    gradeDisplay.toLowerCase().includes('kindergarten') ||
+    gradeDisplay.trim().toLowerCase() === 'k' ||
+    /^k[-/]/i.test(gradeDisplay.trim())
+  ) {
     const kGrade = validGradeNames.find(g => g.toLowerCase().includes('kindergarten') || g === 'K')
     if (kGrade) {
       grades.push(kGrade)
@@ -272,14 +277,19 @@ export function parseGradeDisplayToNames(gradeDisplay: string, validGradeNames: 
     return grades
   }
 
-  // Try to find matching grade by number
+  // Try to find matching grade by number. If Kindergarten already matched and
+  // the display is a dash range (e.g. 'K-1st Grades', 'Kindergarten-2nd'),
+  // expand every grade from 1st through the number.
   const singleMatch = gradeDisplay.match(/(\d+)(?:st|nd|rd|th)/)
   if (singleMatch) {
     const num = parseInt(singleMatch[1])
-    const suffix = num === 1 ? 'st' : num === 2 ? 'nd' : num === 3 ? 'rd' : 'th'
-    const gradeName = `${num}${suffix} Grade`
-    if (validGradeNames.includes(gradeName)) {
-      grades.push(gradeName)
+    const isKRange = grades.length > 0 && gradeDisplay.includes('-')
+    for (let i = isKRange ? 1 : num; i <= num; i++) {
+      const suffix = i === 1 ? 'st' : i === 2 ? 'nd' : i === 3 ? 'rd' : 'th'
+      const gradeName = `${i}${suffix} Grade`
+      if (validGradeNames.includes(gradeName) && !grades.includes(gradeName)) {
+        grades.push(gradeName)
+      }
     }
   }
 

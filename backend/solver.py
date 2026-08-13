@@ -1621,8 +1621,11 @@ def parse_grades_from_database(grade_display: str, database_grades: set) -> list
     if trimmed in database_grades:
         return [trimmed]
 
-    # 2. Handle Kindergarten (can appear alone or in comma-separated list)
-    if 'kindergarten' in trimmed.lower():
+    # 2. Handle Kindergarten (can appear alone or in comma-separated list).
+    # Also matches the bare 'K' token used by combined-grade display names
+    # like 'K-1st Grades'.
+    _tl = trimmed.lower()
+    if 'kindergarten' in _tl or _tl == 'k' or _tl.startswith('k-') or _tl.startswith('k/'):
         for db_grade in database_grades:
             if 'kindergarten' in db_grade.lower():
                 matched_grades.append(db_grade)
@@ -1666,14 +1669,22 @@ def parse_grades_from_database(grade_display: str, database_grades: set) -> list
             if matched_grades:
                 return matched_grades
 
-    # 5. Try single grade number parsing and find matching database grade
+    # 5. Try single grade number parsing and find matching database grade.
+    # MERGE with any kindergarten match from step 2 instead of discarding it:
+    # "Kindergarten-1st Grade" (the generator's display for combined K/1
+    # classes) must yield BOTH grades, and "Kindergarten-2nd" style ranges
+    # yield every grade from K through the number.
     single_match = re.search(r'(\d+)(?:st|nd|rd|th)', trimmed, re.IGNORECASE)
     if single_match:
         num = int(single_match.group(1))
-        # Find database grade with this number
+        is_k_range = bool(matched_grades) and '-' in trimmed
         for db_grade in database_grades:
-            if grade_to_number(db_grade) == num:
-                return [db_grade]
+            n = grade_to_number(db_grade)
+            hit = (1 <= n <= num) if is_k_range else (n == num)
+            if hit and db_grade not in matched_grades:
+                matched_grades.append(db_grade)
+        if matched_grades:
+            return matched_grades
 
     # Return any grades found (from kindergarten handling) or empty
     return matched_grades
