@@ -1646,7 +1646,11 @@ export default function HistoryDetailPage() {
 
           return {
             teacher: c.teacher?.name || '',
-            grade: gradeNames[0] || '',
+            // Full display, not just the first grade: the JS solver parses
+            // this string for the class's grade set, and teacher-schedule
+            // cells store it verbatim — "8th Grade, 9th Grade" for a
+            // combined class, never a lone "8th Grade".
+            grade: gradeNames.join(', '),
             grades: gradeNames,
             subject: c.subject?.name || '',
             daysPerWeek: c.days_per_week,

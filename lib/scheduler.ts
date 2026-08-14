@@ -371,7 +371,10 @@ function buildTeacherLunchFromClasses(classes: ClassEntry[]): Map<string, Teache
   const byTeacher = new Map<string, string[][]>();
   for (const cls of classes) {
     if (!byTeacher.has(cls.teacher)) byTeacher.set(cls.teacher, []);
-    byTeacher.get(cls.teacher)!.push(parseGrades(cls.grade));
+    // Prefer the explicit grades array (display strings can under-report a
+    // combined class when a caller sends only the first grade's name)
+    const clsGrades = (cls as { grades?: string[] }).grades;
+    byTeacher.get(cls.teacher)!.push(clsGrades?.length ? clsGrades : parseGrades(cls.grade));
   }
   return buildTeacherLunchInfo(byTeacher);
 }
@@ -666,7 +669,15 @@ function buildSessions(classes: ClassEntry[], teachers?: Teacher[]): Session[] {
 
   classes.forEach((cls, clsIdx) => {
     const isDouble = (cls as SchedulerClassEntry).isDouble === true;
-    const gradeNames = parseGrades(cls.grade);
+    // Prefer the explicit grades array over parsing the display string: a
+    // caller may send a lone first-grade display for a combined class. Also
+    // repair cls.grade itself so every session (and therefore every saved
+    // teacher-schedule cell) carries the full display.
+    const explicitGrades = (cls as { grades?: string[] }).grades;
+    const gradeNames = explicitGrades?.length ? [...explicitGrades] : parseGrades(cls.grade);
+    if (explicitGrades && explicitGrades.length > 1 && parseGrades(cls.grade).length < explicitGrades.length) {
+      cls = { ...cls, grade: explicitGrades.join(', ') };
+    }
     const legalPairs = getLegalPairsForGrades(gradeNames);
     const useDoubles = isDouble && legalPairs.length > 0;
     const L = cls.daysPerWeek;
