@@ -104,7 +104,17 @@ export function GradeTimetable({
           </tr>
         </thead>
         <tbody>
-          {templateRows.map((row, idx) => {
+          {(() => {
+            // Grade-facing period numbering: count this grade's block rows in
+            // order (lunch and other non-block rows are unnumbered), matching
+            // the schedule grids' P1..N headers. Custom row labels win; only
+            // default "Block N" labels are converted.
+            const periodByIndex = new Map<number, number>()
+            let p = 0
+            templateRows.forEach((row, i) => {
+              if (row.type === "block" && row.blockNumber) periodByIndex.set(i, ++p)
+            })
+            return templateRows.map((row, idx) => {
             const isBlock = row.type === "block" && row.blockNumber
 
             if (!isBlock) {
@@ -130,8 +140,11 @@ export function GradeTimetable({
                 <td className="py-2 px-1.5 text-xs text-muted-foreground whitespace-nowrap align-top border-r">
                   {row.time}
                 </td>
-                <td className="py-2 px-1.5 font-semibold align-top text-xs border-r whitespace-nowrap bg-sky-50/70 text-slate-700 uppercase tracking-wide">
-                  {row.label}
+                <td
+                  title={`Block ${row.blockNumber}`}
+                  className="py-2 px-1.5 font-semibold align-top text-xs border-r whitespace-nowrap bg-sky-50/70 text-slate-700 uppercase tracking-wide"
+                >
+                  {/^block\s*\d+$/i.test(row.label.trim()) ? `P${periodByIndex.get(idx)}` : row.label}
                 </td>
                 {DAYS.map((day, i) => {
                   const content = getCellContent(day, row.blockNumber!)
@@ -148,7 +161,8 @@ export function GradeTimetable({
                 })}
               </tr>
             )
-          })}
+          })
+          })()}
           {/* Fallback rows for schedule entries with no matching template row */}
           {orphanBlocks.map((blockNumber) => (
             <tr key={`orphan-${blockNumber}`} className="border-b last:border-b-0 bg-red-50/40">
