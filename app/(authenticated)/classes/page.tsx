@@ -30,7 +30,7 @@ import { LocalQuarterSelector } from "@/components/LocalQuarterSelector"
 import { GenerateModal } from "@/components/GenerateModal"
 import { useQuarterSelection } from "@/lib/hooks/useQuarterSelection"
 import { TEACHER_STATUS_FULL_TIME, isPartTime, isFullTime, calculateGradeBlocks, buildCotaughtGroups, type TeacherStatus } from "@/lib/schedule-utils"
-import { getTemplateBlocks, getTeachableBlocksForGrade } from "@/lib/timetable-utils"
+import { getTemplateBlocks, getTeachableBlocksForGrade, getBlockTimesForGrade, getLunchBlocksForGrade } from "@/lib/timetable-utils"
 import { type TimetableTemplate } from "@/lib/types"
 import type { SchedulingRule } from "@/lib/scheduler-remote"
 import toast from "@/lib/toast"
@@ -1862,6 +1862,26 @@ function ClassesPageContent() {
 
   // Blocks a class can never occupy — any block that isn't teachable for one of its
   // grades (e.g. that band's lunch block under the 9-block format)
+  // First grade's resolved bell times (all the class's grades share a bell
+  // variant in practice; the first grade's view is the class's view).
+  function blockTimesForClass(cls: ClassEntry): Record<number, string> {
+    const gid = cls.grade_ids?.[0] ?? cls.grade_id
+    if (!gid || !timetableTemplate) return {}
+    return getBlockTimesForGrade(timetableTemplate, gid)
+  }
+
+  // Actual lunch windows among the class's grades (for honest tooltips —
+  // other unusable blocks are "not in this grade's day", not lunch).
+  function trueLunchBlocksForClass(cls: ClassEntry): number[] {
+    if (!timetableTemplate) return []
+    const gradeIds = cls.grade_ids?.length ? cls.grade_ids : (cls.grade_id ? [cls.grade_id] : [])
+    const out = new Set<number>()
+    for (const gid of gradeIds) {
+      for (const b of getLunchBlocksForGrade(timetableTemplate, gid)) out.add(b)
+    }
+    return [...out]
+  }
+
   function lunchBlocksForClass(cls: ClassEntry): number[] {
     const gradeIds = cls.grade_ids?.length ? cls.grade_ids : (cls.grade_id ? [cls.grade_id] : [])
     if (gradeIds.length === 0) return []
@@ -2906,6 +2926,8 @@ Maria\t6th-11th Elective\tSpanish 101\t1\tMon Block 5\t`}
                 subjects={subjects}
                 blocks={templateBlocks}
                 lunchBlocks={lunchBlocksForClass(cls)}
+                blockTimes={blockTimesForClass(cls)}
+                trueLunchBlocks={trueLunchBlocksForClass(cls)}
                 cotaughtTeachers={cotaughtTeacherNames.get(cls.id)}
                 onUpdate={updateClass}
                 onUpdateRestrictions={updateRestrictions}
@@ -2950,6 +2972,8 @@ interface ClassRowProps {
   subjects: Subject[]
   blocks: number[]
   lunchBlocks: number[]
+  blockTimes: Record<number, string>
+  trueLunchBlocks: number[]
   cotaughtTeachers?: string[]
   onUpdate: (id: string, field: string, value: unknown) => void
   onUpdateRestrictions: (id: string, restrictions: Restriction[]) => void
@@ -2966,6 +2990,8 @@ function ClassRow({
   subjects,
   blocks,
   lunchBlocks,
+  blockTimes,
+  trueLunchBlocks,
   cotaughtTeachers,
   onUpdate,
   onUpdateRestrictions,
@@ -3062,6 +3088,8 @@ function ClassRow({
           teacherAvailableBlocks={teachers.find(t => t.id === cls.teacher_id)?.available_blocks}
           blocks={blocks}
           lunchBlocks={lunchBlocks}
+          blockTimes={blockTimes}
+          trueLunchBlocks={trueLunchBlocks}
         />
       </td>
       <td className="px-1 py-1">
@@ -3413,9 +3441,14 @@ interface RestrictionsCellProps {
   teacherAvailableBlocks?: number[] | null
   blocks?: number[]
   lunchBlocks?: number[]
+  // Class-grade block times ("1:40-2:25" for a 4/5 class's Block 8) and the
+  // subset of lunchBlocks that is actual lunch (vs. a block outside the
+  // grade's day, like K-5's surrendered Block 9) — both display-only.
+  blockTimes?: Record<number, string>
+  trueLunchBlocks?: number[]
 }
 
-function RestrictionsCell({ restrictions, onChange, teacherAvailableDays, teacherAvailableBlocks, blocks = DEFAULT_BLOCKS, lunchBlocks = [] }: RestrictionsCellProps) {
+function RestrictionsCell({ restrictions, onChange, teacherAvailableDays, teacherAvailableBlocks, blocks = DEFAULT_BLOCKS, lunchBlocks = [], blockTimes = {}, trueLunchBlocks = [] }: RestrictionsCellProps) {
   const [editing, setEditing] = useState(false)
   const [selectedDays, setSelectedDays] = useState<string[]>([])
   const [selectedBlocks, setSelectedBlocks] = useState<number[]>([])
@@ -3637,10 +3670,19 @@ function RestrictionsCell({ restrictions, onChange, teacherAvailableDays, teache
                   return (
                     <tr key={block}>
                       <td
-                        title={isLunchBlock ? "Lunch — not schedulable" : undefined}
-                        className={cn("w-7 h-7 text-center border-r font-medium bg-muted/50", !isLastRow && "border-b", isLunchBlock ? "text-slate-300" : "text-muted-foreground")}
+                        title={
+                          isLunchBlock
+                            ? `${trueLunchBlocks.includes(block) ? "Lunch" : "Not in this grade's day"}${blockTimes[block] ? ` (${blockTimes[block]})` : ""} — not schedulable`
+                            : blockTimes[block]
+                        }
+                        className={cn("h-7 px-1 text-center border-r font-medium bg-muted/50 whitespace-nowrap", !isLastRow && "border-b", isLunchBlock ? "text-slate-300" : "text-muted-foreground")}
                       >
                         B{block}
+                        {blockTimes[block] && (
+                          <div className={cn("text-[8px] font-normal leading-none pb-0.5", isLunchBlock ? "text-slate-300" : "text-muted-foreground/70")}>
+                            {blockTimes[block].replace(/\s*-\s*/, "\u2013")}
+                          </div>
+                        )}
                       </td>
                       {DAYS.map((day) => {
                         const isExplicitlySelected = selectedDays.some((d, i) => d === day && selectedBlocks[i] === block)
