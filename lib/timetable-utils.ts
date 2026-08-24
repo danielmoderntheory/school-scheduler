@@ -266,3 +266,47 @@ export function getTeachableBlocksForGrade(
   }
   return blocks.size > 0 ? [...blocks].sort((a, b) => a - b) : getTemplateBlocks(template)
 }
+
+/**
+ * The canonical bell time for each template block, for grids that are NOT
+ * grade-scoped (the teacher view, where one row spans every grade the teacher
+ * covers). Most blocks are defined by a single row and so have a single time.
+ * Where a block is defined by several grade-scoped rows with DIFFERENT times —
+ * e.g. Block 8's "1:20-2:00" for MS/HS alongside K-5's straddling "1:40-2:25" —
+ * the window covering the most grades wins, ties broken by the earlier start.
+ * The teacher grid pairs this header time with the existing per-cell straddle
+ * label ("B8 until 2:25"), which carries the other window's truth, so the
+ * header is the shared window rather than a lie for one band.
+ *
+ * Deliberately NOT grade-relative: a teacher row cannot use the grade view's
+ * P1..N numbering, because P counts each grade's OWN teachable blocks (Block 6
+ * is P5 for K-3rd but P6 for high school, and grade-P7 is Block 8 for every
+ * band). Time is the only label that means the same thing on every row.
+ *
+ * Rows with unparseable times are ignored. Empty without a template.
+ */
+export function getSharedBlockTimes(
+  template: Pick<TimetableTemplate, 'rows'> | null | undefined
+): Record<number, string> {
+  if (!template?.rows?.length) return {}
+  const best = new Map<number, { time: string; grades: number; start: number }>()
+  for (const row of template.rows) {
+    if (row.type !== 'block' || typeof row.blockNumber !== 'number') continue
+    const range = parseTimeRange(row.time)
+    if (!range || !row.time) continue
+    // No grade_ids = the row applies to every grade, so it always outranks a
+    // scoped row (Infinity rather than a count of the grades we can't see).
+    const grades = row.grade_ids?.length ?? Number.POSITIVE_INFINITY
+    const prev = best.get(row.blockNumber)
+    if (
+      !prev ||
+      grades > prev.grades ||
+      (grades === prev.grades && range[0] < prev.start)
+    ) {
+      best.set(row.blockNumber, { time: row.time, grades, start: range[0] })
+    }
+  }
+  const times: Record<number, string> = {}
+  for (const [block, v] of best) times[block] = v.time
+  return times
+}

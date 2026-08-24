@@ -56,6 +56,15 @@ interface ScheduleGridProps {
   // source cell and the "B8 until 2:25" label on the continuation cell.
   // Absent = generic fallback labels.
   blockTimesByGrade?: Record<string, Record<number, string>>
+  // Teacher view only: the shared bell time per block (block number -> time,
+  // e.g. {6: "11:54-12:34"}), from getSharedBlockTimes. Rendered as the row
+  // header — a teacher row spans grades, so it cannot use the grade view's
+  // P1..N numbering (Block 6 is P5 for K-3rd but P6 for high school) and the
+  // time is the only label that means the same thing on every row. Where a
+  // block has two windows (Block 8's 1:20-2:00 vs K-5's 1:40-2:25) this is the
+  // shared one; the per-cell straddle label carries the other. Absent = the
+  // legacy bare "B{n}" header.
+  blockTimes?: Record<number, string>
   // Teacher view only: blocks each teacher could ever hold a class in
   // (teacher name -> union over their classes of the intersection of each
   // class's grades' teachable blocks). An idle cell OUTSIDE the teacher's
@@ -119,6 +128,7 @@ export function ScheduleGrid({
   unavailableLabelsByGrade,
   blockConflictsByGrade,
   blockTimesByGrade,
+  blockTimes,
   usableBlocksByTeacher,
   lunchContext,
   changeStatus,
@@ -758,33 +768,43 @@ export function ScheduleGrid({
           {blocks.map((block) => (
             <tr key={block} className="border-b last:border-b-0">
               <td className="p-1.5 font-medium text-muted-foreground bg-muted/30 text-xs">
-                {/* Grade view: lead with the grade's own period count (its
-                    position among this grade's teachable blocks — K-5 runs
-                    P1-P7, MS/HS P1-P8). Blocks outside the grade's day
-                    (lunch, K-5's surrendered B9) and non-grade views keep the
-                    plain block header. */}
-                {type === "grade" &&
-                (teachableBlocksByGrade?.[name]?.indexOf(block) ?? -1) >= 0 ? (
-                  <>P{teachableBlocksByGrade![name].indexOf(block) + 1}</>
-                ) : type === "grade" && teachableBlocksByGrade?.[name] ? (
-                  // Non-period rows (lunch, surrendered blocks): the cell
-                  // content already says what happens here — a block number
-                  // from the other numbering system only confuses.
-                  null
-                ) : (
-                  <>B{block}</>
-                )}
-                {/* Grade view: this grade's true bell time for the block from
-                    its resolved template row — K-5's B8 reads 1:40–2:25 while
-                    6th-12th read 1:20–2:00. The zero-width space after the
-                    dash lets the range wrap onto two lines in narrow columns.
-                    No resolved row (e.g. K-5's surrendered B9) or no
-                    template = bare header (legacy). */}
-                {type === "grade" && blockTimesByGrade?.[name]?.[block] && (
-                  <div className="text-[9px] font-normal leading-tight text-muted-foreground/70">
-                    {blockTimesByGrade[name][block].replace(/\s*-\s*/, "\u2013\u200b")}
-                  </div>
-                )}
+                {/* Row header, both views: the bell time leads, with a dim
+                    block number under it.
+
+                    Time is the thing a teacher or a grade actually acts on, and
+                    unlike a period count it reads the same on every row — a
+                    teacher row spans every grade they cover, and P counts each
+                    grade's OWN blocks (Block 6 would be P5 for K-3rd but P6 for
+                    high school). The block number stays because it is the
+                    shared vocabulary with the freeform/swap UI and the
+                    "B8 until 2:25" straddle labels — including on lunch and
+                    surrendered rows, so every row is identifiable.
+
+                    Grade view shows this grade's resolved time (K-5's B8 reads
+                    1:40-2:25 while 6th-12th read 1:20-2:00, and a lunch row
+                    reads its lunch window); teacher view shows the shared
+                    window, with the per-cell straddle label carrying the other.
+
+                    No template (legacy 5-block quarters) = bare block header. */}
+                {(() => {
+                  const time =
+                    type === "grade"
+                      ? blockTimesByGrade?.[name]?.[block]
+                      : blockTimes?.[block]
+                  if (!time) return <>B{block}</>
+                  return (
+                    <>
+                      {/* The zero-width space after the dash lets the range
+                          wrap onto two lines in narrow columns. */}
+                      <div className="leading-tight">
+                        {time.replace(/\s*-\s*/, "\u2013\u200b")}
+                      </div>
+                      <div className="text-[9px] font-normal leading-tight text-muted-foreground/50">
+                        B{block}
+                      </div>
+                    </>
+                  )
+                })()}
               </td>
               {DAYS.map((day) => {
                 const { entry, isMultiple } = getCellContent(day, block)

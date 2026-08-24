@@ -40,7 +40,7 @@ import { Textarea } from "@/components/ui/textarea"
 import { Label } from "@/components/ui/label"
 import Link from "next/link"
 import type { ScheduleOption, TeacherSchedule, GradeSchedule, Teacher, FloatingBlock, PendingPlacement, ValidationError, CellLocation, ClassEntry, OpenBlockLabels, PendingTransfer, TimetableTemplate } from "@/lib/types"
-import { resolveRowsForGrade, getTemplateBlocks, getTeachableBlocksForGrade, getPairableBlocksForGrade, getBlockConflictsForGrade, getLunchBlocksForGrade, getUnavailableBlockLabelsForGrade, getBlockTimesForGrade } from "@/lib/timetable-utils"
+import { resolveRowsForGrade, getTemplateBlocks, getTeachableBlocksForGrade, getPairableBlocksForGrade, getBlockConflictsForGrade, getLunchBlocksForGrade, getUnavailableBlockLabelsForGrade, getBlockTimesForGrade, getSharedBlockTimes } from "@/lib/timetable-utils"
 import { parseClassesFromSnapshot, parseTeachersFromSnapshot, parseRulesFromSnapshot, hasValidSnapshots, detectClassChanges, detectTeacherChanges, applyTeacherRenames, applyTeacherChangesToSnapshot, computeExpectedTeachingSessions, findMismatchedTeachers, type GenerationStats, type ChangeDetectionResult, type CurrentClass, type ClassSnapshot, type TeacherSnapshot, type TeacherChangeResult } from "@/lib/snapshot-utils"
 import { parseGradeDisplayToNumbers, parseGradeDisplayToNames, gradesOverlap, gradesEqual, gradeNumToDisplay, isClassElective, isClassCotaught, shouldIgnoreGradeConflict, formatGradeDisplayCompact } from "@/lib/grade-utils"
 import { BLOCK_TYPE_OPEN, BLOCK_TYPE_STUDY_HALL, isOpenBlock, isStudyHall, isScheduledClass, isOccupiedBlock, entryIsOpen, entryIsOccupied, entryIsScheduledClass, isFullTime, setOpenBlockLabel, recalculateOptionStats, getFirstGradeEntry, isMultipleEntryCell, type LunchContext, getTeacherLunchCandidates, designateTeacherLunch } from "@/lib/schedule-utils"
@@ -679,6 +679,15 @@ export default function HistoryDetailPage() {
     }
     return map
   }, [timetableTemplate, gradesData])
+
+  // Shared bell time per block for the TEACHER grids, whose rows span every
+  // grade the teacher covers and so cannot use a grade-relative time. Block 8's
+  // two windows resolve to the shared 1:20-2:00; the per-cell straddle label
+  // carries K-5's 1:40-2:25. Empty on legacy quarters (no template).
+  const sharedBlockTimes = useMemo(
+    () => getSharedBlockTimes(timetableTemplate),
+    [timetableTemplate]
+  )
 
   // Solver-payload form: only grades that actually have conflicts (omitted
   // entirely when none — the solvers treat absence as "no conflicts").
@@ -8085,6 +8094,7 @@ export default function HistoryDetailPage() {
                       lunchContext={lunchContext}
                       blockConflictsByGrade={timetableTemplate ? gradeBlockConflictsByGrade : undefined}
                       blockTimesByGrade={timetableTemplate ? blockTimesByGrade : undefined}
+                      blockTimes={timetableTemplate ? sharedBlockTimes : undefined}
                       usableBlocksByTeacher={timetableTemplate ? teacherUsableBlocks : undefined}
                     />
                   ))
@@ -9909,6 +9919,7 @@ export default function HistoryDetailPage() {
                                 lunchContext={lunchContext}
                                 blockConflictsByGrade={timetableTemplate ? gradeBlockConflictsByGrade : undefined}
                                 blockTimesByGrade={timetableTemplate ? blockTimesByGrade : undefined}
+                                blockTimes={timetableTemplate ? sharedBlockTimes : undefined}
                                 usableBlocksByTeacher={timetableTemplate ? teacherUsableBlocks : undefined}
                               />
                               {/* Unplaced floating blocks from this teacher */}

@@ -104,17 +104,7 @@ export function GradeTimetable({
           </tr>
         </thead>
         <tbody>
-          {(() => {
-            // Grade-facing period numbering: count this grade's block rows in
-            // order (lunch and other non-block rows are unnumbered), matching
-            // the schedule grids' P1..N headers. Custom row labels win; only
-            // default "Block N" labels are converted.
-            const periodByIndex = new Map<number, number>()
-            let p = 0
-            templateRows.forEach((row, i) => {
-              if (row.type === "block" && row.blockNumber) periodByIndex.set(i, ++p)
-            })
-            return templateRows.map((row, idx) => {
+          {templateRows.map((row, idx) => {
             const isBlock = row.type === "block" && row.blockNumber
 
             if (!isBlock) {
@@ -144,7 +134,13 @@ export function GradeTimetable({
                   title={`Block ${row.blockNumber}`}
                   className="py-2 px-1.5 font-semibold align-top text-xs border-r whitespace-nowrap bg-sky-50/70 text-slate-700 uppercase tracking-wide"
                 >
-                  {/^block\s*\d+$/i.test(row.label.trim()) ? `P${periodByIndex.get(idx)}` : row.label}
+                  {/* Block number, matching the schedule grids' B{n} headers.
+                      Not a period count: P would number each grade's own
+                      blocks, so the same window reads differently per grade
+                      (Block 6 is the 5th teaching block for K-3rd but the 6th
+                      for high school). Custom row labels win; only default
+                      "Block N" labels are shortened. */}
+                  {/^block\s*\d+$/i.test(row.label.trim()) ? `B${row.blockNumber}` : row.label}
                 </td>
                 {DAYS.map((day, i) => {
                   const content = getCellContent(day, row.blockNumber!)
@@ -161,8 +157,7 @@ export function GradeTimetable({
                 })}
               </tr>
             )
-          })
-          })()}
+          })}
           {/* Fallback rows for schedule entries with no matching template row */}
           {orphanBlocks.map((blockNumber) => (
             <tr key={`orphan-${blockNumber}`} className="border-b last:border-b-0 bg-red-50/40">
