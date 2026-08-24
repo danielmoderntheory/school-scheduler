@@ -794,21 +794,21 @@ export function ScheduleGrid({
                   if (!time) return <>B{block}</>
                   return (
                     <>
-                      {/* The range stacks: start over end, no separator. On one
-                          line "10:28-11:08" needs a ~72px column at a readable
-                          size \u2014 that eats the day columns, and then leaves the
-                          column half empty on every shorter row. Stacked, the
-                          widest line is just "10:28" (~33px at 13px), so the
-                          column is 45px AND the type is bigger than it
-                          could ever be on one line. Free vertically: row height
-                          is set by the two-line cell content, not by this
-                          header. The end time is muted so the pair reads as a
-                          range without spending width on a dash. */}
+                      {/* The range stacks, start over end, with the dash
+                          trailing the first line. On one line "10:28-11:08"
+                          needs a ~72px column at a readable size — that eats
+                          the day columns, and then sits half empty on every
+                          shorter row. Stacked, the widest line is "10:28-"
+                          (~36px at 12px), so the column fits in 45px with the
+                          type a step larger than one line could allow. Free
+                          vertically: row height is set by the two-line cell
+                          content, not by this header. The end time is muted so
+                          the pair still reads as one range. */}
                       {(() => {
                         const [from, to] = time.split(/\s*-\s*/)
                         return (
-                          <div className="text-[13px] leading-tight whitespace-nowrap tabular-nums">
-                            <div>{from}</div>
+                          <div className="text-[12px] leading-tight whitespace-nowrap tabular-nums">
+                            <div>{from}–</div>
                             {to && <div className="text-muted-foreground/60">{to}</div>}
                           </div>
                         )
