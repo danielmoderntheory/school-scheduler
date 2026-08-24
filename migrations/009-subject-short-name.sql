@@ -34,3 +34,19 @@ UPDATE subjects SET short_name = COALESCE(short_name, 'SPAN')       WHERE name =
 UPDATE subjects SET short_name = COALESCE(short_name, 'Humanities') WHERE name = 'Integrated Humanities';
 UPDATE subjects SET short_name = COALESCE(short_name, 'Writing')    WHERE name = 'Reaccion (Writing)';
 UPDATE subjects SET short_name = COALESCE(short_name, 'Español')    WHERE name = 'Spanish';
+
+-- Salsa/Batchata is misspelled (the dance is bachata), but the subject is NOT
+-- free to rename: a soft-deleted 6th-grade class still points at it and two
+-- saved generations carry the old spelling inside their JSON, which a rename
+-- would strand (see relabel-without-regen: a generation stores subject names
+-- in several places, not one). A short name fixes what the card prints without
+-- touching any stored schedule.
+UPDATE subjects SET short_name = COALESCE(short_name, 'Salsa/Bachata')
+  WHERE name = 'Salsa/Batchata';
+
+-- Deliberately NOT seeded: "Spanish Conversation & Creative Writing" (39 chars).
+-- It is the only subject still long enough to wrap past two lines, but it does
+-- not appear on any of the school's cards -- it was Jostin's 3rd/4th class in
+-- Q4 Summer 2025-26 and he now teaches only 6th Science -- so there is no
+-- school abbreviation to copy and inventing one would not be following the
+-- design. The export's fit pass keeps it legible if it is ever scheduled again.
