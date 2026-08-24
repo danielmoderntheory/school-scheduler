@@ -10,6 +10,9 @@
 import { createElement } from "react"
 import type { PosterData } from "./poster-utils"
 
+/** Floor for the auto-fit shrink — below this a card stops being readable. */
+const MIN_TEXT_SCALE = 0.55
+
 /** Waits for layout and paint to settle before capturing. */
 function nextFrame(): Promise<void> {
   return new Promise(resolve => requestAnimationFrame(() => resolve()))
@@ -67,11 +70,33 @@ export async function downloadPostersAsPng({
   const zip = new JSZip()
   try {
     for (const poster of posters) {
-      root.render(createElement(SchedulePoster, { data: poster }))
-      await nextFrame()
-      await nextFrame()
+      // Fit pass: a cell whose text wraps to more lines than the layout
+      // budgeted grows its row, and a row height is a MINIMUM in CSS — so the
+      // table can push past the bottom of the card and clip the last rows.
+      // Render, measure, and shrink the type until the table fits. Converges
+      // fast because smaller text also wraps less; the floor stops a
+      // pathological card from becoming unreadable rather than looping.
+      let textScale = 1
+      let node: HTMLElement | null = null
+      for (let attempt = 0; attempt < 4; attempt++) {
+        root.render(createElement(SchedulePoster, { data: poster, textScale }))
+        await nextFrame()
+        await nextFrame()
 
-      const node = stage.firstElementChild as HTMLElement | null
+        node = stage.firstElementChild as HTMLElement | null
+        if (!node) break
+
+        const table = node.querySelector<HTMLElement>("[data-poster-table]")
+        if (!table) break
+        // A table's CSS height is a MINIMUM — an overgrown table reports the
+        // grown size for both offsetHeight and scrollHeight, so the budget has
+        // to come from the component rather than from the element.
+        const budget = Number(table.dataset.posterTableBudget)
+        const actual = table.offsetHeight
+        if (!budget || actual <= budget + 1 || textScale <= MIN_TEXT_SCALE) break
+
+        textScale = Math.max(MIN_TEXT_SCALE, textScale * (budget / actual) * 0.98)
+      }
       if (!node) continue
 
       const dataUrl = await toPng(node, {

@@ -118,7 +118,21 @@ function CellText({ cell, size }: { cell: PosterCell; size: number }) {
   )
 }
 
-export function SchedulePoster({ data }: { data: PosterData }) {
+export function SchedulePoster({
+  data,
+  textScale = 1,
+}: {
+  data: PosterData
+  /**
+   * Extra multiplier on every type size, applied on top of the row-fit scale.
+   * A cell whose text wraps to more lines than the layout budgeted for grows
+   * its row, and a table row's height is a MINIMUM in CSS — so the table can
+   * push past the card and the last rows fall off the bottom. The export
+   * measures the mounted card and re-renders with this turned down until it
+   * fits (see lib/poster-export.ts). 1 = no shrink.
+   */
+  textScale?: number
+}) {
   const tableTop = TITLE_BAND
   const tableHeight = POSTER_HEIGHT - TITLE_BAND - BOTTOM_MARGIN
   const tableWidth = POSTER_WIDTH - SIDE_MARGIN - RIGHT_MARGIN
@@ -132,7 +146,7 @@ export function SchedulePoster({ data }: { data: PosterData }) {
   const fontScale = Math.min(scale, 1.05)
 
   const headerHeight = Math.round(NATURAL_HEADER * scale)
-  const px = (n: number) => Math.round(n * fontScale)
+  const px = (n: number) => Math.round(n * fontScale * textScale)
 
   // The heading is one line at any length: shrink to fit the card's width.
   const titleText = data.title.toUpperCase()
@@ -186,6 +200,8 @@ export function SchedulePoster({ data }: { data: PosterData }) {
       </div>
 
       <table
+        data-poster-table=""
+        data-poster-table-budget={tableHeight}
         style={{
           position: "absolute",
           top: tableTop,
