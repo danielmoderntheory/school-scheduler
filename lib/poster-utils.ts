@@ -70,6 +70,22 @@ function safeFileName(name: string): string {
   return name.replace(/[^a-zA-Z0-9]+/g, "_").replace(/^_+|_+$/g, "") || "Unnamed"
 }
 
+/**
+ * Subject display name -> the short form printed on a card, from
+ * subjects.short_name. Subjects without one are simply absent.
+ */
+export type SubjectLabels = Record<string, string>
+
+/**
+ * The label a card prints for a subject: its short name when the school has set
+ * one (Settings -> Subjects), otherwise the subject name itself. Non-subject
+ * cell text — Open, Lunch, Study Hall, Elective — never matches a key and so
+ * passes through untouched.
+ */
+function label(subject: string, labels: SubjectLabels | undefined): string {
+  return labels?.[subject] || subject
+}
+
 /** Minutes of overlap between two template time strings (0 if none/unparseable). */
 function overlapMinutes(a: string | undefined, b: string | undefined): number {
   const ra = parseTimeRange(a)
@@ -102,7 +118,8 @@ export function buildGradePoster(
   gradeName: string,
   gradeId: string,
   gradeSchedule: GradeSchedule,
-  template: Pick<TimetableTemplate, "rows"> | null | undefined
+  template: Pick<TimetableTemplate, "rows"> | null | undefined,
+  subjectLabels?: SubjectLabels
 ): PosterData {
   const rows: PosterRow[] = []
   const templateRows: TimetableRow[] = template?.rows?.length
@@ -116,7 +133,7 @@ export function buildGradePoster(
     }
     const cells = DAYS.map(day => {
       const content = resolveGradeCellDisplay(gradeSchedule[day]?.[row.blockNumber!] ?? null)
-      return content ? { main: content.subject } : null
+      return content ? { main: label(content.subject, subjectLabels) } : null
     })
     rows.push({ kind: "block", time: formatTime(row.time), cells })
   }
@@ -159,6 +176,8 @@ export interface TeacherPosterContext {
   gradeIdsByName: Record<string, string>
   /** Same lunch context the grids use, so the poster's Lunch matches the app's. */
   lunchContext?: LunchContext
+  /** Short subject names from the DB; absent subjects print in full. */
+  subjectLabels?: SubjectLabels
 }
 
 /**
@@ -186,7 +205,7 @@ export function buildTeacherPoster(
   schedule: TeacherSchedule,
   ctx: TeacherPosterContext
 ): PosterData {
-  const { template, gradeIdsByName, lunchContext } = ctx
+  const { template, gradeIdsByName, lunchContext, subjectLabels } = ctx
   const blocks = getTemplateBlocks(template)
   const sharedTimes = getSharedBlockTimes(template)
   const templateRows = (template?.rows ?? []).slice().sort((a, b) => a.sort_order - b.sort_order)
@@ -329,7 +348,7 @@ export function buildTeacherPoster(
       if (entry && isStudyHall(entry[1])) return { main: BLOCK_TYPE_STUDY_HALL }
       if (entry && isScheduledClass(entry[1])) {
         const sub = taughtNames.size > 1 ? entry[0] : undefined
-        return { main: entry[1], sub }
+        return { main: label(entry[1], subjectLabels), sub }
       }
       // Free cell: the day's designated lunch, a block outside this teacher's
       // reach (blank rather than a false "OPEN"), or genuine open time.

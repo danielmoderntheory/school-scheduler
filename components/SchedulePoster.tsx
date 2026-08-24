@@ -40,39 +40,54 @@ const FONT_TIME = 34
 const FONT_MERGED = 52
 const FONT_CELL = 46
 
+/** The squiggle artwork itself, served from public/. */
+export const POSTER_SQUIGGLE_SRC = "/poster-squiggle.png"
+
 /**
- * The soft ribbon pattern behind the card. Hand-drawn to match the reference's
- * flowing curls; the exact Canva artwork can be dropped in later by replacing
- * this with an <img>. Two opacities give the layered look of the original.
+ * The squiggle pattern behind the card.
+ *
+ * This is the school's own Canva asset (public/poster-squiggle.png), recolored
+ * to white-on-transparent so one file covers every placement — exactly how the
+ * original was built, with the same shape dropped in three times at different
+ * sizes and rotations, each mostly hanging off the canvas so only a corner of
+ * it shows. Positions were matched against the reference exports; at 0.44
+ * opacity over the blue it lands on #ADCADA, against the original's #ADCBDC.
  */
+const SQUIGGLES = [
+  { left: -640, top: -320, width: 1150, rotate: 105 }, // upper left
+  { left: 2210, top: -330, width: 1250, rotate: 193 }, // upper right, trailing down the edge
+  { left: 2080, top: 1120, width: 1150, rotate: 310 }, // lower right
+]
+
 function PosterBackdrop() {
-  const ribbons = [
-    // Curls entering from the card's edges, mirroring the reference artwork.
-    { d: "M -60 110 C 140 60, 340 120, 320 240 C 302 350, 120 360, 90 260 C 62 170, 200 140, 280 200", o: 0.42 },
-    { d: "M -80 430 C 130 480, 150 630, 20 710 C -90 776, -60 890, 80 910", o: 0.3 },
-    { d: "M -80 1120 C 120 1080, 220 1200, 140 1300 C 70 1388, -60 1360, -40 1260", o: 0.3 },
-    { d: "M -60 1560 C 160 1520, 300 1650, 250 1750", o: 0.42 },
-    { d: "M 2620 -40 C 2380 60, 2260 240, 2400 320 C 2520 388, 2620 300, 2560 200", o: 0.42 },
-    { d: "M 2280 -70 C 2130 40, 2150 210, 2290 230", o: 0.3 },
-    { d: "M 2640 520 C 2430 570, 2420 730, 2560 800 C 2660 850, 2700 760, 2640 700", o: 0.3 },
-    { d: "M 2660 1060 C 2440 1090, 2400 1260, 2540 1330", o: 0.42 },
-    { d: "M 2700 1420 C 2460 1400, 2360 1560, 2470 1660 C 2540 1724, 2680 1700, 2700 1600", o: 0.3 },
-  ]
   return (
-    <svg
-      width={POSTER_WIDTH}
-      height={POSTER_HEIGHT}
-      viewBox={`0 0 ${POSTER_WIDTH} ${POSTER_HEIGHT}`}
-      style={{ position: "absolute", inset: 0 }}
+    <div
+      style={{
+        position: "absolute",
+        inset: 0,
+        backgroundColor: BLUE,
+        overflow: "hidden",
+      }}
       aria-hidden="true"
     >
-      <rect width={POSTER_WIDTH} height={POSTER_HEIGHT} fill={BLUE} />
-      <g fill="none" stroke="#FFFFFF" strokeLinecap="round" strokeWidth={56}>
-        {ribbons.map((r, i) => (
-          <path key={i} d={r.d} strokeOpacity={r.o} />
-        ))}
-      </g>
-    </svg>
+      {SQUIGGLES.map((s, i) => (
+        // eslint-disable-next-line @next/next/no-img-element
+        <img
+          key={i}
+          src={POSTER_SQUIGGLE_SRC}
+          alt=""
+          style={{
+            position: "absolute",
+            left: s.left,
+            top: s.top,
+            width: s.width,
+            transform: `rotate(${s.rotate}deg)`,
+            transformOrigin: "50% 50%",
+            opacity: 0.44,
+          }}
+        />
+      ))}
+    </div>
   )
 }
 

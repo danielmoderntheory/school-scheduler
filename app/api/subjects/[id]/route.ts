@@ -8,11 +8,20 @@ export async function PUT(
   const { id } = await params
   const body = await request.json()
 
+  // short_name is clearable, so COALESCE (which reads "" as "leave alone")
+  // is not enough: only touch the column when the caller actually sent the
+  // field, and treat an empty string as "no short name".
+  const setsShortName = Object.prototype.hasOwnProperty.call(body, "short_name")
+  const shortName = setsShortName
+    ? String(body.short_name ?? "").trim() || null
+    : null
+
   try {
     const [data] = await sql`
       UPDATE subjects
       SET name = COALESCE(${body.name ?? null}, name),
-          requires_double_periods = COALESCE(${body.requires_double_periods ?? null}, requires_double_periods)
+          requires_double_periods = COALESCE(${body.requires_double_periods ?? null}, requires_double_periods),
+          short_name = CASE WHEN ${setsShortName} THEN ${shortName}::text ELSE short_name END
       WHERE id = ${id}
       RETURNING *
     `

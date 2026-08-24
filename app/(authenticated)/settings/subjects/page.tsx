@@ -40,6 +40,7 @@ import toast from "@/lib/toast"
 interface Subject {
   id: string
   name: string
+  short_name?: string | null
 }
 
 interface ArchiveStatus {
@@ -227,7 +228,9 @@ export default function SubjectsSettingsPage() {
           <h1 className="text-3xl font-bold mb-2">Subjects</h1>
           <p className="text-muted-foreground">
             Manage subjects that can be assigned to classes. You can also create subjects
-            directly from the Classes page.
+            directly from the Classes page. A short name is used only on the poster PNG
+            export, where a long subject has to fit inside one cell — leave it blank to
+            print the full name.
           </p>
         </div>
 
@@ -236,6 +239,12 @@ export default function SubjectsSettingsPage() {
             <TableHeader>
               <TableRow>
                 <TableHead>Subject Name</TableHead>
+                <TableHead className="w-[220px]">
+                  Short Name
+                  <span className="ml-1.5 font-normal text-muted-foreground">
+                    poster export only
+                  </span>
+                </TableHead>
                 <TableHead className="w-[60px]"></TableHead>
               </TableRow>
             </TableHeader>
@@ -250,6 +259,16 @@ export default function SubjectsSettingsPage() {
                       <EditableText
                         value={subject.name}
                         onSave={(value) => updateSubject(subject.id, "name", value)}
+                        saving={savingId === subject.id}
+                      />
+                    </TableCell>
+                    <TableCell>
+                      {/* Blank = fall back to the full name, so only subjects
+                          that actually need shortening carry a value. */}
+                      <EditableText
+                        value={subject.short_name || ""}
+                        placeholder={subject.name}
+                        onSave={(value) => updateSubject(subject.id, "short_name", value)}
                         saving={savingId === subject.id}
                       />
                     </TableCell>
@@ -304,7 +323,7 @@ export default function SubjectsSettingsPage() {
               })}
               {/* Add new subject row */}
               <TableRow>
-                <TableCell colSpan={2}>
+                <TableCell colSpan={3}>
                   <form
                     onSubmit={(e) => {
                       e.preventDefault()

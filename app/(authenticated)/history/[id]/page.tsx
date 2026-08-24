@@ -1389,6 +1389,22 @@ export default function HistoryDetailPage() {
           import("@/lib/poster-export"),
         ])
 
+      // Short subject names (Settings -> Subjects) keep long titles inside a
+      // cell. Fetched here rather than held in page state: nothing else on this
+      // page needs them, and they must be current at export time. A failed
+      // fetch is not fatal — every subject just prints in full.
+      const subjectLabels: Record<string, string> = {}
+      try {
+        const res = await fetch("/api/subjects")
+        if (res.ok) {
+          for (const s of (await res.json()) as { name: string; short_name?: string | null }[]) {
+            if (s.short_name) subjectLabels[s.name] = s.short_name
+          }
+        }
+      } catch {
+        // fall through with an empty map
+      }
+
       const posters =
         kind === "grade"
           ? Object.entries(option.gradeSchedules)
@@ -1399,7 +1415,8 @@ export default function HistoryDetailPage() {
                   gradeName,
                   gradesData.find(g => g.display_name === gradeName)?.id || "",
                   schedule,
-                  timetableTemplate
+                  timetableTemplate,
+                  subjectLabels
                 )
               )
           : Object.entries(option.teacherSchedules)
@@ -1411,6 +1428,7 @@ export default function HistoryDetailPage() {
                     gradesData.map(g => [g.display_name, g.id])
                   ),
                   lunchContext,
+                  subjectLabels,
                 })
               )
 

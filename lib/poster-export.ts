@@ -15,6 +15,21 @@ function nextFrame(): Promise<void> {
   return new Promise(resolve => requestAnimationFrame(() => resolve()))
 }
 
+/**
+ * Warms the browser cache for the backdrop artwork. Without this the first
+ * poster can rasterize before the squiggle has decoded and come out plain blue,
+ * while every later one is fine — the kind of bug that only shows up in the
+ * first file of the zip.
+ */
+function preloadImage(src: string): Promise<void> {
+  return new Promise(resolve => {
+    const img = new Image()
+    img.onload = () => resolve()
+    img.onerror = () => resolve() // a missing backdrop must not block the export
+    img.src = src
+  })
+}
+
 export async function downloadPostersAsPng({
   posters,
   zipName,
@@ -24,17 +39,24 @@ export async function downloadPostersAsPng({
 }) {
   if (posters.length === 0) throw new Error("Nothing to export")
 
-  const [{ toPng }, { default: JSZip }, { createRoot }, { SchedulePoster }] =
-    await Promise.all([
+  const [
+    { toPng },
+    { default: JSZip },
+    { createRoot },
+    { SchedulePoster, POSTER_SQUIGGLE_SRC },
+  ] = await Promise.all([
       import("html-to-image"),
       import("jszip"),
       import("react-dom/client"),
       import("@/components/SchedulePoster"),
     ])
 
-  // Webfonts must be resolved before the first capture, or the earliest posters
-  // rasterize in the fallback face.
-  if (document.fonts?.ready) await document.fonts.ready
+  // Webfonts and the backdrop must both be resolved before the first capture,
+  // or the earliest posters rasterize in the fallback face / without artwork.
+  await Promise.all([
+    document.fonts?.ready ?? Promise.resolve(),
+    preloadImage(POSTER_SQUIGGLE_SRC),
+  ])
 
   const stage = document.createElement("div")
   stage.style.cssText =
