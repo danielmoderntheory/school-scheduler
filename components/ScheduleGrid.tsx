@@ -756,7 +756,7 @@ export function ScheduleGrid({
       <table className="w-full text-sm table-fixed">
         <thead>
           <tr className="border-b bg-muted/50">
-            <th className="p-1.5 text-left w-8 text-xs"></th>
+            <th className="p-1.5 text-left w-[45px] text-xs"></th>
             {DAYS.map((day) => (
               <th key={day} className="p-1.5 text-center font-medium text-xs">
                 {day}
@@ -767,7 +767,7 @@ export function ScheduleGrid({
         <tbody>
           {blocks.map((block) => (
             <tr key={block} className="border-b last:border-b-0">
-              <td className="p-1.5 font-medium text-muted-foreground bg-muted/30 text-xs">
+              <td className="px-0.5 py-1.5 font-medium text-muted-foreground bg-muted/30 text-xs">
                 {/* Row header, both views: the bell time leads, with a dim
                     block number under it.
 
@@ -794,12 +794,26 @@ export function ScheduleGrid({
                   if (!time) return <>B{block}</>
                   return (
                     <>
-                      {/* The zero-width space after the dash lets the range
-                          wrap onto two lines in narrow columns. */}
-                      <div className="leading-tight">
-                        {time.replace(/\s*-\s*/, "\u2013\u200b")}
-                      </div>
-                      <div className="text-[9px] font-normal leading-tight text-muted-foreground/50">
+                      {/* The range stacks: start over end, no separator. On one
+                          line "10:28-11:08" needs a ~72px column at a readable
+                          size \u2014 that eats the day columns, and then leaves the
+                          column half empty on every shorter row. Stacked, the
+                          widest line is just "10:28" (~33px at 13px), so the
+                          column is 45px AND the type is bigger than it
+                          could ever be on one line. Free vertically: row height
+                          is set by the two-line cell content, not by this
+                          header. The end time is muted so the pair reads as a
+                          range without spending width on a dash. */}
+                      {(() => {
+                        const [from, to] = time.split(/\s*-\s*/)
+                        return (
+                          <div className="text-[13px] leading-tight whitespace-nowrap tabular-nums">
+                            <div>{from}</div>
+                            {to && <div className="text-muted-foreground/60">{to}</div>}
+                          </div>
+                        )
+                      })()}
+                      <div className="text-[9px] font-normal leading-none text-muted-foreground/50 pt-0.5">
                         B{block}
                       </div>
                     </>

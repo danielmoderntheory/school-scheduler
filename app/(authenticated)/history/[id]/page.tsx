@@ -40,7 +40,7 @@ import { Textarea } from "@/components/ui/textarea"
 import { Label } from "@/components/ui/label"
 import Link from "next/link"
 import type { ScheduleOption, TeacherSchedule, GradeSchedule, Teacher, FloatingBlock, PendingPlacement, ValidationError, CellLocation, ClassEntry, OpenBlockLabels, PendingTransfer, TimetableTemplate } from "@/lib/types"
-import { resolveRowsForGrade, getTemplateBlocks, getTeachableBlocksForGrade, getPairableBlocksForGrade, getBlockConflictsForGrade, getLunchBlocksForGrade, getUnavailableBlockLabelsForGrade, getBlockTimesForGrade, getSharedBlockTimes } from "@/lib/timetable-utils"
+import { resolveRowsForGrade, getTemplateBlocks, getTeachableBlocksForGrade, getPairableBlocksForGrade, getBlockConflictsForGrade, getLunchBlocksForGrade, getUnavailableBlockLabelsForGrade, getBlockTimesForGrade, getSharedBlockTimes, getMaskedBlockByRowForGrade } from "@/lib/timetable-utils"
 import { parseClassesFromSnapshot, parseTeachersFromSnapshot, parseRulesFromSnapshot, hasValidSnapshots, detectClassChanges, detectTeacherChanges, applyTeacherRenames, applyTeacherChangesToSnapshot, computeExpectedTeachingSessions, findMismatchedTeachers, type GenerationStats, type ChangeDetectionResult, type CurrentClass, type ClassSnapshot, type TeacherSnapshot, type TeacherChangeResult } from "@/lib/snapshot-utils"
 import { parseGradeDisplayToNumbers, parseGradeDisplayToNames, gradesOverlap, gradesEqual, gradeNumToDisplay, isClassElective, isClassCotaught, shouldIgnoreGradeConflict, formatGradeDisplayCompact } from "@/lib/grade-utils"
 import { BLOCK_TYPE_OPEN, BLOCK_TYPE_STUDY_HALL, isOpenBlock, isStudyHall, isScheduledClass, isOccupiedBlock, entryIsOpen, entryIsOccupied, entryIsScheduledClass, isFullTime, setOpenBlockLabel, recalculateOptionStats, getFirstGradeEntry, isMultipleEntryCell, type LunchContext, getTeacherLunchCandidates, designateTeacherLunch } from "@/lib/schedule-utils"
@@ -8115,6 +8115,7 @@ export default function HistoryDetailPage() {
                     gradeId={grade?.id || ''}
                     homeroomTeachers={grade?.homeroom_teachers}
                     templateRows={resolved}
+                    maskedBlockByRow={getMaskedBlockByRowForGrade(timetableTemplate, grade?.id || '')}
                     gradeSchedule={schedule}
                   />
                 )
@@ -9883,6 +9884,7 @@ export default function HistoryDetailPage() {
                             gradeId={grade?.id || ''}
                             homeroomTeachers={grade?.homeroom_teachers}
                             templateRows={resolved}
+                            maskedBlockByRow={getMaskedBlockByRowForGrade(timetableTemplate, grade?.id || '')}
                             gradeSchedule={schedule}
                           />
                         )

@@ -310,3 +310,66 @@ export function getSharedBlockTimes(
   for (const [block, v] of best) times[block] = v.time
   return times
 }
+
+/**
+ * For a grade's NON-block rows (its lunch, its end-of-day meeting), the block
+ * number that window stands in for — keyed by the row's sort_order.
+ *
+ * A grade's lunch row carries no blockNumber of its own, but it occupies a real
+ * block's window: 1st grade's "Lunch 11:11-11:51" IS the Block 5 window it sits
+ * out, and its "End of Day Meeting / SEL 2:30-2:45" sits inside the Block 9
+ * window K-5 surrendered. The timetable view uses this to label those rows B5
+ * and B9, so every row is identifiable rather than the block numbers appearing
+ * to skip.
+ *
+ * Pairs each block the grade does NOT teach with the grade's own break or
+ * transition row in that window: an exact time-string match first (a lunch row
+ * is authored with its block row's exact time), otherwise the row with the
+ * largest overlap (SEL is shorter than the block it sits in). Rows matching no
+ * masked block — the morning meeting, the mid-morning break — get no entry.
+ * Empty without a template.
+ */
+export function getMaskedBlockByRowForGrade(
+  template: Pick<TimetableTemplate, 'rows'> | null | undefined,
+  gradeId: string
+): Record<number, number> {
+  if (!template?.rows?.length) return {}
+  const teachable = new Set(getTeachableBlocksForGrade(template, gradeId))
+  const resolved = resolveRowsForGrade(template.rows, gradeId)
+  const resolvedSet = new Set(resolved)
+  const candidates = resolved.filter(
+    row => row.type === 'break' || row.type === 'transition'
+  )
+
+  const byRow: Record<number, number> = {}
+  const claimed = new Set<number>()
+  for (const block of getTemplateBlocks(template)) {
+    if (teachable.has(block)) continue
+    // Take the window from a block row for this number, preferring one scoped
+    // to OTHER grades — that is the bell window this grade sits outside of.
+    const blockRows = template.rows.filter(
+      row => row.type === 'block' && row.blockNumber === block
+    )
+    const sourceRow = blockRows.find(row => !resolvedSet.has(row)) ?? blockRows[0]
+    const blockRange = parseTimeRange(sourceRow?.time)
+    if (!blockRange) continue
+
+    let best: { sortOrder: number; overlap: number; exact: boolean } | null = null
+    for (const row of candidates) {
+      if (claimed.has(row.sort_order)) continue
+      const range = parseTimeRange(row.time)
+      if (!range) continue
+      const overlap = Math.min(blockRange[1], range[1]) - Math.max(blockRange[0], range[0])
+      if (overlap <= 0) continue
+      const exact = row.time === sourceRow?.time
+      if (!best || (exact && !best.exact) || (exact === best.exact && overlap > best.overlap)) {
+        best = { sortOrder: row.sort_order, overlap, exact }
+      }
+    }
+    if (best) {
+      byRow[best.sortOrder] = block
+      claimed.add(best.sortOrder)
+    }
+  }
+  return byRow
+}

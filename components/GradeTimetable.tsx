@@ -11,6 +11,13 @@ interface GradeTimetableProps {
   homeroomTeachers?: string
   templateRows: TimetableRow[]
   gradeSchedule: GradeSchedule
+  // Block number each NON-block row stands in for, keyed by row sort_order
+  // (from getMaskedBlockByRowForGrade): a grade's Lunch row occupies the block
+  // window it sits out, and K-5's End of Day Meeting sits inside the Block 9
+  // window they surrendered. Labels those rows B5/B9 so the block numbers do
+  // not appear to skip. Rows with no entry (morning meeting, mid-morning
+  // break) are genuinely blockless. Absent = no block labels on those rows.
+  maskedBlockByRow?: Record<number, number>
 }
 
 export function GradeTimetable({
@@ -19,6 +26,7 @@ export function GradeTimetable({
   homeroomTeachers,
   templateRows,
   gradeSchedule,
+  maskedBlockByRow,
 }: GradeTimetableProps) {
   function getCellContent(day: string, blockNumber: number): { subject: string; teacher: string } | null {
     return resolveGradeCellDisplay(gradeSchedule[day]?.[blockNumber] ?? null)
@@ -79,14 +87,23 @@ export function GradeTimetable({
             const isBlock = row.type === "block" && row.blockNumber
 
             if (!isBlock) {
-              // Break/transition: compact merged row
+              // Break/transition: compact merged row. When the window stands in
+              // for a block the grade sits out (its Lunch, K-5's End of Day
+              // Meeting), the label column carries that block number so the
+              // numbering reads continuously down the card.
+              const maskedBlock = maskedBlockByRow?.[row.sort_order]
               return (
                 <tr key={`${row.sort_order}-${idx}`} className={`border-b last:border-b-0 ${row.type === "break" ? "bg-slate-50" : "bg-amber-50/40"}`}>
                   <td className="py-1 px-1.5 text-xs text-muted-foreground whitespace-nowrap border-r">
                     {row.time}
                   </td>
+                  {maskedBlock !== undefined && (
+                    <td className="py-1 px-1.5 text-xs text-muted-foreground/60 font-semibold whitespace-nowrap border-r uppercase tracking-wide">
+                      B{maskedBlock}
+                    </td>
+                  )}
                   <td
-                    colSpan={6}
+                    colSpan={maskedBlock !== undefined ? 5 : 6}
                     className="py-1 px-2 text-xs text-muted-foreground italic"
                   >
                     {row.label}
