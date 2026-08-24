@@ -12,28 +12,36 @@
 ALTER TABLE subjects ADD COLUMN IF NOT EXISTS short_name TEXT;
 
 -- Seed the school's own abbreviations, taken from their hand-made Canva cards:
---   "7 ENG" / "6 ENG"        (Carolina, Eugenia)  -> English Language & Literature
---   "4/5 SPAN" / "6 SPAN"    (Karla)              -> the Spanish family
+--   "7 ENG" / "6 ENG"        (Carolina, Eugenia)  -> (superseded by English L&L below)
+--   "4/5 SPAN" / "6 SPAN"    (Karla)              -> (superseded by Español below)
 --   "HUMANITIES"             (12th grade card)    -> Integrated Humanities
 -- Reaccion (Writing) prints as "Writing": Reacción is the programme, writing
 -- is the class, and that is what the card should say (Daniel's call — their
 -- own cards do say REACCIÓN).
 -- Only these are long enough to wrap past a cell; everything else the
 -- cards print in full, so it stays NULL.
--- Spanish -> "Español" is the exception: not a shortening but the school's
--- own name for the class, the way their K/1 cards print it. Their cards are
--- not consistent about this (Karla's says SPAN, the 6th-grade card SPANISH),
--- and one short_name per subject cannot be both, so this is Daniel's call:
--- Español everywhere the subject appears. The grade prefixes on their cards
+-- Spanish -> "Español" and Social Studies -> "Estudios Sociales" are the
+-- exceptions: not shortenings but the school's own names for the classes, the
+-- way their PreK-1st cards print them. Those two names are a per-CARD choice
+-- in the original -- only the PreK-1st band is translated, and the 2nd-grade
+-- card one year up says SPANISH / SOCIAL STUDIES -- which one short_name per
+-- subject cannot express. Daniel's call: the Spanish names everywhere, so the
+-- two read consistently rather than one being translated and the other not. The grade prefixes on their cards
 -- ("4/5", "7") are not part of the subject — the poster carries the grade on
 -- its own sub-line.
 -- COALESCE guard: seeds only where nobody has set a value, so re-running this
 -- never overwrites an edit made in Settings.
-UPDATE subjects SET short_name = COALESCE(short_name, 'ENG')        WHERE name = 'English Language & Literature';
-UPDATE subjects SET short_name = COALESCE(short_name, 'SPAN')       WHERE name = 'Spanish Language & Literature';
+-- The two Language & Literature courses keep "L&L" so they stay distinct from
+-- the separate K-6th English and Spanish subjects. Their own cards just say
+-- ENG, which is terser than it needs to be at this type size.
+-- Safe either way: no grade takes both (English/Spanish are K-6th, the L&L
+-- courses 7th-12th) and no teacher teaches both, so no card can show a pair.
+UPDATE subjects SET short_name = COALESCE(short_name, 'English L&L') WHERE name = 'English Language & Literature';
+UPDATE subjects SET short_name = COALESCE(short_name, 'Español L&L') WHERE name = 'Spanish Language & Literature';
 UPDATE subjects SET short_name = COALESCE(short_name, 'Humanities') WHERE name = 'Integrated Humanities';
 UPDATE subjects SET short_name = COALESCE(short_name, 'Writing')    WHERE name = 'Reaccion (Writing)';
 UPDATE subjects SET short_name = COALESCE(short_name, 'Español')    WHERE name = 'Spanish';
+UPDATE subjects SET short_name = COALESCE(short_name, 'Estudios Sociales') WHERE name = 'Social Studies';
 
 -- Salsa/Batchata is misspelled (the dance is bachata), but the subject is NOT
 -- free to rename: a soft-deleted 6th-grade class still points at it and two
