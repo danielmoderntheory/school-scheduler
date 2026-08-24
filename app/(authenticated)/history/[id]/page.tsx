@@ -1429,6 +1429,8 @@ export default function HistoryDetailPage() {
                   ),
                   lunchContext,
                   subjectLabels,
+                  openBlockLabels: option.openBlockLabels,
+                  status: option.teacherStats.find(st => st.teacher === teacher)?.status,
                 })
               )
 

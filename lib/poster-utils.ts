@@ -20,13 +20,17 @@ import {
 import {
   BLOCK_TYPE_STUDY_HALL,
   designateTeacherLunch,
+  getOpenBlockAt,
+  getOpenBlockLabel,
   getTeacherLunchCandidates,
   isOpenBlock,
+  isPartTime,
   isScheduledClass,
   isStudyHall,
   resolveGradeCellDisplay,
   type LunchContext,
 } from "./schedule-utils"
+import type { OpenBlockLabels } from "./types"
 import { parseGradeDisplayToNames } from "./grade-utils"
 import {
   getBlockTimesForGrade,
@@ -178,6 +182,20 @@ export interface TeacherPosterContext {
   lunchContext?: LunchContext
   /** Short subject names from the DB; absent subjects print in full. */
   subjectLabels?: SubjectLabels
+  /**
+   * Annotations put on OPEN blocks in the teacher view ("Annotate Open
+   * Blocks"). The school's hand-made cards fill these slots with the duties
+   * the schedule does not model — "K/1 ENG PUSH IN", "PUSH 4/5" — so the
+   * poster prints the annotation instead of a bare OPEN wherever one is set.
+   */
+  openBlockLabels?: OpenBlockLabels
+  /**
+   * The teacher's employment status from teacherStats. A part-time teacher's
+   * free periods are simply not their working day, and the school's own cards
+   * leave those cells EMPTY rather than writing OPEN across them — a card like
+   * Katrin's is nearly all blank by design. Absent = treated as full-time.
+   */
+  status?: string
 }
 
 /**
@@ -205,7 +223,14 @@ export function buildTeacherPoster(
   schedule: TeacherSchedule,
   ctx: TeacherPosterContext
 ): PosterData {
-  const { template, gradeIdsByName, lunchContext, subjectLabels } = ctx
+  const {
+    template,
+    gradeIdsByName,
+    lunchContext,
+    subjectLabels,
+    openBlockLabels,
+    status,
+  } = ctx
   const blocks = getTemplateBlocks(template)
   const sharedTimes = getSharedBlockTimes(template)
   const templateRows = (template?.rows ?? []).slice().sort((a, b) => a.sort_order - b.sort_order)
@@ -350,10 +375,22 @@ export function buildTeacherPoster(
         const sub = taughtNames.size > 1 ? entry[0] : undefined
         return { main: label(entry[1], subjectLabels), sub }
       }
-      // Free cell: the day's designated lunch, a block outside this teacher's
+      // Free cell. An annotation the school put on this OPEN block wins over
+      // everything else — it is a real duty someone typed in, and it is the
+      // only thing here that is not derived. The open-block index comes from
+      // the shared helper so it matches the grid's numbering exactly; get it
+      // wrong and labels land on the wrong cells.
+      const open = getOpenBlockAt(schedule, day, block)
+      const annotation = open
+        ? getOpenBlockLabel(openBlockLabels, teacherName, open.openIndex, open.type)
+        : undefined
+      if (annotation) return { main: annotation }
+      // Otherwise: the day's designated lunch, a block outside this teacher's
       // reach (blank rather than a false "OPEN"), or genuine open time.
       if (lunchByDay[day] === block) return { main: "Lunch" }
       if (usableSet && !usableSet.has(block)) return null
+      // Part-timers get a blank rather than OPEN — see `status` above.
+      if (isPartTime(status)) return null
       return { main: "Open" }
     })
 
