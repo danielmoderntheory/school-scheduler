@@ -76,7 +76,37 @@ PGPASSWORD="$STAGING_PASS" psql \
   -f "$DUMP_FILE"
 
 echo ""
-echo "Step 4: Verifying counts..."
+echo "Step 4: Re-identifying staging schedules..."
+
+# A dump/restore carries prod's schedule_generations UUIDs across verbatim, so
+# /history/<id> would resolve to the SAME id on staging and on prod -- a shared
+# link would be ambiguous, and a staging schedule indistinguishable from the
+# real one. Give every copied schedule a fresh id, and record the prod id it
+# came from in its notes so it can still be traced back.
+#
+# Safe to re-id: nothing has a foreign key to schedule_generations, and no
+# generation stores its own or another generation's id inside options/stats.
+# Postgres evaluates every SET expression against the OLD row, so id::text on
+# the right-hand side is still the prod id while the left-hand side replaces it.
+if [ "$STAGING_HOST" = "$PROD_HOST" ]; then
+  echo "REFUSING: staging host resolves to the production host ($PROD_HOST)."
+  exit 1
+fi
+
+PGPASSWORD="$STAGING_PASS" psql \
+  -h "$STAGING_HOST" \
+  -p 5432 \
+  -U "$STAGING_USER" \
+  -d postgres \
+  -v ON_ERROR_STOP=1 \
+  -c "UPDATE schedule_generations
+      SET notes = trim(both ' ' from
+                    coalesce(notes || ' ', '') ||
+                    '[staging copy of prod ' || left(id::text, 8) || ']'),
+          id = gen_random_uuid();"
+
+echo ""
+echo "Step 5: Verifying counts..."
 echo ""
 
 TABLES="teachers grades subjects quarters classes restrictions rules study_hall_groups schedule_generations"
