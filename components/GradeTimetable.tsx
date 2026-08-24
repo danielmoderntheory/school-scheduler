@@ -3,7 +3,7 @@
 import { TimetableRow } from "@/lib/types"
 import { GradeSchedule } from "@/lib/types"
 import { DAYS } from "@/lib/types"
-import { isOpenBlock, isStudyHall } from "@/lib/schedule-utils"
+import { resolveGradeCellDisplay } from "@/lib/schedule-utils"
 
 interface GradeTimetableProps {
   gradeName: string
@@ -21,36 +21,7 @@ export function GradeTimetable({
   gradeSchedule,
 }: GradeTimetableProps) {
   function getCellContent(day: string, blockNumber: number): { subject: string; teacher: string } | null {
-    const entry = gradeSchedule[day]?.[blockNumber]
-    if (!entry) return null
-    // Multiple entries (electives) - show "Elective" instead of individual classes
-    if (Array.isArray(entry) && Array.isArray(entry[0])) {
-      const entries = entry as unknown as [string, string][]
-      // Filter to actual classes (not OPEN or Study Hall)
-      const classEntries = entries.filter(([, subject]) => subject && !isOpenBlock(subject) && !isStudyHall(subject))
-      if (classEntries.length > 1) {
-        // Same subject from several teachers = one co-taught class (e.g. K/1
-        // Science, Daniela + Nati) — never an elective period.
-        const subjects = new Set(classEntries.map(([, subject]) => subject))
-        if (subjects.size === 1) {
-          const teacher = classEntries.map(([t]) => t).filter(Boolean).join(" / ")
-          return { subject: classEntries[0][1], teacher }
-        }
-        return { subject: "Elective", teacher: "" }
-      }
-      // Single class entry or only OPEN/Study Hall - use first entry
-      if (entries.length > 0) {
-        const [teacher, subject] = entries[0]
-        if (!subject || isOpenBlock(subject)) return null
-        if (isStudyHall(subject)) return { subject: "Study Hall", teacher }
-        return { subject, teacher }
-      }
-      return null
-    }
-    const [teacher, subject] = entry as [string, string]
-    if (!subject || isOpenBlock(subject)) return null
-    if (isStudyHall(subject)) return { subject: "Study Hall", teacher }
-    return { subject, teacher }
+    return resolveGradeCellDisplay(gradeSchedule[day]?.[blockNumber] ?? null)
   }
 
   // Safety net: find schedule entries whose block has no matching row in this

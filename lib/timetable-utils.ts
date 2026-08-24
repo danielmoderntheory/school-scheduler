@@ -135,7 +135,7 @@ export function getLunchBlocksForGrade(
  * day runs ~7:00-18:00, so hours 1-6 are PM (add 12) and 7-12 are AM (12 stays
  * 12 = noon). Returns null for anything malformed or inverted.
  */
-function parseTimeRange(time: string | undefined): [number, number] | null {
+export function parseTimeRange(time: string | undefined): [number, number] | null {
   if (!time) return null
   const m = /^\s*(\d{1,2}):(\d{2})\s*-\s*(\d{1,2}):(\d{2})\s*$/.exec(time)
   if (!m) return null

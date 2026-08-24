@@ -367,6 +367,7 @@ export default function HistoryDetailPage() {
   const [isPublicView, setIsPublicView] = useState<boolean | null>(null) // null = checking, true = public, false = authenticated
   const [userRole, setUserRole] = useState<"admin" | "readonly" | null>(null) // User's auth role
   const [isCapturingPng, setIsCapturingPng] = useState(false)
+  const [isCapturingPoster, setIsCapturingPoster] = useState(false)
 
   // Regeneration state - teachers selected for regeneration
   const [regenMode, setRegenMode] = useState(false)
@@ -1356,6 +1357,72 @@ export default function HistoryDetailPage() {
       toast.error("Failed to capture schedules as PNG")
     } finally {
       setIsCapturingPng(false)
+    }
+  }
+
+  // Poster PNGs — the printed blue schedule cards, one landscape PNG per card,
+  // zipped. Follows the current view exactly like the plain PNG export does
+  // (the timetable view is grade-based, so it exports grade cards). The artwork
+  // is independent of the on-screen grids, and needs the quarter's timetable
+  // template because the card is laid out by bell time.
+  async function handleDownloadPosters() {
+    const kind: "teacher" | "grade" = viewMode === "teacher" ? "teacher" : "grade"
+    const option = isPublicView
+      ? (generation?.selected_option
+          ? generation.options[generation.selected_option - 1]
+          : generation?.options?.[0])
+      : displayedOption
+    if (!option) {
+      toast.error("No schedule to export")
+      return
+    }
+    if (!timetableTemplate) {
+      toast.error("Poster export needs this quarter's timetable template")
+      return
+    }
+
+    setIsCapturingPoster(true)
+    try {
+      const [{ buildGradePoster, buildTeacherPoster }, { downloadPostersAsPng }] =
+        await Promise.all([
+          import("@/lib/poster-utils"),
+          import("@/lib/poster-export"),
+        ])
+
+      const posters =
+        kind === "grade"
+          ? Object.entries(option.gradeSchedules)
+              .filter(([grade]) => !grade.includes("Elective"))
+              .sort(([a], [b]) => gradeSort(a, b))
+              .map(([gradeName, schedule]) =>
+                buildGradePoster(
+                  gradeName,
+                  gradesData.find(g => g.display_name === gradeName)?.id || "",
+                  schedule,
+                  timetableTemplate
+                )
+              )
+          : Object.entries(option.teacherSchedules)
+              .sort(([a], [b]) => a.localeCompare(b))
+              .map(([teacher, schedule]) =>
+                buildTeacherPoster(teacher, schedule, {
+                  template: timetableTemplate,
+                  gradeIdsByName: Object.fromEntries(
+                    gradesData.map(g => [g.display_name, g.id])
+                  ),
+                  lunchContext,
+                })
+              )
+
+      await downloadPostersAsPng({
+        posters,
+        zipName: kind === "teacher" ? "Poster_Teachers" : "Poster_Grades",
+      })
+    } catch (err) {
+      console.error("Poster capture failed:", err)
+      toast.error("Failed to export poster PNGs")
+    } finally {
+      setIsCapturingPoster(false)
     }
   }
 
@@ -7962,6 +8029,10 @@ export default function HistoryDetailPage() {
                 {isCapturingPng ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : <ImageDown className="h-4 w-4 mr-2" />}
                 PNG
               </DropdownMenuItem>
+              <DropdownMenuItem onClick={handleDownloadPosters} disabled={isCapturingPoster}>
+                {isCapturingPoster ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : <ImageDown className="h-4 w-4 mr-2" />}
+                Poster PNG
+              </DropdownMenuItem>
               <DropdownMenuSeparator />
               <DropdownMenuItem onClick={() => window.print()}>
                 <Printer className="h-4 w-4 mr-2" />
@@ -8318,6 +8389,10 @@ export default function HistoryDetailPage() {
                     <DropdownMenuItem onClick={handleDownloadPng} disabled={isCapturingPng}>
                       {isCapturingPng ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : <ImageDown className="h-4 w-4 mr-2" />}
                       PNG
+                    </DropdownMenuItem>
+                    <DropdownMenuItem onClick={handleDownloadPosters} disabled={isCapturingPoster}>
+                      {isCapturingPoster ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : <ImageDown className="h-4 w-4 mr-2" />}
+                      Poster PNG
                     </DropdownMenuItem>
                     <DropdownMenuSeparator />
                     <DropdownMenuItem onClick={() => window.print()}>

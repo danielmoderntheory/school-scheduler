@@ -191,6 +191,50 @@ export function getAllGradeEntries(cell: GradeScheduleCell): [string, string][] 
   return [cell]
 }
 
+/**
+ * What a grade-view cell should DISPLAY for one block on one day.
+ *
+ * Collapses the three shapes a grade cell can take into one answer:
+ * - several different subjects at once  -> "Elective" (no single teacher)
+ * - several teachers, ONE subject       -> that subject, teachers joined " / "
+ *                                         (a co-taught class, e.g. K/1 Science
+ *                                          with two teachers — never an elective)
+ * - a single entry                      -> the subject, or Study Hall
+ * - empty / OPEN                        -> null (grades have no "OPEN")
+ *
+ * Shared by the timetable view and the poster export so both read a cell the
+ * same way; callers that only want the subject can ignore `teacher`.
+ */
+export function resolveGradeCellDisplay(
+  cell: GradeScheduleCell
+): { subject: string; teacher: string } | null {
+  if (!cell) return null
+
+  if (isMultipleEntryCell(cell)) {
+    const classEntries = cell.filter(
+      ([, subject]) => subject && !isOpenBlock(subject) && !isStudyHall(subject)
+    )
+    if (classEntries.length > 1) {
+      const subjects = new Set(classEntries.map(([, subject]) => subject))
+      if (subjects.size === 1) {
+        const teacher = classEntries.map(([t]) => t).filter(Boolean).join(" / ")
+        return { subject: classEntries[0][1], teacher }
+      }
+      return { subject: "Elective", teacher: "" }
+    }
+    if (cell.length === 0) return null
+    const [teacher, subject] = cell[0]
+    if (!subject || isOpenBlock(subject)) return null
+    if (isStudyHall(subject)) return { subject: BLOCK_TYPE_STUDY_HALL, teacher }
+    return { subject, teacher }
+  }
+
+  const [teacher, subject] = cell
+  if (!subject || isOpenBlock(subject)) return null
+  if (isStudyHall(subject)) return { subject: BLOCK_TYPE_STUDY_HALL, teacher }
+  return { subject, teacher }
+}
+
 // -----------------------------------------------------------------------------
 // DISPLAY LABELS (Future Feature)
 // Display labels allow renaming what OPEN blocks show as in exports/public views.
