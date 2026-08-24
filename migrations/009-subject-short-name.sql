@@ -15,9 +15,16 @@ ALTER TABLE subjects ADD COLUMN IF NOT EXISTS short_name TEXT;
 --   "7 ENG" / "6 ENG"        (Carolina, Eugenia)  -> English Language & Literature
 --   "4/5 SPAN" / "6 SPAN"    (Karla)              -> the Spanish family
 --   "HUMANITIES"             (12th grade card)    -> Integrated Humanities
---   "6 REACCIÓN"             (Karla, 6th grade)   -> Reaccion (Writing)
--- Only these four are long enough to wrap past a cell; everything else the
--- cards print in full, so it stays NULL. The grade prefixes on their cards
+-- Reaccion (Writing) prints as "Writing": Reacción is the programme, writing
+-- is the class, and that is what the card should say (Daniel's call — their
+-- own cards do say REACCIÓN).
+-- Only these are long enough to wrap past a cell; everything else the
+-- cards print in full, so it stays NULL.
+-- Spanish -> "Español" is the exception: not a shortening but the school's
+-- own name for the class, the way their K/1 cards print it. Their cards are
+-- not consistent about this (Karla's says SPAN, the 6th-grade card SPANISH),
+-- and one short_name per subject cannot be both, so this is Daniel's call:
+-- Español everywhere the subject appears. The grade prefixes on their cards
 -- ("4/5", "7") are not part of the subject — the poster carries the grade on
 -- its own sub-line.
 -- COALESCE guard: seeds only where nobody has set a value, so re-running this
@@ -25,4 +32,5 @@ ALTER TABLE subjects ADD COLUMN IF NOT EXISTS short_name TEXT;
 UPDATE subjects SET short_name = COALESCE(short_name, 'ENG')        WHERE name = 'English Language & Literature';
 UPDATE subjects SET short_name = COALESCE(short_name, 'SPAN')       WHERE name = 'Spanish Language & Literature';
 UPDATE subjects SET short_name = COALESCE(short_name, 'Humanities') WHERE name = 'Integrated Humanities';
-UPDATE subjects SET short_name = COALESCE(short_name, 'Reacción')   WHERE name = 'Reaccion (Writing)';
+UPDATE subjects SET short_name = COALESCE(short_name, 'Writing')    WHERE name = 'Reaccion (Writing)';
+UPDATE subjects SET short_name = COALESCE(short_name, 'Español')    WHERE name = 'Spanish';
