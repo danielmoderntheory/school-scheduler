@@ -54,6 +54,7 @@ interface Grade {
   name: string
   display_name: string
   sort_order: number
+  is_combined?: boolean
 }
 
 interface Subject {
@@ -181,9 +182,9 @@ export function AddClassModal({
     })),
   ]
 
-  // Filter to individual grades (K-11)
+  // Filter to individual grades
   const individualGrades = grades
-    .filter((g) => g.sort_order >= 0 && g.sort_order <= 11)
+    .filter((g) => g.sort_order >= 0 && g.is_combined !== true)
     .sort((a, b) => a.sort_order - b.sort_order)
 
   // Reset state when modal opens/closes

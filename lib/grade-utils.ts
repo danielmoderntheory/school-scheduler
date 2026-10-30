@@ -14,9 +14,18 @@
  *   "6th Grade, 7th Grade" → [6, 7]
  *   "Kindergarten" → [0]
  *   "K, 1st, 2nd" → [0, 1, 2]
+ *   "Kindergarten-2nd Grade" → [0, 1, 2]
  */
 export function parseGradeDisplayToNumbers(display: string): number[] {
   const grades: number[] = []
+
+  // Handle ranges starting at Kindergarten, like "Kindergarten-2nd Grade" or "K-2nd"
+  const kRangeMatch = display.trim().match(/^(?:kindergarten|k)\s*[-–]\s*(\d+)/i)
+  if (kRangeMatch) {
+    const end = parseInt(kRangeMatch[1])
+    for (let i = 0; i <= end; i++) grades.push(i)
+    return grades
+  }
 
   // Handle Kindergarten (can appear alone or in comma-separated list)
   if (display.toLowerCase().includes('kindergarten') || display === 'K') {
@@ -31,8 +40,8 @@ export function parseGradeDisplayToNumbers(display: string): number[] {
   if (display.includes(',')) {
     const parts = display.split(',').map(p => p.trim())
     for (const part of parts) {
-      // Skip if already handled kindergarten
       if (part.toLowerCase().includes('kindergarten') || part === 'K') {
+        if (!grades.includes(0)) grades.push(0)
         continue
       }
       const num = part.match(/(\d+)/)

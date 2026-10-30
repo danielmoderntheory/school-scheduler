@@ -89,84 +89,7 @@ function rebuildGradeSchedules(
     })
   }
 
-  // Helper to parse grade names from grade_display string (e.g., "6th-11th Grade" -> ["6th Grade", "7th Grade", ...])
-  // Same logic as ScheduleStats.tsx - handles: Kindergarten, comma-separated lists, range patterns, single grades
-  const parseGradeDisplay = (gradeDisplay: string): string[] => {
-    const grades: string[] = []
-
-    // Check for Kindergarten (can appear alone or in a comma-separated list)
-    if (gradeDisplay.toLowerCase().includes('kindergarten') || gradeDisplay === 'K') {
-      const kGrade = gradeNames.find(g => g.toLowerCase().includes('kindergarten') || g === 'K')
-      if (kGrade) {
-        grades.push(kGrade)
-      }
-      // If ONLY kindergarten, return early
-      if (!gradeDisplay.includes(',')) {
-        return grades
-      }
-    }
-
-    // Check for comma-separated list like "6th Grade, 7th Grade" or "K, 1st, 2nd"
-    if (gradeDisplay.includes(',')) {
-      const parts = gradeDisplay.split(',').map(p => p.trim())
-      for (const part of parts) {
-        // Skip if already handled kindergarten
-        if (part.toLowerCase().includes('kindergarten') || part === 'K') {
-          continue
-        }
-        // Try exact match first
-        if (gradeNames.includes(part)) {
-          grades.push(part)
-          continue
-        }
-        // Extract grade number and build standard format
-        const numMatch = part.match(/(\d+)/)
-        if (numMatch) {
-          const num = parseInt(numMatch[1])
-          const suffix = num === 1 ? 'st' : num === 2 ? 'nd' : num === 3 ? 'rd' : 'th'
-          const gradeName = `${num}${suffix} Grade`
-          if (gradeNames.includes(gradeName) && !grades.includes(gradeName)) {
-            grades.push(gradeName)
-          }
-        }
-      }
-      return grades
-    }
-
-    // Check for range pattern like "6th-11th" or "6th-8th"
-    const rangeMatch = gradeDisplay.match(/(\d+)(?:st|nd|rd|th)?[-–](\d+)(?:st|nd|rd|th)?/)
-    if (rangeMatch) {
-      const start = parseInt(rangeMatch[1])
-      const end = parseInt(rangeMatch[2])
-      for (let i = start; i <= end; i++) {
-        const suffix = i === 1 ? 'st' : i === 2 ? 'nd' : i === 3 ? 'rd' : 'th'
-        const gradeName = `${i}${suffix} Grade`
-        if (gradeNames.includes(gradeName)) {
-          grades.push(gradeName)
-        }
-      }
-      return grades
-    }
-
-    // Single grade pattern - try exact match first
-    if (gradeNames.includes(gradeDisplay)) {
-      grades.push(gradeDisplay)
-      return grades
-    }
-
-    // Try to find matching grade by number
-    const singleMatch = gradeDisplay.match(/(\d+)(?:st|nd|rd|th)/)
-    if (singleMatch) {
-      const num = parseInt(singleMatch[1])
-      const suffix = num === 1 ? 'st' : num === 2 ? 'nd' : num === 3 ? 'rd' : 'th'
-      const gradeName = `${num}${suffix} Grade`
-      if (gradeNames.includes(gradeName)) {
-        grades.push(gradeName)
-      }
-    }
-
-    return grades
-  }
+  const parseGradeDisplay = (gradeDisplay: string) => parseGradeDisplayToNames(gradeDisplay, gradeNames)
 
   // Initialize empty schedules for each grade
   const newGradeSchedules: Record<string, GradeSchedule> = {}
@@ -243,6 +166,7 @@ function rebuildGradeSchedules(
 
 // Convert grade string to number for sorting (K=0, 1st=1, etc.)
 function gradeToNum(grade: string): number {
+  if (/^pre-?k/i.test(grade)) return -1
   if (grade.toLowerCase().includes("kindergarten") || grade === "K") return 0
   const match = grade.match(/(\d+)/)
   return match ? parseInt(match[1]) : 99

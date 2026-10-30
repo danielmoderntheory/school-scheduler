@@ -239,6 +239,7 @@ function gradeSort(a: string, b: string): number {
 
 // Convert grade string to number for sorting (K=0, 1st=1, etc.)
 function gradeToNum(grade: string): number {
+  if (/^pre-?k/i.test(grade)) return -1
   if (grade.toLowerCase().includes("kindergarten") || grade === "K") return 0
   const match = grade.match(/(\d+)/)
   return match ? parseInt(match[1]) : 99
