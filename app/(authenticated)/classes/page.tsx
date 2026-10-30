@@ -2653,7 +2653,10 @@ Maria\t6th-11th Elective\tSpanish 101\t1\tMon Block 5\t`}
               if (!cls.teacher_id) continue
               teacherBlocks.set(cls.teacher_id, (teacherBlocks.get(cls.teacher_id) || 0) + cls.days_per_week)
             }
-            const fullTimeTeachers = teachers.filter(t => isFullTime(t.status))
+            const scheduledTeachers = teachers.filter(t => teacherBlocks.has(t.id))
+            const unscheduledTeachers = teachers.filter(t => !teacherBlocks.has(t.id))
+            const fullTimeTeachers = scheduledTeachers.filter(t => isFullTime(t.status))
+            const partTimeTeachers = scheduledTeachers.filter(t => isPartTime(t.status))
             const hasIssue = fullTimeTeachers.some(t => {
               const maxBlocks = teacherMaxBlocks(t)
               const blocks = teacherBlocks.get(t.id) || 0
@@ -2714,11 +2717,10 @@ Maria\t6th-11th Elective\tSpanish 101\t1\tMon Block 5\t`}
                             })}
                         </div>
                       )}
-                      {teachers.filter(t => isPartTime(t.status)).length > 0 && (
+                      {partTimeTeachers.length > 0 && (
                         <div className="py-1 border-t border-slate-100">
                           <div className="px-3 py-1 text-[10px] font-semibold text-slate-400 uppercase tracking-wider">Part-time</div>
-                          {teachers
-                            .filter(t => isPartTime(t.status))
+                          {partTimeTeachers
                             .sort((a, b) => a.name.localeCompare(b.name))
                             .map(t => {
                               const blocks = teacherBlocks.get(t.id) || 0
@@ -2730,6 +2732,18 @@ Maria\t6th-11th Elective\tSpanish 101\t1\tMon Block 5\t`}
                                 </div>
                               )
                             })}
+                        </div>
+                      )}
+                      {unscheduledTeachers.length > 0 && (
+                        <div className="py-1 border-t border-slate-100">
+                          <div className="px-3 py-1 text-[10px] font-semibold text-slate-400 uppercase tracking-wider">No classes this quarter</div>
+                          {unscheduledTeachers
+                            .sort((a, b) => a.name.localeCompare(b.name))
+                            .map(t => (
+                              <div key={t.id} className="px-3 py-1.5 text-xs text-slate-400 truncate hover:bg-slate-50">
+                                {t.name}
+                              </div>
+                            ))}
                         </div>
                       )}
                     </div>
