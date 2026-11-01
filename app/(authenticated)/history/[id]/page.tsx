@@ -43,7 +43,7 @@ import type { ScheduleOption, TeacherSchedule, GradeSchedule, Teacher, FloatingB
 import { resolveRowsForGrade, getTemplateBlocks, getTeachableBlocksForGrade, getPairableBlocksForGrade, getBlockConflictsForGrade, getLunchBlocksForGrade, getUnavailableBlockLabelsForGrade, getBlockTimesForGrade, getSharedBlockTimes, getMaskedBlockByRowForGrade } from "@/lib/timetable-utils"
 import { parseClassesFromSnapshot, parseTeachersFromSnapshot, parseRulesFromSnapshot, hasValidSnapshots, detectClassChanges, detectTeacherChanges, applyTeacherRenames, applyTeacherChangesToSnapshot, computeExpectedTeachingSessions, findMismatchedTeachers, type GenerationStats, type ChangeDetectionResult, type CurrentClass, type ClassSnapshot, type TeacherSnapshot, type TeacherChangeResult } from "@/lib/snapshot-utils"
 import { parseGradeDisplayToNumbers, parseGradeDisplayToNames, gradesOverlap, gradesEqual, gradeNumToDisplay, isClassElective, isClassCotaught, shouldIgnoreGradeConflict, formatGradeDisplayCompact } from "@/lib/grade-utils"
-import { BLOCK_TYPE_OPEN, BLOCK_TYPE_STUDY_HALL, isOpenBlock, isStudyHall, isScheduledClass, isOccupiedBlock, entryIsOpen, entryIsOccupied, entryIsScheduledClass, isFullTime, setOpenBlockLabel, recalculateOptionStats, getFirstGradeEntry, isMultipleEntryCell, type LunchContext, getTeacherLunchCandidates, designateTeacherLunch } from "@/lib/schedule-utils"
+import { BLOCK_TYPE_OPEN, BLOCK_TYPE_STUDY_HALL, isOpenBlock, isStudyHall, isScheduledClass, isOccupiedBlock, entryIsOpen, entryIsOccupied, entryIsScheduledClass, isFullTime, setOpenBlockLabel, recalculateOptionStats, rebuildGradeSchedules, getFirstGradeEntry, isMultipleEntryCell, type LunchContext, getTeacherLunchCandidates, designateTeacherLunch } from "@/lib/schedule-utils"
 import toast, { successIcon, errorIcon, warningIcon } from "@/lib/toast"
 import { generateSchedules, reassignStudyHalls } from "@/lib/scheduler"
 import { generateSchedulesRemote } from "@/lib/scheduler-remote"
@@ -60,108 +60,6 @@ function gradeSort(a: string, b: string): number {
   const aNum = parseInt(a.match(/(\d+)/)?.[1] || "99")
   const bNum = parseInt(b.match(/(\d+)/)?.[1] || "99")
   return aNum - bNum
-}
-
-/**
- * Rebuild gradeSchedules from teacherSchedules to ensure consistency.
- * TeacherSchedules is the source of truth - this derives gradeSchedules from it.
- * Handles multi-grade classes by parsing grade display strings (e.g., "6th-8th Grade").
- *
- * @param gradesSnapshot - Array of valid grades from the snapshot (source of truth for grade names)
- */
-function rebuildGradeSchedules(
-  teacherSchedules: Record<string, TeacherSchedule>,
-  gradesSnapshot: Array<{ id: string; name: string; display_name: string }> | undefined,
-  existingGradeSchedules: Record<string, GradeSchedule>
-): Record<string, GradeSchedule> {
-  const DAYS = ["Mon", "Tues", "Wed", "Thurs", "Fri"]
-
-  // Use grades_snapshot as the source of truth for valid grade names
-  // Fall back to filtering existingGradeSchedules if snapshot not available
-  let gradeNames: string[]
-  if (gradesSnapshot && gradesSnapshot.length > 0) {
-    gradeNames = gradesSnapshot.map(g => g.display_name)
-  } else {
-    // Fallback: filter out phantom grade keys (like "6th-7th Grade")
-    gradeNames = Object.keys(existingGradeSchedules).filter(grade => {
-      const hasRangePattern = /\d+(?:st|nd|rd|th)?[-–]\d+/.test(grade)
-      return !hasRangePattern
-    })
-  }
-
-  const parseGradeDisplay = (gradeDisplay: string) => parseGradeDisplayToNames(gradeDisplay, gradeNames)
-
-  // Initialize empty schedules for each grade
-  const newGradeSchedules: Record<string, GradeSchedule> = {}
-  for (const grade of gradeNames) {
-    newGradeSchedules[grade] = {}
-    for (const day of DAYS) {
-      newGradeSchedules[grade][day] = {}
-    }
-  }
-
-  // Scan all teacher schedules and populate grade schedules
-  // TWO PASSES: First multi-grade (electives), then single-grade (required classes)
-  // This ensures required single-grade classes take priority over electives
-
-  // Pass 1: Multi-grade entries (electives) - accumulate into arrays when multiple share a cell
-  // Blocks are derived from the schedule data itself so both legacy 5-block and
-  // template-driven (e.g. 9-block) generations rebuild correctly.
-  for (const [teacher, schedule] of Object.entries(teacherSchedules)) {
-    for (const day of DAYS) {
-      for (const blockKey of Object.keys(schedule[day] || {})) {
-        const block = Number(blockKey)
-        const entry = schedule[day]?.[block]
-        if (!entry || isOpenBlock(entry[1])) continue
-
-        const gradeDisplay = entry[0]
-        const subject = entry[1]
-        const targetGrades = parseGradeDisplay(gradeDisplay)
-
-        // Only process multi-grade entries in this pass
-        if (targetGrades.length > 1) {
-          for (const grade of targetGrades) {
-            const existing = newGradeSchedules[grade][day][block]
-            const newEntry: [string, string] = [teacher, subject]
-            if (!existing) {
-              // No existing entry - set as single tuple
-              newGradeSchedules[grade][day][block] = newEntry
-            } else if (Array.isArray(existing) && Array.isArray(existing[0])) {
-              // Already an array of tuples - append
-              (existing as [string, string][]).push(newEntry)
-            } else {
-              // Single tuple exists - convert to array
-              newGradeSchedules[grade][day][block] = [existing as [string, string], newEntry]
-            }
-          }
-        }
-      }
-    }
-  }
-
-  // Pass 2: Single-grade entries (required classes) - these take priority
-  for (const [teacher, schedule] of Object.entries(teacherSchedules)) {
-    for (const day of DAYS) {
-      for (const blockKey of Object.keys(schedule[day] || {})) {
-        const block = Number(blockKey)
-        const entry = schedule[day]?.[block]
-        if (!entry || isOpenBlock(entry[1])) continue
-
-        const gradeDisplay = entry[0]
-        const subject = entry[1]
-        const targetGrades = parseGradeDisplay(gradeDisplay)
-
-        // Only process single-grade entries in this pass (overwrites electives)
-        if (targetGrades.length === 1) {
-          for (const grade of targetGrades) {
-            newGradeSchedules[grade][day][block] = [teacher, subject]
-          }
-        }
-      }
-    }
-  }
-
-  return newGradeSchedules
 }
 
 // Convert grade string to number for sorting (K=0, 1st=1, etc.)

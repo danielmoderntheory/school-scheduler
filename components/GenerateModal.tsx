@@ -27,7 +27,7 @@ import { generateSchedulesRemote, type RemoteClassEntry, type ScheduleDiagnostic
 import { DAYS, type Teacher, type TimetableTemplate } from "@/lib/types"
 import { getTemplateBlocks, getTeachableBlocksForGrade, getPairableBlocksForGrade, getBlockConflictsForGrade, getLunchBlocksForGrade } from "@/lib/timetable-utils"
 import { useGeneration } from "@/lib/generation-context"
-import { calculateGradeBlocks, buildCotaughtGroups, type BlockCountClass } from "@/lib/schedule-utils"
+import { calculateGradeBlocks, buildCotaughtGroups, rebuildGradeSchedules, type BlockCountClass } from "@/lib/schedule-utils"
 import toast from "@/lib/toast"
 import Link from "next/link"
 
@@ -591,14 +591,22 @@ export function GenerateModal({
             display_name: g.display_name,
           }))
 
+          // The solver keeps one entry per grade cell, so concurrent electives
+          // overwrite each other. Rebuild from teacher schedules to keep them all.
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const withAllElectives = (option: any) => ({
+            ...option,
+            gradeSchedules: rebuildGradeSchedules(option.teacherSchedules, gradesSnapshot, option.gradeSchedules),
+          })
+
           const saveRes = await fetch("/api/history", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
               quarter_id: quarterId,
               quarter_name: quarterName,
-              options: result.options,
-              allSolutions: result.allSolutions || [],
+              options: result.options.map(withAllElectives),
+              allSolutions: (result.allSolutions || []).map(withAllElectives),
               selected_option: 1,
               classes_snapshot: classesSnapshot,
               rules_snapshot: rulesSnapshot,
