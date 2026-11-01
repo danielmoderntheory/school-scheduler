@@ -47,7 +47,7 @@ function LoginForm() {
   return (
     <Card className="w-full max-w-md">
       <CardHeader className="text-center">
-        <CardTitle className="text-2xl">Journey Schedule</CardTitle>
+        <CardTitle className="text-2xl">School Schedule</CardTitle>
         <CardDescription>Enter the password to continue</CardDescription>
       </CardHeader>
       <CardContent>
@@ -88,7 +88,7 @@ export default function LoginPage() {
       <Suspense fallback={
         <Card className="w-full max-w-md">
           <CardHeader className="text-center">
-            <CardTitle className="text-2xl">Journey Schedule</CardTitle>
+            <CardTitle className="text-2xl">School Schedule</CardTitle>
             <CardDescription>Loading...</CardDescription>
           </CardHeader>
         </Card>

@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-A web application for generating optimized K-11th grade school schedules using constraint programming. Built for Journey School to create quarterly teacher schedules that satisfy complex constraints while minimizing scheduling conflicts.
+A web application for generating optimized K-11th grade school schedules using constraint programming. Built for Jaco School to create quarterly teacher schedules that satisfy complex constraints while minimizing scheduling conflicts.
 
 ## Tech Stack
 

@@ -16,7 +16,7 @@ const poppins = Poppins({
 })
 
 export const metadata: Metadata = {
-  title: 'Journey Schedule',
+  title: 'School Schedule',
   description: 'Generate optimized school schedules',
   icons: {
     icon: '/icon.svg',
