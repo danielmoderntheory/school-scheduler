@@ -10,7 +10,7 @@ export async function GET(
   try {
     const data = await sql`
       SELECT * FROM restrictions
-      WHERE class_id = ${classId}
+      WHERE class_id = ${classId} AND deleted_at IS NULL
     `
     return NextResponse.json(data)
   } catch (error) {
@@ -52,7 +52,7 @@ export async function PUT(
     // Return updated restrictions
     const data = await sql`
       SELECT * FROM restrictions
-      WHERE class_id = ${classId}
+      WHERE class_id = ${classId} AND deleted_at IS NULL
     `
 
     return NextResponse.json(data)

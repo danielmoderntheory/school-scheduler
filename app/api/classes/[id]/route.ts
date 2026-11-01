@@ -60,7 +60,7 @@ export async function PUT(
 
     // Fetch restrictions
     const restrictions = await sql`
-      SELECT * FROM restrictions WHERE class_id = ${data.id}
+      SELECT * FROM restrictions WHERE class_id = ${data.id} AND deleted_at IS NULL
     `
 
     // Fetch grades for the grade_ids

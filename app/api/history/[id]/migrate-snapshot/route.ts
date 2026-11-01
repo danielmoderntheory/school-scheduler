@@ -87,6 +87,7 @@ export async function POST(
           SELECT id, class_id, restriction_type, value
           FROM restrictions
           WHERE class_id = ANY(${classIds})
+            AND deleted_at IS NULL
         `
       : []
 

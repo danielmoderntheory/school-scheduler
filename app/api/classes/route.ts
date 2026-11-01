@@ -71,6 +71,7 @@ export async function GET(request: NextRequest) {
       ? await sql`
           SELECT * FROM restrictions
           WHERE class_id = ANY(${classIds})
+            AND deleted_at IS NULL
         `
       : []
 

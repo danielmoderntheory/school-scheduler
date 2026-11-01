@@ -70,6 +70,7 @@ export async function POST(request: NextRequest) {
           SELECT class_id, restriction_type, value
           FROM restrictions
           WHERE class_id = ANY(${sourceClassIds})
+            AND deleted_at IS NULL
         `
 
         // Build restrictions map by source class id
