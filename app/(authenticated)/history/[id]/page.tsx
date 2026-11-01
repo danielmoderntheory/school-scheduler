@@ -1238,7 +1238,8 @@ export default function HistoryDetailPage() {
                   gradesData.find(g => g.display_name === gradeName)?.id || "",
                   schedule,
                   timetableTemplate,
-                  subjectLabels
+                  subjectLabels,
+                  generation?.stats?.classes_snapshot
                 )
               )
           : Object.entries(option.teacherSchedules)
@@ -7959,6 +7960,7 @@ export default function HistoryDetailPage() {
                     templateRows={resolved}
                     maskedBlockByRow={getMaskedBlockByRowForGrade(timetableTemplate, grade?.id || '')}
                     gradeSchedule={schedule}
+                    classesSnapshot={generation?.stats?.classes_snapshot}
                   />
                 )
               })}
@@ -9728,6 +9730,7 @@ export default function HistoryDetailPage() {
                             templateRows={resolved}
                             maskedBlockByRow={getMaskedBlockByRowForGrade(timetableTemplate, grade?.id || '')}
                             gradeSchedule={schedule}
+                            classesSnapshot={generation?.stats?.classes_snapshot}
                           />
                         )
                       })}

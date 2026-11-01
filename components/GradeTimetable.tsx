@@ -4,6 +4,7 @@ import { TimetableRow } from "@/lib/types"
 import { GradeSchedule } from "@/lib/types"
 import { DAYS } from "@/lib/types"
 import { resolveGradeCellDisplay } from "@/lib/schedule-utils"
+import type { ClassSnapshotEntry } from "@/lib/grade-utils"
 
 interface GradeTimetableProps {
   gradeName: string
@@ -18,6 +19,8 @@ interface GradeTimetableProps {
   // not appear to skip. Rows with no entry (morning meeting, mid-morning
   // break) are genuinely blockless. Absent = no block labels on those rows.
   maskedBlockByRow?: Record<number, number>
+  // For showing an elective period as "Elective" rather than one subject
+  classesSnapshot?: ClassSnapshotEntry[]
 }
 
 export function GradeTimetable({
@@ -27,9 +30,10 @@ export function GradeTimetable({
   templateRows,
   gradeSchedule,
   maskedBlockByRow,
+  classesSnapshot,
 }: GradeTimetableProps) {
   function getCellContent(day: string, blockNumber: number): { subject: string; teacher: string } | null {
-    return resolveGradeCellDisplay(gradeSchedule[day]?.[blockNumber] ?? null)
+    return resolveGradeCellDisplay(gradeSchedule[day]?.[blockNumber] ?? null, classesSnapshot)
   }
 
   // Safety net: find schedule entries whose block has no matching row in this

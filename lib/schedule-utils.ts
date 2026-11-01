@@ -199,6 +199,7 @@ export function getAllGradeEntries(cell: GradeScheduleCell): [string, string][] 
  * - several teachers, ONE subject       -> that subject, teachers joined " / "
  *                                         (a co-taught class, e.g. K/1 Science
  *                                          with two teachers — never an elective)
+ * - a single elective                   -> "Elective" (the period, not one subject)
  * - a single entry                      -> the subject, or Study Hall
  * - empty / OPEN                        -> null (grades have no "OPEN")
  *
@@ -206,7 +207,8 @@ export function getAllGradeEntries(cell: GradeScheduleCell): [string, string][] 
  * same way; callers that only want the subject can ignore `teacher`.
  */
 export function resolveGradeCellDisplay(
-  cell: GradeScheduleCell
+  cell: GradeScheduleCell,
+  classesSnapshot?: ClassSnapshotEntry[]
 ): { subject: string; teacher: string } | null {
   if (!cell) return null
 
@@ -226,12 +228,14 @@ export function resolveGradeCellDisplay(
     const [teacher, subject] = cell[0]
     if (!subject || isOpenBlock(subject)) return null
     if (isStudyHall(subject)) return { subject: BLOCK_TYPE_STUDY_HALL, teacher }
+    if (isClassElective(teacher, subject, classesSnapshot)) return { subject: "Elective", teacher: "" }
     return { subject, teacher }
   }
 
   const [teacher, subject] = cell
   if (!subject || isOpenBlock(subject)) return null
   if (isStudyHall(subject)) return { subject: BLOCK_TYPE_STUDY_HALL, teacher }
+  if (isClassElective(teacher, subject, classesSnapshot)) return { subject: "Elective", teacher: "" }
   return { subject, teacher }
 }
 
@@ -312,7 +316,7 @@ export function getBlockType(entry: ScheduleEntry): typeof BLOCK_TYPE_OPEN | typ
 
 import type { TeacherSchedule, GradeSchedule, OpenBlockLabels, ScheduleOption, StudyHallAssignment } from "./types"
 import { BLOCKS } from "./types"
-import { parseGradeDisplayToNames } from "./grade-utils"
+import { parseGradeDisplayToNames, isClassElective, type ClassSnapshotEntry } from "./grade-utils"
 
 const DAYS_ORDER = ["Mon", "Tues", "Wed", "Thurs", "Fri"]
 /** Legacy 5-block fallback, used only when schedule data contains no block keys. */

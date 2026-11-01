@@ -188,6 +188,14 @@ export function ScheduleGrid({
     }
   }, [labelDropdownCell])
   // Returns [primary, secondary, isMultiple] where isMultiple indicates multiple entries (electives)
+  function asGradeCell(entry: [string, string]): { entry: [string, string] | null; isMultiple: boolean } {
+    // Grade view shows an elective period as "Elective", even with one option
+    if (type === "grade" && entry && isClassElective(entry[0], entry[1], classesSnapshot)) {
+      return { entry: ["", "Elective"], isMultiple: true }
+    }
+    return { entry, isMultiple: false }
+  }
+
   function getCellContent(day: string, block: number): { entry: [string, string] | null; isMultiple: boolean } {
     const raw = schedule[day]?.[block]
     if (!raw) return { entry: null, isMultiple: false }
@@ -211,10 +219,10 @@ export function ScheduleGrid({
           return { entry: ["", "Elective"], isMultiple: true }
         }
         // Single entry or only OPEN/Study Hall - return first
-        return { entry: entries[0], isMultiple: false }
+        return asGradeCell(entries[0])
       }
       // Old format: single tuple [string, string]
-      return { entry: raw as [string, string], isMultiple: false }
+      return asGradeCell(raw as [string, string])
     }
 
     return { entry: null, isMultiple: false }

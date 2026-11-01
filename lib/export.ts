@@ -1,7 +1,7 @@
 import XLSX from "xlsx-js-style"
 import type { ScheduleOption, TeacherSchedule, GradeSchedule, OpenBlockLabels, TimetableRow, TimetableTemplate } from "./types"
 import { BLOCK_TYPE_OPEN, BLOCK_TYPE_STUDY_HALL, isOpenBlock, isStudyHall, isScheduledClass, getOpenBlockAt, getOpenBlockLabel, getScheduleBlockNumbers, getTeacherLunchCandidates, designateTeacherLunch, type LunchContext } from "./schedule-utils"
-import { formatGradeDisplayCompact, parseGradeDisplayToNames } from "./grade-utils"
+import { formatGradeDisplayCompact, parseGradeDisplayToNames, isClassElective, type ClassSnapshotEntry } from "./grade-utils"
 import { resolveRowsForGrade, getTemplateBlocks, getTeachableBlocksForGrade, getLunchBlocksForGrade, getBlockConflictsForGrade, getUnavailableBlockLabelsForGrade } from "./timetable-utils"
 
 const DAYS = ["Mon", "Tues", "Wed", "Thurs", "Fri"]
@@ -369,7 +369,7 @@ function getOpenLabelForCell(
 
 // Format grade schedule cell - handles array format [[teacher, subject], ...]
 // For grade schedules: entries are [teacher, subject] pairs
-function formatGradeCell(raw: unknown): string {
+function formatGradeCell(raw: unknown, classesSnapshot?: ClassSnapshotEntry[]): string {
   if (!raw) return ""
 
   // Handle array format (new)
@@ -391,6 +391,7 @@ function formatGradeCell(raw: unknown): string {
     const [teacher, subject] = entries[0]
     if (isOpenBlock(subject)) return BLOCK_TYPE_OPEN
     if (isStudyHall(subject)) return `${teacher} - ${BLOCK_TYPE_STUDY_HALL}`
+    if (isClassElective(teacher, subject, classesSnapshot)) return "Elective"
     return `${teacher} - ${subject}`
   }
 
@@ -505,6 +506,7 @@ export interface ExportMetadata {
   generatedAt?: string
   timetableTemplate?: TimetableTemplate
   grades?: { id: string; name: string; display_name: string; sort_order: number; homeroom_teachers?: string }[]
+  classesSnapshot?: ClassSnapshotEntry[]
 }
 
 export function generateXLSX(option: ScheduleOption, metadata?: ExportMetadata): Blob {
@@ -709,7 +711,7 @@ export function generateXLSX(option: ScheduleOption, metadata?: ExportMetadata):
       gradeRowInfo.push({ type: "block", row: gradeData.length })
       const row: (string | number)[] = [`Block ${block}`]
       DAYS.forEach((day) => {
-        const cell = formatGradeCell(schedule[day]?.[block])
+        const cell = formatGradeCell(schedule[day]?.[block], metadata?.classesSnapshot)
         row.push(
           isLunchExportCell(cell, lunchBlocks, block) ? "Lunch"
             : isUnavailableExportCell(cell, unavailableBlocks, block) ? (unavailableLabels?.[block] ?? "—")
@@ -812,6 +814,8 @@ export function generateXLSX(option: ScheduleOption, metadata?: ExportMetadata):
                   row.push("")
                 } else if (isStudyHall(subject)) {
                   row.push(`Study Hall\n${teacher}`)
+                } else if (isClassElective(teacher, subject, metadata?.classesSnapshot)) {
+                  row.push("Elective")
                 } else {
                   row.push(`${subject}\n${teacher}`)
                 }
@@ -825,6 +829,8 @@ export function generateXLSX(option: ScheduleOption, metadata?: ExportMetadata):
               row.push("")
             } else if (isStudyHall(subject)) {
               row.push(`Study Hall\n${teacher}`)
+            } else if (isClassElective(teacher, subject, metadata?.classesSnapshot)) {
+              row.push("Elective")
             } else {
               row.push(`${subject}\n${teacher}`)
             }
@@ -969,7 +975,7 @@ export function generateCSV(option: ScheduleOption, metadata?: ExportMetadata): 
     exportBlocks.forEach((block) => {
       const row: string[] = [`Block ${block}`]
       DAYS.forEach((day) => {
-        const rawCell = formatGradeCell(schedule[day]?.[block])
+        const rawCell = formatGradeCell(schedule[day]?.[block], metadata?.classesSnapshot)
         const cell = isLunchExportCell(rawCell, lunchBlocks, block) ? "Lunch"
           : isUnavailableExportCell(rawCell, unavailableBlocks, block) ? (unavailableLabels?.[block] ?? "—")
           : rawCell

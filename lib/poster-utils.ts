@@ -31,7 +31,7 @@ import {
   type LunchContext,
 } from "./schedule-utils"
 import type { OpenBlockLabels } from "./types"
-import { parseGradeDisplayToNames } from "./grade-utils"
+import { parseGradeDisplayToNames, type ClassSnapshotEntry } from "./grade-utils"
 import {
   getBlockTimesForGrade,
   getSharedBlockTimes,
@@ -123,7 +123,8 @@ export function buildGradePoster(
   gradeId: string,
   gradeSchedule: GradeSchedule,
   template: Pick<TimetableTemplate, "rows"> | null | undefined,
-  subjectLabels?: SubjectLabels
+  subjectLabels?: SubjectLabels,
+  classesSnapshot?: ClassSnapshotEntry[]
 ): PosterData {
   const rows: PosterRow[] = []
   const templateRows: TimetableRow[] = template?.rows?.length
@@ -136,7 +137,7 @@ export function buildGradePoster(
       continue
     }
     const cells = DAYS.map(day => {
-      const content = resolveGradeCellDisplay(gradeSchedule[day]?.[row.blockNumber!] ?? null)
+      const content = resolveGradeCellDisplay(gradeSchedule[day]?.[row.blockNumber!] ?? null, classesSnapshot)
       return content ? { main: label(content.subject, subjectLabels) } : null
     })
     rows.push({ kind: "block", time: formatTime(row.time), cells })

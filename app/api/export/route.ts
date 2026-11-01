@@ -54,6 +54,7 @@ export async function GET(request: NextRequest) {
       generatedAt: generation.generated_at,
       timetableTemplate: templates[0] || undefined,
       grades: grades || undefined,
+      classesSnapshot: generation.stats?.classes_snapshot,
     }
 
     if (format === "csv") {
