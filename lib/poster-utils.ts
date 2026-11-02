@@ -112,8 +112,8 @@ const ORDINAL_GRADE = /^\d+(st|nd|rd|th)(\s*[-\/]\s*\d+(st|nd|rd|th))?$/i
 /**
  * One poster for one grade, straight from the grade's RESOLVED template rows:
  * the grade's own bell times, its own lunch band, its own end-of-day row. Cells
- * show the subject only (matching the printed cards handed to students) — the
- * teacher name lives in the on-screen timetable view, not here.
+ * show the subject with the teacher beneath it, like the regular export. Electives
+ * name no teacher, since each one has several.
  *
  * Blocks the grade resolves no row for are simply absent, so a grade never sees
  * another band's window.
@@ -138,7 +138,9 @@ export function buildGradePoster(
     }
     const cells = DAYS.map(day => {
       const content = resolveGradeCellDisplay(gradeSchedule[day]?.[row.blockNumber!] ?? null, classesSnapshot)
-      return content ? { main: label(content.subject, subjectLabels) } : null
+      return content
+        ? { main: label(content.subject, subjectLabels), sub: content.teacher || undefined }
+        : null
     })
     rows.push({ kind: "block", time: formatTime(row.time), cells })
   }
